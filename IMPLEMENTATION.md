@@ -496,13 +496,24 @@ Current Rust output after display-driven flow-content boxes:
   box-tree-driven layout. Today flow boxes still flatten to a block list, and the
   table path keeps its specialized layout.
 
+Expanded CSS value coverage (additive; fixture byte-identical):
+
+- Colors: `rgb()`/`rgba()`/`hsl()`/`hsla()` (comma or space/slash syntax,
+  percentage channels, alpha ignored), 4/8-digit hex, and a larger named-color
+  set — on top of the existing hex and six names.
+- `display: none` (tables and flow content), via a `hidden` flag computed in the
+  style pass (no extra per-cell cost).
+- `font-weight`: `bold`/`bolder`/numeric ≥ 600 all render bold.
+- `text-align`: adds `justify` (→ left for now), `start` (→ left), `end` (→ right).
+- Headings `h3`–`h6` with browser-like default sizes.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
   browser render. The fixture proves the low-memory/concurrency direction is
-  viable, but the engine still needs a complete CSS parser/cascade, accurate
-  font metrics, font embedding, better row height logic, and visual validation
-  before it can replace Chromium for documents like this.
+  viable, but the engine still needs nested box-tree layout, font embedding,
+  images, and visual validation before it can replace Chromium for documents
+  like this.
 
 ## Roadmap (foundation-first, ordered)
 

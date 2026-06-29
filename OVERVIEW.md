@@ -181,7 +181,10 @@ cores. (Measured: ~20 ms per PDF at 16 workers, ~50 MB RAM, for the 1.8 MB /
 - Real CSS parsing + cascade: selectors (tag/class), specificity, source order,
   `!important`, comments/strings, `@media`, multiple `<style>` blocks.
 - Inheritance (color, font-size, text-align, etc. flow from parents).
-- `display: none`.
+- `display: none` (tables and flow content).
+- Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
+- `font-weight` (bold / numeric ≥ 600), `text-align` (left/center/right/justify/
+  start/end), headings `h1`–`h6`.
 - Tables: rows, cells, colspans, `<thead>/<tbody>/<tfoot>`, repeated headers,
   per-cell styles, borders, backgrounds, alignment, text wrapping/clipping.
 - Flow content: headings/paragraphs/lists with computed font-size, color, align.
