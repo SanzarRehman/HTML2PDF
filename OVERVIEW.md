@@ -168,8 +168,8 @@ htmltopdf reg-2-9-1.html out.pdf
 ```
 
 Each conversion is fully independent, so running 16 of them at once just uses 16
-cores. (Measured: ~13 ms per PDF, ~35–50 MB RAM, for the 1.8 MB / 22k-cell test
-spreadsheet.)
+cores. (Measured: ~20 ms per PDF at 16 workers, ~50 MB RAM, for the 1.8 MB /
+22k-cell test spreadsheet — far below a browser for the same document.)
 
 ---
 

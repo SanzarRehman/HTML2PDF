@@ -171,7 +171,7 @@ pub fn parse(input: &str) -> Document {
 
     let mut blocks = tables_from_dom(&dom, &stylesheet, &computed);
     if blocks.is_empty() {
-        blocks = blocks_from_dom(&dom, &stylesheet, &computed);
+        blocks = blocks_from_dom(&dom, &computed);
     }
 
     Document {
@@ -191,13 +191,9 @@ pub fn parse(input: &str) -> Document {
 /// Each emitted block carries the computed style of the element that opened it,
 /// so generic content finally honors CSS color, font size, and text alignment.
 /// A fully nested box tree with block/inline layout is the remaining follow-up.
-fn blocks_from_dom(
-    dom: &crate::dom::Dom,
-    stylesheet: &Stylesheet,
-    computed: &[CellStyle],
-) -> Vec<Block> {
+fn blocks_from_dom(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Vec<Block> {
     let mut flow = FlowBuilder::default();
-    visit_flow(dom, dom.root(), stylesheet, computed, &mut flow);
+    visit_flow(dom, dom.root(), computed, &mut flow);
     flow.flush();
     flow.blocks
 }
@@ -258,8 +254,7 @@ impl FlowBuilder {
 fn visit_flow(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
-    stylesheet: &Stylesheet,
-    computed: &[CellStyle],
+    computed: &ComputedStyles,
     flow: &mut FlowBuilder,
 ) {
     use crate::dom::NodeData;
@@ -269,41 +264,39 @@ fn visit_flow(
         NodeData::Text(text) => flow.text.push_str(text),
         NodeData::Document => {
             for &child in &node.children {
-                visit_flow(dom, child, stylesheet, computed, flow);
+                visit_flow(dom, child, computed, flow);
             }
         }
         NodeData::Element { name, .. } => {
             // Non-rendered subtrees and `display: none` contribute nothing.
-            if matches!(name.as_str(), "head" | "script" | "style")
-                || is_display_none(dom, id, stylesheet)
-            {
+            if matches!(name.as_str(), "head" | "script" | "style") || computed.hidden[id] {
                 return;
             }
 
             let recurse = |flow: &mut FlowBuilder| {
                 for &child in &node.children {
-                    visit_flow(dom, child, stylesheet, computed, flow);
+                    visit_flow(dom, child, computed, flow);
                 }
             };
 
             match name.as_str() {
                 "h1" => {
-                    flow.open(FlowKind::Heading1, computed[id]);
+                    flow.open(FlowKind::Heading1, computed.style[id]);
                     recurse(flow);
                     flow.close();
                 }
                 "h2" => {
-                    flow.open(FlowKind::Heading2, computed[id]);
+                    flow.open(FlowKind::Heading2, computed.style[id]);
                     recurse(flow);
                     flow.close();
                 }
                 "p" | "div" | "section" | "article" | "main" | "header" | "footer" => {
-                    flow.open(FlowKind::Paragraph, computed[id]);
+                    flow.open(FlowKind::Paragraph, computed.style[id]);
                     recurse(flow);
                     flow.close();
                 }
                 "li" => {
-                    flow.open(FlowKind::Paragraph, computed[id]);
+                    flow.open(FlowKind::Paragraph, computed.style[id]);
                     if flow.text.trim().is_empty() {
                         flow.text.push_str("- ");
                     }
@@ -389,7 +382,7 @@ fn find_css_rule<'a>(input: &'a str, selector: &str) -> Option<&'a str> {
 fn tables_from_dom(
     dom: &crate::dom::Dom,
     stylesheet: &Stylesheet,
-    computed: &[CellStyle],
+    computed: &ComputedStyles,
 ) -> Vec<Block> {
     let mut rows = Vec::new();
     collect_table_rows(
@@ -408,9 +401,14 @@ fn collect_table_rows(
     id: crate::dom::NodeId,
     section: TableSection,
     stylesheet: &Stylesheet,
-    computed: &[CellStyle],
+    computed: &ComputedStyles,
     rows: &mut Vec<Block>,
 ) {
+    // `display: none` hides the element and its whole subtree.
+    if computed.hidden[id] {
+        return;
+    }
+
     let node = dom.node(id);
     let mut child_section = section;
 
@@ -487,9 +485,6 @@ fn display_to_table_section(display: Option<CssDisplay>) -> Option<TableSection>
     }
 }
 
-fn is_display_none(dom: &crate::dom::Dom, id: crate::dom::NodeId, stylesheet: &Stylesheet) -> bool {
-    computed_display_for_node(dom, id, stylesheet) == Some(CssDisplay::None)
-}
 
 fn computed_display_for_node(
     dom: &crate::dom::Dom,
@@ -512,13 +507,17 @@ fn computed_display_for_node(
 fn cells_from_row(
     dom: &crate::dom::Dom,
     tr_id: crate::dom::NodeId,
-    computed: &[CellStyle],
+    computed: &ComputedStyles,
 ) -> Vec<TableCell> {
     let mut cells = Vec::new();
 
     for &child in &dom.node(tr_id).children {
         let node = dom.node(child);
         if !matches!(node.tag(), Some("td") | Some("th")) {
+            continue;
+        }
+        // Skip cells hidden by `display: none`.
+        if computed.hidden[child] {
             continue;
         }
 
@@ -535,7 +534,7 @@ fn cells_from_row(
         // The cell's computed style already includes properties inherited from
         // its ancestors; layer the spreadsheet class alignment heuristic on top
         // only where neither the cascade nor inheritance set an alignment.
-        let mut style = computed[child];
+        let mut style = computed.style[child];
         infer_cell_alignment(&mut style, &node.classes().collect::<Vec<_>>());
 
         cells.push(TableCell {
@@ -568,41 +567,55 @@ fn collect_text(dom: &crate::dom::Dom, id: crate::dom::NodeId, out: &mut String)
 /// the node itself does not set them, and its non-inheritable properties
 /// (borders, padding, background, overflow, vertical alignment) from its own
 /// cascade only — matching CSS inheritance.
-fn compute_inherited_styles(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> Vec<CellStyle> {
-    let mut computed = vec![CellStyle::default(); dom.nodes.len()];
+/// Per-node computed style and a `hidden` flag (true when the node or any
+/// ancestor has `display: none`), both produced in one top-down pass.
+struct ComputedStyles {
+    style: Vec<CellStyle>,
+    hidden: Vec<bool>,
+}
+
+fn compute_inherited_styles(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> ComputedStyles {
+    let mut out = ComputedStyles {
+        style: vec![CellStyle::default(); dom.nodes.len()],
+        hidden: vec![false; dom.nodes.len()],
+    };
     let mut cache = HashMap::new();
     compute_inherited_node(
         dom,
         dom.root(),
         CellStyle::default(),
+        false,
         stylesheet,
         &mut cache,
-        &mut computed,
+        &mut out,
     );
-    computed
+    out
 }
 
 fn compute_inherited_node(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
     inherited: CellStyle,
+    parent_hidden: bool,
     stylesheet: &Stylesheet,
-    cache: &mut HashMap<String, CellStyle>,
-    computed: &mut [CellStyle],
+    cache: &mut HashMap<String, (CellStyle, bool)>,
+    out: &mut ComputedStyles,
 ) {
     let node = dom.node(id);
-    let style = match &node.data {
+    let (style, hidden) = match &node.data {
         crate::dom::NodeData::Element { .. } => {
-            inherit_style(&inherited, &element_own_style(dom, id, stylesheet, cache))
+            let (own, display_none) = element_own(dom, id, stylesheet, cache);
+            (inherit_style(&inherited, &own), parent_hidden || display_none)
         }
-        // Text and document nodes carry no cascade of their own; they simply
-        // pass the inherited style through to descendants.
-        _ => inherited,
+        // Text and document nodes carry no cascade of their own; they inherit
+        // their parent's style and hidden state.
+        _ => (inherited, parent_hidden),
     };
-    computed[id] = style;
+    out.style[id] = style;
+    out.hidden[id] = hidden;
 
     for &child in &node.children {
-        compute_inherited_node(dom, child, style, stylesheet, cache, computed);
+        compute_inherited_node(dom, child, style, hidden, stylesheet, cache, out);
     }
 }
 
@@ -629,38 +642,45 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
     }
 }
 
-/// An element's own cascaded style (matched rules then inline `style`), without
-/// inheritance or the spreadsheet alignment heuristic. Cached by the element's
-/// (tag, class, inline) identity, which repeats heavily in spreadsheet exports.
-fn element_own_style(
+/// An element's own cascaded style (matched rules then inline `style`) and
+/// whether its computed `display` is `none`, without inheritance or the
+/// spreadsheet alignment heuristic. Cached by the element's (tag, class, inline)
+/// identity, which repeats heavily in spreadsheet exports.
+fn element_own(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
     stylesheet: &Stylesheet,
-    cache: &mut HashMap<String, CellStyle>,
-) -> CellStyle {
+    cache: &mut HashMap<String, (CellStyle, bool)>,
+) -> (CellStyle, bool) {
     let node = dom.node(id);
     let tag = node.tag().unwrap_or_default();
     let class_attr = node.attr("class").unwrap_or_default();
     let inline_style = node.attr("style").unwrap_or_default();
 
     let key = format!("{tag}|{class_attr}|{inline_style}");
-    if let Some(style) = cache.get(&key) {
-        return *style;
+    if let Some(result) = cache.get(&key) {
+        return *result;
     }
 
     let classes = class_attr.split_whitespace().collect::<Vec<_>>();
-    let mut declarations = stylesheet.computed_declarations(tag, &classes);
+    let declarations = stylesheet.computed_declarations(tag, &classes);
     let mut style = declarations.resolved().cell;
+    let mut display = declarations.resolved().display;
 
     if !inline_style.is_empty() {
-        declarations = StyleDeclarations::default();
-        declarations.normal.cell = style;
-        declarations.merge_inline(parse_style_declarations(inline_style));
-        style = declarations.resolved().cell;
+        let inline = parse_style_declarations(inline_style);
+        // Inline declarations layer on top of the resolved rule style (same
+        // logic as before), and an inline `display` overrides the rule's.
+        let mut merged = StyleDeclarations::default();
+        merged.normal.cell = style;
+        merged.merge_inline(inline);
+        style = merged.resolved().cell;
+        display = inline.resolved().display.or(display);
     }
 
-    cache.insert(key, style);
-    style
+    let result = (style, display == Some(CssDisplay::None));
+    cache.insert(key, result);
+    result
 }
 
 /// Spreadsheet exports encode numeric/centered cells with short class letters
@@ -1638,6 +1658,33 @@ mod tests {
         assert_eq!(document.blocks[0].cells.len(), 2);
         assert_eq!(document.blocks[0].cells[0].text, "Student ID");
         assert_eq!(document.blocks[0].cells[0].colspan, 2);
+    }
+
+    #[test]
+    fn hides_display_none_rows_and_cells() {
+        let document = parse(
+            r#"
+            <style>
+            tr.gone { display: none; }
+            td.gone { display: none; }
+            </style>
+            <table>
+              <tr><td>a</td><td class="gone">hidden-cell</td><td>c</td></tr>
+              <tr class="gone"><td>whole-row-hidden</td></tr>
+              <tr><td>d</td></tr>
+            </table>
+            "#,
+        );
+
+        // Hidden row dropped entirely; hidden cell removed from its row.
+        assert_eq!(document.blocks.len(), 2);
+        let first: Vec<&str> = document.blocks[0]
+            .cells
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(first, vec!["a", "c"]);
+        assert_eq!(document.blocks[1].cells[0].text, "d");
     }
 
     #[test]
