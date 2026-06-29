@@ -122,7 +122,10 @@ Costs:
    reused, so output is unchanged while comments, strings/`url()`, nested
    blocks, and `@media` are now handled correctly. **Done.** (`@page`/column
    geometry still uses a substring scan; folding it in is a follow-up.)
-6. Computed-style model with inheritance.
+6. Computed-style model with inheritance: a top-down DOM pass resolves each
+   node's style, inheriting color/font/text-align/white-space/wrapping from the
+   parent and taking border/padding/background/overflow/vertical-align from the
+   node's own cascade. Table cells read the precomputed style. **Done.**
 7. Box tree from computed `display`; layout consumes the box tree.
 8. Font embedding/subsetting with `ttf-parser`/`fontdb`.
 9. Bounded pre-layout JavaScript stage.

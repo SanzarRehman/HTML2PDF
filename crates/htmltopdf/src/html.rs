@@ -374,20 +374,20 @@ fn find_css_rule<'a>(input: &'a str, selector: &str) -> Option<&'a str> {
 
 /// Extract table rows and cells from the real DOM.
 ///
-/// A single depth-first walk tracks the current table section (the `<thead>` /
-/// `<tbody>` / `<tfoot>` ancestor, with its CSS `display` group honored) and
-/// emits one `Block` per `<tr>`. This replaces the former raw-text `<tr>`/`<td>`
-/// scanner; the cascade that resolves cell styles is still the substring-indexed
-/// `Stylesheet` and moves to `cssparser` in the next step (ADR 0002).
+/// First computes every node's inherited style in one top-down pass, then walks
+/// the tree tracking the current table section (the `<thead>` / `<tbody>` /
+/// `<tfoot>` ancestor, with its CSS `display` group honored) and emits one
+/// `Block` per `<tr>`. Cell styles are looked up from the precomputed table so
+/// each cell carries properties inherited from its ancestors (ADR 0002 step 6).
 fn tables_from_dom(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> Vec<Block> {
+    let computed = compute_inherited_styles(dom, stylesheet);
     let mut rows = Vec::new();
-    let mut cell_style_cache = HashMap::new();
     collect_table_rows(
         dom,
         dom.root(),
         TableSection::Body,
         stylesheet,
-        &mut cell_style_cache,
+        &computed,
         &mut rows,
     );
     rows
@@ -398,7 +398,7 @@ fn collect_table_rows(
     id: crate::dom::NodeId,
     section: TableSection,
     stylesheet: &Stylesheet,
-    cache: &mut HashMap<String, CellStyle>,
+    computed: &[CellStyle],
     rows: &mut Vec<Block>,
 ) {
     let node = dom.node(id);
@@ -417,7 +417,7 @@ fn collect_table_rows(
                 .unwrap_or(default);
         }
         Some("tr") => {
-            let cells = cells_from_row(dom, id, stylesheet, cache);
+            let cells = cells_from_row(dom, id, computed);
             if !cells.is_empty() {
                 rows.push(Block {
                     kind: row_kind(dom, id, section, stylesheet),
@@ -430,7 +430,7 @@ fn collect_table_rows(
     }
 
     for &child in &node.children {
-        collect_table_rows(dom, child, child_section, stylesheet, cache, rows);
+        collect_table_rows(dom, child, child_section, stylesheet, computed, rows);
     }
 }
 
@@ -495,8 +495,7 @@ fn computed_display_for_node(
 fn cells_from_row(
     dom: &crate::dom::Dom,
     tr_id: crate::dom::NodeId,
-    stylesheet: &Stylesheet,
-    cache: &mut HashMap<String, CellStyle>,
+    computed: &[CellStyle],
 ) -> Vec<TableCell> {
     let mut cells = Vec::new();
 
@@ -516,10 +515,16 @@ fn cells_from_row(
             .unwrap_or(1)
             .max(1);
 
+        // The cell's computed style already includes properties inherited from
+        // its ancestors; layer the spreadsheet class alignment heuristic on top
+        // only where neither the cascade nor inheritance set an alignment.
+        let mut style = computed[child];
+        infer_cell_alignment(&mut style, &node.classes().collect::<Vec<_>>());
+
         cells.push(TableCell {
             text,
             colspan,
-            style: cell_style_for_node(dom, child, stylesheet, cache),
+            style,
         });
     }
 
@@ -539,7 +544,78 @@ fn collect_text(dom: &crate::dom::Dom, id: crate::dom::NodeId, out: &mut String)
     }
 }
 
-fn cell_style_for_node(
+/// Compute each node's inherited style in a single top-down pass.
+///
+/// A node's computed style takes its inheritable properties (color, font size,
+/// font weight, text alignment, white-space, and wrapping) from its parent when
+/// the node itself does not set them, and its non-inheritable properties
+/// (borders, padding, background, overflow, vertical alignment) from its own
+/// cascade only — matching CSS inheritance.
+fn compute_inherited_styles(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> Vec<CellStyle> {
+    let mut computed = vec![CellStyle::default(); dom.nodes.len()];
+    let mut cache = HashMap::new();
+    compute_inherited_node(
+        dom,
+        dom.root(),
+        CellStyle::default(),
+        stylesheet,
+        &mut cache,
+        &mut computed,
+    );
+    computed
+}
+
+fn compute_inherited_node(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    inherited: CellStyle,
+    stylesheet: &Stylesheet,
+    cache: &mut HashMap<String, CellStyle>,
+    computed: &mut [CellStyle],
+) {
+    let node = dom.node(id);
+    let style = match &node.data {
+        crate::dom::NodeData::Element { .. } => {
+            inherit_style(&inherited, &element_own_style(dom, id, stylesheet, cache))
+        }
+        // Text and document nodes carry no cascade of their own; they simply
+        // pass the inherited style through to descendants.
+        _ => inherited,
+    };
+    computed[id] = style;
+
+    for &child in &node.children {
+        compute_inherited_node(dom, child, style, stylesheet, cache, computed);
+    }
+}
+
+/// Combine a parent's computed style with an element's own cascaded style.
+fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
+    CellStyle {
+        // Inheritable: the element's own value wins, else the parent's.
+        align: own.align.or(parent.align),
+        font_size: own.font_size.or(parent.font_size),
+        color: own.color.or(parent.color),
+        white_space: own.white_space.or(parent.white_space),
+        overflow_wrap: own.overflow_wrap.or(parent.overflow_wrap),
+        word_break: own.word_break.or(parent.word_break),
+        bold: own.bold || parent.bold,
+        // Non-inheritable: the element's own value only.
+        vertical_align: own.vertical_align,
+        border: own.border,
+        overflow: own.overflow,
+        padding_left: own.padding_left,
+        padding_right: own.padding_right,
+        padding_top: own.padding_top,
+        padding_bottom: own.padding_bottom,
+        background_color: own.background_color,
+    }
+}
+
+/// An element's own cascaded style (matched rules then inline `style`), without
+/// inheritance or the spreadsheet alignment heuristic. Cached by the element's
+/// (tag, class, inline) identity, which repeats heavily in spreadsheet exports.
+fn element_own_style(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
     stylesheet: &Stylesheet,
@@ -550,8 +626,6 @@ fn cell_style_for_node(
     let class_attr = node.attr("class").unwrap_or_default();
     let inline_style = node.attr("style").unwrap_or_default();
 
-    // Spreadsheet exports reuse a handful of class combinations across thousands
-    // of cells, so cache the resolved style by (tag, class, inline) identity.
     let key = format!("{tag}|{class_attr}|{inline_style}");
     if let Some(style) = cache.get(&key) {
         return *style;
@@ -560,14 +634,6 @@ fn cell_style_for_node(
     let classes = class_attr.split_whitespace().collect::<Vec<_>>();
     let mut declarations = stylesheet.computed_declarations(tag, &classes);
     let mut style = declarations.resolved().cell;
-
-    if style.align.is_none() {
-        if classes.iter().any(|class| matches!(*class, "n" | "f")) {
-            style.align = Some(TextAlign::Right);
-        } else if classes.iter().any(|class| matches!(*class, "b" | "e")) {
-            style.align = Some(TextAlign::Center);
-        }
-    }
 
     if !inline_style.is_empty() {
         declarations = StyleDeclarations::default();
@@ -578,6 +644,20 @@ fn cell_style_for_node(
 
     cache.insert(key, style);
     style
+}
+
+/// Spreadsheet exports encode numeric/centered cells with short class letters
+/// (`n`/`f` → right, `b`/`e` → center). Apply that only where no alignment has
+/// been set by the cascade or inheritance.
+fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
+    if style.align.is_some() {
+        return;
+    }
+    if classes.iter().any(|class| matches!(*class, "n" | "f")) {
+        style.align = Some(TextAlign::Right);
+    } else if classes.iter().any(|class| matches!(*class, "b" | "e")) {
+        style.align = Some(TextAlign::Center);
+    }
 }
 
 fn parse_css_number_after(input: &str, marker: &str) -> Option<f32> {
@@ -1639,6 +1719,74 @@ mod tests {
 
         assert_eq!(style.align, Some(super::TextAlign::Right));
         assert_eq!(style.font_size, Some(12.0));
+    }
+
+    #[test]
+    fn inherits_color_and_font_size_from_ancestors() {
+        let document = parse(
+            r#"
+            <style>
+            table { color: #123456; font-size: 13pt; }
+            </style>
+            <table><tr><td>x</td></tr></table>
+            "#,
+        );
+        let style = document.blocks[0].cells[0].style;
+
+        assert_eq!(
+            style.color,
+            Some(crate::color::Color::from_rgb_u8(0x12, 0x34, 0x56))
+        );
+        assert_eq!(style.font_size, Some(13.0));
+    }
+
+    #[test]
+    fn own_style_overrides_inherited() {
+        let document = parse(
+            r#"
+            <style>
+            table { font-size: 13pt; }
+            td.big { font-size: 20pt; }
+            </style>
+            <table><tr><td class="big">x</td></tr></table>
+            "#,
+        );
+
+        assert_eq!(document.blocks[0].cells[0].style.font_size, Some(20.0));
+    }
+
+    #[test]
+    fn inherits_text_align_through_intermediate_ancestors() {
+        let document = parse(
+            r#"
+            <style>
+            table { text-align: center; }
+            </style>
+            <table><tbody><tr><td>x</td></tr></tbody></table>
+            "#,
+        );
+
+        assert_eq!(
+            document.blocks[0].cells[0].style.align,
+            Some(super::TextAlign::Center)
+        );
+    }
+
+    #[test]
+    fn does_not_inherit_non_inheritable_properties() {
+        // border and background-color must not flow from an ancestor to a cell.
+        let document = parse(
+            r#"
+            <style>
+            table { border: 1px solid black; background-color: #abcdef; }
+            </style>
+            <table><tr><td>x</td></tr></table>
+            "#,
+        );
+        let style = document.blocks[0].cells[0].style;
+
+        assert!(!style.border);
+        assert_eq!(style.background_color, None);
     }
 
     #[test]

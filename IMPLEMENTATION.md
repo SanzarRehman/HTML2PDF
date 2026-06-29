@@ -85,8 +85,8 @@ parser, DOM, CSS, cascade, and font metrics get rebuilt. See
 - [x] Route generic block extraction (headings/paragraphs/lists) through the DOM.
 - [x] Route table row/cell extraction through the DOM (replace raw-text scan).
 - [x] Skip the RcDom intermediate with a custom `html5ever` `TreeSink` (RAM).
-- [ ] Replace substring CSS rule lookup with a `cssparser` stylesheet model.
-- [ ] Build computed-style cascade over the DOM (specificity + inheritance).
+- [x] Replace substring CSS rule lookup with a `cssparser` stylesheet model.
+- [x] Build computed-style cascade over the DOM (specificity + inheritance).
 - [ ] Derive a box tree from computed `display`.
 
 ## Previous Sprint: Minimal Vertical Slice
@@ -457,6 +457,25 @@ Current Rust output after the `cssparser`-based stylesheet:
 - Remaining: `@page` margins and column widths still use the `find_css_rule`
   substring scan; folding them into the `cssparser` stylesheet is the follow-up.
 
+Current Rust output after the computed-style inheritance pass:
+
+- Command: `target/release/htmltopdf reg-2-9-1.html out/reg-inherit.pdf`
+- Result: succeeds; output **byte-identical** to the previous render.
+- A single top-down DOM pass now computes every node's style: inheritable
+  properties (color, font size, font weight, text alignment, white-space,
+  wrapping) fall back to the parent's computed value; non-inheritable ones
+  (border, padding, background, overflow, vertical-align) come from the node's
+  own cascade only. Table cells read their precomputed style.
+- Why the fixture is unchanged: its only inheritable ancestor declaration is
+  `html { font-size: 11pt }`, and all 22,166 cells set their own font size via a
+  style class, so the inherited value is always overridden. No ancestor sets an
+  inheritable `color`/`text-align`/etc. that reaches a cell.
+- Peak RSS, single render: about 49 MB (was ~44 MB) for the added per-node
+  computed-style vector; throughput unchanged (~13 ms/PDF at 16 workers).
+- New behavior, covered by tests: `color`/`font-size`/`text-align` inherit from
+  ancestors (including through an implied `<tbody>`), an element's own value
+  overrides the inherited one, and `border`/`background-color` do not inherit.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -480,7 +499,7 @@ that attach cleanly once the spine exists.
 - [x] Replace the hand-rolled CSS tokenizer with `cssparser`; source `<style>`
       CSS from the DOM. (Cascade model, selectors, and value parsing reused.)
 - [ ] Migrate `@page` / column-width geometry off `find_css_rule` substring scan.
-- [ ] Add inheritance and computed-style model over the DOM.
+- [x] Add inheritance and computed-style model over the DOM.
 - [ ] Derive a box tree from computed `display`; layout consumes the box tree.
 - [ ] Add font embedding + subsetting (`ttf-parser`/`fontdb`); then real metrics
       for embedded fonts.
