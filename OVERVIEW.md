@@ -87,7 +87,9 @@ We keep dependencies tiny on purpose. Here is **everything** we pull in:
 | --- | --- | --- |
 | **html5ever** | Spec-correct HTML parsing (the same engine family as Servo). Handles malformed/nested tags, entities (`&amp;`), implied `<tbody>`, etc. | `dom.rs` |
 | **cssparser** | Spec-correct CSS tokenizing (also from Servo/Stylo). Handles comments, strings, `url()`, `@media`, `!important`. | `html.rs` |
-| **flate2** | Zip-compresses the PDF page content streams (`/FlateDecode`). | `pdf.rs` |
+| **ttf-parser** | Reads TrueType/OpenType metrics (glyph advances, ascent/descent, bbox) for layout + the PDF font descriptor, when a font is embedded. | `font.rs` |
+| **fontdb** | Resolves a font *family name* (e.g. `Georgia`) to a font file from the system database. | `font.rs` |
+| **flate2** | Zip-compresses the PDF page content streams and embedded font (`/FlateDecode`). | `pdf.rs` |
 | **markup5ever_rcdom** | *Test only.* A reference DOM we compare our own DOM against, to prove ours is correct. Not in the shipped binary. | `dom.rs` tests |
 
 That's it. No web framework, no async runtime, no browser. Everything else
@@ -189,13 +191,15 @@ cores. (Measured: ~20 ms per PDF at 16 workers, ~50 MB RAM, for the 1.8 MB /
   per-cell styles, borders, backgrounds, alignment, text wrapping/clipping.
 - Flow content: headings/paragraphs/lists with computed font-size, color, align.
 - Pagination, landscape, page margins, PDF compression, selectable text.
+- **Font embedding** — `--font <path|family>` embeds a TrueType/OpenType font
+  (real metrics via ttf-parser, family lookup via fontdb); text stays selectable.
 
 **Not yet (the honest list)**
 
 - A fully nested block/inline **box-tree layout** (flow boxes currently flatten
   to a simple list; tables use specialized layout).
-- **Font embedding** / non-Helvetica fonts (we measure with real Helvetica
-  metrics but only embed the standard font).
+- **Font subsetting** (the full font is embedded today) and **CID/Unicode** for
+  non-Latin/CJK text (embedding is WinAnsi/Latin for now).
 - **Images, SVG, flexbox, grid, absolute positioning.**
 - **JavaScript** (planned as a controlled pre-layout stage, later).
 - Folding page-geometry parsing into cssparser (the substring scan above).
@@ -217,8 +221,9 @@ Foundation first, so features attach to something solid. Done ✓ / next ▶:
 ✓ Real CSS parsing (cssparser)
 ✓ Computed styles + inheritance
 ✓ Box generation from `display` (flow content + display:none)
+✓ Font embedding (ttf-parser + fontdb, opt-in via --font)
 ▶ Full nested box-tree layout
-· Font embedding
+· Font subsetting + CID/Unicode
 · JavaScript (pre-layout)
 ```
 

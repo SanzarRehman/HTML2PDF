@@ -8,6 +8,7 @@ mod pdf;
 
 use std::fmt;
 
+pub use font::FontSource;
 pub use layout::{PageSize, RenderOptions};
 
 #[derive(Debug)]

@@ -25,7 +25,11 @@ impl std::error::Error for PdfError {}
 
 pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, PdfError> {
     let page_count = pages.len();
-    let object_count = 3 + (page_count * 2);
+    let embedded = options.font.embedding();
+    // An embedded TrueType font needs two extra objects: a FontDescriptor and
+    // the FontFile2 stream.
+    let base_object_count = 3 + (page_count * 2);
+    let object_count = base_object_count + if embedded.is_some() { 2 } else { 0 };
 
     if object_count > u16::MAX as usize {
         return Err(PdfError::TooManyObjects);
@@ -35,6 +39,8 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
     let pages_id = 2;
     let font_id = 3;
     let first_page_id = 4;
+    let descriptor_id = base_object_count + 1;
+    let fontfile_id = base_object_count + 2;
 
     let mut writer = PdfWriter::new();
     writer.write_header();
@@ -50,10 +56,36 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
         &format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"),
     );
 
-    writer.object(
-        font_id,
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    );
+    // The font object (id 3, referenced as /F1 by every page).
+    match embedded {
+        None => writer.object(
+            font_id,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ),
+        Some(font) => {
+            let widths = font
+                .widths
+                .iter()
+                .map(|w| w.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            writer.object(
+                font_id,
+                &format!(
+                    concat!(
+                        "<< /Type /Font /Subtype /TrueType /BaseFont /{} ",
+                        "/FirstChar {} /LastChar {} /Widths [{}] ",
+                        "/FontDescriptor {} 0 R /Encoding /WinAnsiEncoding >>"
+                    ),
+                    font.postscript_name,
+                    font.first_char,
+                    font.last_char,
+                    widths,
+                    descriptor_id
+                ),
+            );
+        }
+    }
 
     for (index, page) in pages.iter().enumerate() {
         let page_id = first_page_id + (index * 2);
@@ -74,6 +106,34 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
         );
 
         writer.stream_object(content_id, content.as_bytes())?;
+    }
+
+    // The embedded font's descriptor and program, after the pages.
+    if let Some(font) = embedded {
+        writer.object(
+            descriptor_id,
+            &format!(
+                concat!(
+                    "<< /Type /FontDescriptor /FontName /{} /Flags {} ",
+                    "/FontBBox [{} {} {} {}] /ItalicAngle {:.2} ",
+                    "/Ascent {} /Descent {} /CapHeight {} /StemV {} ",
+                    "/FontFile2 {} 0 R >>"
+                ),
+                font.postscript_name,
+                font.flags,
+                font.bbox[0],
+                font.bbox[1],
+                font.bbox[2],
+                font.bbox[3],
+                font.italic_angle,
+                font.ascent,
+                font.descent,
+                font.cap_height,
+                font.stem_v,
+                fontfile_id
+            ),
+        );
+        writer.font_file_object(fontfile_id, &font.data)?;
     }
 
     writer.finish(catalog_id, object_count);
@@ -193,6 +253,24 @@ impl PdfWriter {
             format!(
                 "<< /Length {} /Filter /FlateDecode >>\nstream\n",
                 compressed.len()
+            )
+            .as_bytes(),
+        );
+        self.bytes.extend_from_slice(&compressed);
+        self.bytes.extend_from_slice(b"endstream\nendobj\n");
+        Ok(())
+    }
+
+    /// A compressed font program stream. `/Length1` is the uncompressed length,
+    /// which PDF requires for embedded TrueType (`FontFile2`) programs.
+    fn font_file_object(&mut self, id: usize, font_data: &[u8]) -> Result<(), PdfError> {
+        let compressed = compress_stream(font_data)?;
+        self.start_object(id);
+        self.bytes.extend_from_slice(
+            format!(
+                "<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n",
+                compressed.len(),
+                font_data.len()
             )
             .as_bytes(),
         );

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use htmltopdf::{Engine, RenderOptions};
+use htmltopdf::{Engine, FontSource, RenderOptions};
 
 fn main() {
     if let Err(error) = run() {
@@ -27,10 +27,25 @@ fn run() -> Result<(), String> {
         return run_concurrent_benchmark(&args[1..]);
     }
 
-    if args.len() != 2 {
+    // Optional `--font <path-or-family>` may appear before/among the positionals.
+    let mut positionals: Vec<std::ffi::OsString> = Vec::new();
+    let mut font: Option<String> = None;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--font" {
+            let value = iter
+                .next()
+                .ok_or_else(|| "--font requires a font file path or family name".to_string())?;
+            font = Some(value.to_string_lossy().into_owned());
+        } else {
+            positionals.push(arg);
+        }
+    }
+
+    if positionals.len() != 2 {
         return Err(
             concat!(
-                "usage: htmltopdf <input.html> <output.pdf>\n",
+                "usage: htmltopdf [--font <path|family>] <input.html> <output.pdf>\n",
                 "       htmltopdf bench <input.html> <output-dir> [runs]\n",
                 "       htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>"
             )
@@ -38,19 +53,37 @@ fn run() -> Result<(), String> {
         );
     }
 
-    let input_path = PathBuf::from(&args[0]);
-    let output_path = PathBuf::from(&args[1]);
+    let input_path = PathBuf::from(&positionals[0]);
+    let output_path = PathBuf::from(&positionals[1]);
     let html = fs::read_to_string(&input_path)
         .map_err(|error| format!("failed to read {}: {error}", input_path.display()))?;
 
+    let options = build_options(font.as_deref())?;
     let pdf = Engine::new()
-        .render_html(&html, RenderOptions::default())
+        .render_html(&html, options)
         .map_err(|error| format!("failed to render {}: {error}", input_path.display()))?;
 
     fs::write(&output_path, pdf)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
 
     Ok(())
+}
+
+/// Build render options, loading an embedded font when `--font` was given. A
+/// value that names an existing file is treated as a font path; otherwise it is
+/// resolved as a system font family name.
+fn build_options(font: Option<&str>) -> Result<RenderOptions, String> {
+    let Some(font) = font else {
+        return Ok(RenderOptions::default());
+    };
+
+    let source = if std::path::Path::new(font).is_file() {
+        FontSource::Path(PathBuf::from(font))
+    } else {
+        FontSource::Family(font.to_string())
+    };
+
+    RenderOptions::default().with_font(&source)
 }
 
 fn run_sequential_benchmark(args: &[std::ffi::OsString]) -> Result<(), String> {

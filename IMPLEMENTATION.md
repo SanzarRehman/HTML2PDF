@@ -507,11 +507,26 @@ Expanded CSS value coverage (additive; fixture byte-identical):
 - `text-align`: adds `justify` (→ left for now), `start` (→ left), `end` (→ right).
 - Headings `h3`–`h6` with browser-like default sizes.
 
+Font embedding (opt-in via `--font <path|family>`):
+
+- `RenderOptions` carries an `Arc<Font>` (default Helvetica, not embedded).
+  A file path or system family name loads a TrueType/OpenType font.
+- `ttf-parser` provides metrics (advances, ascent/descent/cap-height/bbox,
+  units-per-em) used by both layout measurement and the PDF; `fontdb` resolves
+  family names from the system database.
+- The PDF embeds a simple `/TrueType` font (`/WinAnsiEncoding`, `/Widths`,
+  `/FontDescriptor`, compressed `/FontFile2`). Layout's width/wrap helpers now
+  take the active font, so wrapping matches the embedded font's real metrics.
+- Verified: `pdffonts` reports the font `emb yes`, `pdftotext` extracts the
+  text, and default (no `--font`) output is byte-identical.
+- Follow-ups: glyph subsetting (full font embedded today), and CID/`Identity-H`
+  + `ToUnicode` for non-Latin/CJK.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
   browser render. The fixture proves the low-memory/concurrency direction is
-  viable, but the engine still needs nested box-tree layout, font embedding,
+  viable, but the engine still needs nested box-tree layout, font subsetting,
   images, and visual validation before it can replace Chromium for documents
   like this.
 
@@ -536,8 +551,8 @@ that attach cleanly once the spine exists.
       font-size/color/text-align.
 - [ ] Full nested box tree with block/inline layout (boxes still flatten to a
       block list today).
-- [ ] Add font embedding + subsetting (`ttf-parser`/`fontdb`); then real metrics
-      for embedded fonts.
+- [x] Add font embedding with real metrics (`ttf-parser`/`fontdb`), opt-in via
+      `--font <path|family>`. Subsetting + CID/Unicode still to come.
 - [ ] Add bounded pre-layout JavaScript stage (QuickJS/Boa behind a trait).
 
 ### Features (attach after the spine)

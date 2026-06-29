@@ -32,6 +32,9 @@ pub struct RenderOptions {
     pub margin_bottom: f32,
     pub margin_left: f32,
     pub table_row_height: f32,
+    /// The font used for measurement and (if a TrueType) embedding. Defaults to
+    /// the built-in Helvetica (not embedded).
+    pub font: std::sync::Arc<crate::font::Font>,
 }
 
 impl Default for RenderOptions {
@@ -44,11 +47,18 @@ impl Default for RenderOptions {
             margin_bottom: 48.0,
             margin_left: 48.0,
             table_row_height: 18.0,
+            font: std::sync::Arc::new(crate::font::Font::helvetica()),
         }
     }
 }
 
 impl RenderOptions {
+    /// Load and use `source` as the document font (measured and embedded).
+    pub fn with_font(mut self, source: &crate::font::FontSource) -> Result<Self, String> {
+        self.font = std::sync::Arc::new(crate::font::Font::load(source)?);
+        Ok(self)
+    }
+
     pub fn with_document_hints(&self, document: &Document) -> Self {
         let mut options = self.clone();
 
@@ -201,10 +211,10 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
         y -= before;
         ensure_space(&mut pages, &mut y, options, leading);
 
-        for line in wrap_text(&block.text, content_width, font_size) {
+        for line in wrap_text(&block.text, content_width, font_size, &options.font) {
             ensure_space(&mut pages, &mut y, options, leading);
 
-            let text_width = estimate_text_width(&line, font_size);
+            let text_width = estimate_text_width(&line, font_size, &options.font);
             let x = match align {
                 TextAlign::Left => options.margin_left,
                 TextAlign::Center => {
@@ -262,7 +272,7 @@ fn layout_table_row(
     options: &RenderOptions,
     repeated_header: Option<&[TableCell]>,
 ) {
-    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height);
+    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height, &options.font);
     let row_height = planned_cells
         .iter()
         .map(|cell| cell.height)
@@ -287,7 +297,7 @@ fn render_repeated_table_header(
     y: &mut f32,
     options: &RenderOptions,
 ) {
-    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height);
+    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height, &options.font);
     let row_height = planned_cells
         .iter()
         .map(|cell| cell.height)
@@ -350,7 +360,7 @@ fn render_planned_table_row(
         }
 
         for (line_index, line) in planned.lines.iter().enumerate() {
-            let text_width = estimate_text_width(line, planned.font_size);
+            let text_width = estimate_text_width(line, planned.font_size, &options.font);
             let text_x = match planned.source.style.align.unwrap_or(TextAlign::Left) {
                 TextAlign::Left => x + planned.padding_left,
                 TextAlign::Center => {
@@ -413,6 +423,7 @@ fn plan_table_cells<'a>(
     cells: &'a [TableCell],
     table_geometry: &TableGeometry,
     base_row_height: f32,
+    font: &crate::font::Font,
 ) -> Vec<PlannedCell<'a>> {
     let mut planned = Vec::with_capacity(cells.len());
     let mut column_index = 0;
@@ -444,6 +455,7 @@ fn plan_table_cells<'a>(
             },
             white_space,
             break_long_tokens,
+            font,
         );
         let line_count = lines.len().max(1);
         let height =
@@ -558,8 +570,8 @@ fn cell_width(columns: &[f32], start: usize, colspan: usize) -> f32 {
     }
 }
 
-fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
-    wrap_text_with_mode(text, max_width, font_size, WhiteSpace::Normal, false)
+fn wrap_text(text: &str, max_width: f32, font_size: f32, font: &crate::font::Font) -> Vec<String> {
+    wrap_text_with_mode(text, max_width, font_size, WhiteSpace::Normal, false, font)
 }
 
 fn wrap_text_with_mode(
@@ -568,14 +580,15 @@ fn wrap_text_with_mode(
     font_size: f32,
     white_space: WhiteSpace,
     break_long_tokens: bool,
+    font: &crate::font::Font,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     // Track the measured width of `current` so line fitting stays O(n) overall
-    // instead of re-measuring the whole line for every word. Helvetica has no
-    // kerning, so advances are additive and this is exact.
+    // instead of re-measuring the whole line for every word. The fonts we use
+    // have no kerning, so advances are additive and this is exact.
     let mut current_width = 0.0f32;
-    let space_width = estimate_text_width(" ", font_size);
+    let space_width = estimate_text_width(" ", font_size, font);
 
     for word in text.split_whitespace() {
         if white_space == WhiteSpace::NoWrap {
@@ -583,7 +596,7 @@ fn wrap_text_with_mode(
             continue;
         }
 
-        let word_width = estimate_text_width(word, font_size);
+        let word_width = estimate_text_width(word, font_size, font);
 
         if break_long_tokens && word_width > max_width {
             if !current.is_empty() {
@@ -591,7 +604,7 @@ fn wrap_text_with_mode(
                 current_width = 0.0;
             }
 
-            lines.extend(split_long_word(word, max_width, font_size));
+            lines.extend(split_long_word(word, max_width, font_size, font));
             continue;
         }
 
@@ -624,12 +637,17 @@ fn append_word_preserving_no_wrap(word: &str, current: &mut String) {
     current.push_str(word);
 }
 
-fn split_long_word(word: &str, max_width: f32, font_size: f32) -> Vec<String> {
+fn split_long_word(
+    word: &str,
+    max_width: f32,
+    font_size: f32,
+    font: &crate::font::Font,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let mut rest = word;
 
     while !rest.is_empty() {
-        let count = crate::font::fitting_char_count(rest, max_width, font_size);
+        let count = font.fitting_char_count(rest, max_width, font_size);
         let split_at = rest
             .char_indices()
             .nth(count)
@@ -649,17 +667,19 @@ fn wrap_cell_text(
     max_lines: usize,
     white_space: WhiteSpace,
     break_long_tokens: bool,
+    font: &crate::font::Font,
 ) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
 
-    let mut lines = wrap_text_with_mode(text, max_width, font_size, white_space, break_long_tokens);
+    let mut lines =
+        wrap_text_with_mode(text, max_width, font_size, white_space, break_long_tokens, font);
 
     if lines.len() > max_lines {
         lines.truncate(max_lines);
         if let Some(last) = lines.last_mut() {
-            *last = truncate_to_width(last, max_width, font_size);
+            *last = truncate_to_width(last, max_width, font_size, font);
         }
     }
 
@@ -677,19 +697,24 @@ fn should_break_long_tokens(cell: &TableCell) -> bool {
     ) || matches!(cell.style.word_break, Some(WordBreak::BreakAll))
 }
 
-fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    crate::font::text_width(text, font_size)
+fn estimate_text_width(text: &str, font_size: f32, font: &crate::font::Font) -> f32 {
+    font.text_width(text, font_size)
 }
 
-fn truncate_to_width(text: &str, max_width: f32, font_size: f32) -> String {
-    if estimate_text_width(text, font_size) <= max_width {
+fn truncate_to_width(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    font: &crate::font::Font,
+) -> String {
+    if estimate_text_width(text, font_size, font) <= max_width {
         return text.to_string();
     }
 
     let ellipsis = "...";
-    let ellipsis_width = estimate_text_width(ellipsis, font_size);
+    let ellipsis_width = estimate_text_width(ellipsis, font_size, font);
     let budget = (max_width - ellipsis_width).max(0.0);
-    let keep = crate::font::fitting_char_count(text, budget, font_size);
+    let keep = font.fitting_char_count(text, budget, font_size);
 
     // `fitting_char_count` returns at least 1 for non-empty input; if even one
     // glyph plus the ellipsis overflows a tiny box we still keep one glyph so
@@ -999,6 +1024,7 @@ mod tests {
             margin_bottom: 10.0,
             margin_left: 10.0,
             table_row_height: 18.0,
+            font: std::sync::Arc::new(crate::font::Font::helvetica()),
         };
 
         let pages = layout_document(&document, &options);
@@ -1006,7 +1032,7 @@ mod tests {
 
         assert_eq!(pages[0].lines.len(), 1);
         assert!(
-            estimate_text_width(&pages[0].lines[0].text, pages[0].lines[0].font_size)
+            estimate_text_width(&pages[0].lines[0].text, pages[0].lines[0].font_size, &crate::font::Font::helvetica())
                 > text_area_width
         );
         assert!(pages[0]
@@ -1052,6 +1078,7 @@ mod tests {
             margin_bottom: 10.0,
             margin_left: 10.0,
             table_row_height: 18.0,
+            font: std::sync::Arc::new(crate::font::Font::helvetica()),
         };
 
         let pages = layout_document(&document, &options);
@@ -1061,7 +1088,7 @@ mod tests {
         assert!(pages[0]
             .lines
             .iter()
-            .all(|line| estimate_text_width(&line.text, line.font_size) <= text_area_width + 0.1));
+            .all(|line| estimate_text_width(&line.text, line.font_size, &crate::font::Font::helvetica()) <= text_area_width + 0.1));
         assert!(pages[0]
             .commands
             .iter()
@@ -1107,6 +1134,7 @@ mod tests {
                 margin_bottom: 10.0,
                 margin_left: 10.0,
                 table_row_height: 18.0,
+                font: std::sync::Arc::new(crate::font::Font::helvetica()),
             },
         );
 
@@ -1151,6 +1179,7 @@ mod tests {
                 margin_bottom: 10.0,
                 margin_left: 10.0,
                 table_row_height: 18.0,
+                font: std::sync::Arc::new(crate::font::Font::helvetica()),
             },
         );
 
@@ -1232,6 +1261,7 @@ mod tests {
                 margin_bottom: 10.0,
                 margin_left: 10.0,
                 table_row_height: 18.0,
+                font: std::sync::Arc::new(crate::font::Font::helvetica()),
             },
         );
 
