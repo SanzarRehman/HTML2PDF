@@ -60,9 +60,12 @@ fn main() {
         }
     };
 
-    let workers = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    // Worker thread count: HTMLTOPDF_WORKERS, else one per core.
+    let workers = std::env::var("HTMLTOPDF_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
 
     eprintln!("htmltopdf-server listening on http://{addr} ({workers} worker threads)");
     eprintln!("  POST /render   body = HTML  -> application/pdf");

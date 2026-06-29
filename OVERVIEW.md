@@ -184,9 +184,13 @@ or the `HTMLTOPDF_ADDR` env var):
 
 ```bash
 cargo run --release -p htmltopdf-server
-# or a custom address:
-cargo run --release -p htmltopdf-server -- 0.0.0.0:9000
+# custom address, and tune the server worker-thread count:
+HTMLTOPDF_WORKERS=24 cargo run --release -p htmltopdf-server -- 0.0.0.0:9000
 ```
+
+Concurrency is tunable on both ends: the **server** worker count via
+`HTMLTOPDF_WORKERS` (default = one per CPU core), and the **client** load via the
+`-c` flag of `scripts/api-convert.sh` (below).
 
 Endpoints:
 
@@ -208,6 +212,17 @@ curl -X POST http://127.0.0.1:8080/render \
 # Landscape, 36pt margins, embed the Georgia font
 curl -X POST 'http://127.0.0.1:8080/render?landscape=true&margin=36&font=Georgia' \
   --data-binary @examples/invoice.html -o invoice.pdf
+```
+
+**Batch convert / load-test:** `scripts/api-convert.sh` posts an HTML file to the
+API, saves the PDF, and prints per-request latency plus a summary
+(min/avg/p50/p95/max, throughput):
+
+```bash
+scripts/api-convert.sh                     # one request, saves out/reg-2-9-1-copy.pdf
+scripts/api-convert.sh -c 16 -n 64         # 64 requests, 16 concurrent
+scripts/api-convert.sh -c 8 -q 'font=Georgia'   # with query options
+# flags: -u URL  -i input.html  -o output.pdf  -c concurrency  -n total  -q query
 ```
 
 **In Postman:** method `POST`, URL `http://127.0.0.1:8080/render`, Body → `raw`
