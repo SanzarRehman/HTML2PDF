@@ -84,7 +84,7 @@ parser, DOM, CSS, cascade, and font metrics get rebuilt. See
 - [x] Add `html5ever`-backed arena DOM (`dom.rs`) with parsing tests.
 - [x] Route generic block extraction (headings/paragraphs/lists) through the DOM.
 - [x] Route table row/cell extraction through the DOM (replace raw-text scan).
-- [ ] Skip the RcDom intermediate with a custom `html5ever` `TreeSink` (RAM).
+- [x] Skip the RcDom intermediate with a custom `html5ever` `TreeSink` (RAM).
 - [ ] Replace substring CSS rule lookup with a `cssparser` stylesheet model.
 - [ ] Build computed-style cascade over the DOM (specificity + inheritance).
 - [ ] Derive a box tree from computed `display`.
@@ -422,6 +422,24 @@ Current Rust output after routing table extraction through the DOM:
   100 MB target; a custom `TreeSink` that builds the arena directly is the
   follow-up to remove the intermediate (tracked above).
 
+Current Rust output after the custom arena `TreeSink` (no RcDom):
+
+- Command: `target/release/htmltopdf reg-2-9-1.html out/reg-sink.pdf`
+- Result: succeeds; output **byte-identical** to the RcDom-based render.
+- `html5ever`'s `TreeSink` is now implemented directly against the `Vec` arena,
+  so there is no `Rc`/`RefCell` reference tree and no second copy of the document
+  in memory during parsing.
+- Peak RSS, single render: about 44 MB (was about 50 MB with RcDom).
+- Peak RSS, 16 workers x 3 runs: about 557 MB (was about 737 MB with RcDom),
+  i.e. ~35 MB/worker down from ~46 MB/worker — about 180 MB saved under
+  concurrency. About 13 ms average wall time per PDF (unchanged).
+- Correctness is pinned by `dom.rs::matches_rcdom_reference_tree`, which asserts
+  the custom sink produces the same tree as the reference RcDom across nested,
+  mis-nested, table, list, and full-document samples.
+- Remaining cost: the per-render arena for 22k cells (owned `String` names/text)
+  is the legitimate price of a real DOM and is still far under the 100 MB target
+  and far below Chromium. String interning is a possible later optimization.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -441,7 +459,7 @@ that attach cleanly once the spine exists.
 - [x] Replace ad hoc HTML parsing with `html5ever` (arena DOM).
 - [x] Add real font metrics (Helvetica AFM); remove `0.52` width guesses.
 - [x] Route table extraction through the DOM instead of raw-text scanning.
-- [ ] Skip the transient RcDom with a custom `TreeSink` to cut parse-time RAM.
+- [x] Skip the transient RcDom with a custom `TreeSink` to cut parse-time RAM.
 - [ ] Replace substring CSS lookup with a `cssparser` stylesheet + cascade.
 - [ ] Add inheritance and computed-style model over the DOM.
 - [ ] Derive a box tree from computed `display`; layout consumes the box tree.

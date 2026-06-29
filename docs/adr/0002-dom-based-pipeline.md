@@ -57,14 +57,20 @@ Input HTML
 
 ### Dependency choices
 
-- **HTML parsing: `html5ever` + `markup5ever_rcdom`.** We parse with the proven
-  tokenizer/tree-builder, then lower the resulting tree into our own arena DOM
-  (`Vec<Node>` with index-based children). Downstream code never sees `Rc`/
-  `RefCell`. Rationale: html5ever gives spec-correct parsing of malformed,
-  nested, and entity-laden real-world HTML; the arena lowering gives us a
-  compact, cache-friendly, `Send`-friendly structure that fits the low-RAM goal.
-  We do not depend on RcDom as the engine's working data structure; it is only a
-  transient parse target.
+- **HTML parsing: `html5ever`, with a custom arena `TreeSink`.** We first
+  validated the pipeline by parsing into `markup5ever_rcdom` and lowering into
+  our arena, then replaced that with a `TreeSink` implemented directly against
+  the `Vec` arena (`crates/htmltopdf/src/dom.rs`). This removes the `Rc`/
+  `RefCell` reference tree entirely and avoids holding two copies of the
+  document at once, cutting peak parse-time RAM (~180 MB saved at 16 concurrent
+  renders of the 22k-cell fixture). The `Handle` is a plain index; `elem_name`
+  returns an owned `ElemName` that borrows from itself, which is what frees the
+  handle from having to be a reference into the interior-mutable arena.
+  `markup5ever_rcdom` is retained only as a dev-dependency, where a parity test
+  asserts the custom sink builds the same tree as the reference implementation.
+  Rationale: html5ever gives spec-correct parsing of malformed, nested, and
+  entity-laden real-world HTML; the arena gives a compact, cache-friendly,
+  `Send` structure that fits the low-RAM goal.
 
 - **CSS parsing: `cssparser`** now, with **`selectors`** added later for full
   combinator/pseudo-class matching. Rationale: `cssparser` is the Servo/Stylo
@@ -109,9 +115,10 @@ Costs:
 1. Real font metrics (`font.rs`); remove `0.52` width guesses. **Done.**
 2. `html5ever` arena DOM (`dom.rs`); route generic block extraction through it.
    **Done.**
-3. Route table row/cell extraction through the DOM.
-4. Replace substring CSS lookup with a `cssparser` stylesheet + real cascade.
-5. Computed-style model with inheritance.
-6. Box tree from computed `display`; layout consumes the box tree.
-7. Font embedding/subsetting with `ttf-parser`/`fontdb`.
-8. Bounded pre-layout JavaScript stage.
+3. Route table row/cell extraction through the DOM. **Done.**
+4. Custom arena `TreeSink` to drop the RcDom intermediate. **Done.**
+5. Replace substring CSS lookup with a `cssparser` stylesheet + real cascade.
+6. Computed-style model with inheritance.
+7. Box tree from computed `display`; layout consumes the box tree.
+8. Font embedding/subsetting with `ttf-parser`/`fontdb`.
+9. Bounded pre-layout JavaScript stage.

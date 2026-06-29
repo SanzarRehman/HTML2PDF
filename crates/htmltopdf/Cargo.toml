@@ -11,4 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 flate2 = "1"
 html5ever = "0.39"
+
+[dev-dependencies]
+# Reference DOM used only to verify the custom arena TreeSink builds the same
+# tree (see dom.rs `matches_rcdom_reference_tree`). Not in the release binary.
 markup5ever_rcdom = "0.39"

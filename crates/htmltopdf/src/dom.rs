@@ -1,17 +1,27 @@
 //! A compact, arena-backed DOM.
 //!
 //! HTML is parsed by `html5ever` (the spec-compliant Servo tokenizer and tree
-//! builder), then lowered out of `markup5ever_rcdom`'s `Rc`/`RefCell` tree into
-//! a flat `Vec<Node>` whose children are referenced by index. Downstream engine
-//! code only ever touches this arena, never `Rc`, which keeps the structure
-//! cache-friendly, low-overhead, and `Send` so each render stays independent and
-//! parallelizable (ADR 0002).
+//! builder). Rather than route through `markup5ever_rcdom`'s `Rc`/`RefCell`
+//! tree and then copy it, we implement `html5ever`'s [`TreeSink`] directly
+//! against a flat `Vec` arena. This removes the `Rc` graph entirely: there is no
+//! per-node reference counting, no `Weak` parent cells, and no second tree held
+//! in memory at the same time. The result is a cache-friendly, low-overhead,
+//! `Send` structure, which keeps each render independent and parallelizable and
+//! keeps peak parse-time memory low (ADR 0002).
 //!
-//! The RcDom is a transient parse target only; it is dropped as soon as lowering
-//! finishes.
+//! The sink stores every node kind the tree builder can create (including
+//! comments, doctypes, and processing instructions, which it must be able to
+//! reference during construction). [`TreeSink::finish`] lowers that into the
+//! public [`Dom`], which keeps only the rendered node kinds.
 
-use html5ever::tendril::TendrilSink;
-use markup5ever_rcdom::{Handle, NodeData as RcNodeData, RcDom};
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
+
+use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::tree_builder::{
+    Attribute, ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink,
+};
+use html5ever::{LocalName, Namespace, QualName};
 
 /// Index of a node within [`Dom::nodes`].
 pub type NodeId = usize;
@@ -46,63 +56,11 @@ pub enum NodeData {
 impl Dom {
     /// Parse an HTML document string into the arena DOM.
     pub fn parse(input: &str) -> Dom {
-        let rc = html5ever::parse_document(RcDom::default(), Default::default())
+        html5ever::parse_document(ArenaSink::new(), Default::default())
             .from_utf8()
             .read_from(&mut input.as_bytes())
-            // RcDom parsing is infallible for in-memory byte input.
-            .expect("in-memory HTML parsing cannot fail");
-
-        let mut dom = Dom {
-            nodes: vec![Node {
-                parent: None,
-                children: Vec::new(),
-                data: NodeData::Document,
-            }],
-        };
-        dom.lower_children(&rc.document, 0);
-        dom
-    }
-
-    fn lower_children(&mut self, handle: &Handle, parent: NodeId) {
-        for child in handle.children.borrow().iter() {
-            if let Some(id) = self.lower(child, parent) {
-                self.lower_children(child, id);
-            }
-        }
-    }
-
-    fn lower(&mut self, handle: &Handle, parent: NodeId) -> Option<NodeId> {
-        let data = match &handle.data {
-            RcNodeData::Element { name, attrs, .. } => {
-                let attrs = attrs
-                    .borrow()
-                    .iter()
-                    .map(|attr| {
-                        (
-                            attr.name.local.as_ref().to_ascii_lowercase(),
-                            attr.value.to_string(),
-                        )
-                    })
-                    .collect();
-                NodeData::Element {
-                    name: name.local.as_ref().to_ascii_lowercase(),
-                    attrs,
-                }
-            }
-            RcNodeData::Text { contents } => NodeData::Text(contents.borrow().to_string()),
-            // Doctype, comments, processing instructions, and nested document
-            // markers carry nothing renderable.
-            _ => return None,
-        };
-
-        let id = self.nodes.len();
-        self.nodes.push(Node {
-            parent: Some(parent),
-            children: Vec::new(),
-            data,
-        });
-        self.nodes[parent].children.push(id);
-        Some(id)
+            // Reading from an in-memory byte slice is infallible.
+            .expect("in-memory HTML parsing cannot fail")
     }
 
     /// The document root node id (always `0`).
@@ -116,7 +74,7 @@ impl Dom {
 }
 
 // Read accessors for the cascade/box-tree work that consumes this DOM next
-// (ADR 0002 migration steps 3-6). Kept on the type now so the DOM is the single
+// (ADR 0002 migration steps 4-6). Kept on the type now so the DOM is the single
 // query surface; `dead_code` is allowed until those callers land.
 #[allow(dead_code)]
 impl Node {
@@ -141,9 +99,323 @@ impl Node {
 
     /// Whitespace-separated tokens of the `class` attribute.
     pub fn classes(&self) -> impl Iterator<Item = &str> {
-        self.attr("class")
-            .unwrap_or_default()
-            .split_whitespace()
+        self.attr("class").unwrap_or_default().split_whitespace()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Custom html5ever TreeSink that builds the arena directly (no RcDom).
+// ---------------------------------------------------------------------------
+
+type SinkId = usize;
+
+enum SinkData {
+    Document,
+    Doctype,
+    Comment,
+    ProcessingInstruction,
+    Text(String),
+    Element {
+        name: QualName,
+        attrs: Vec<Attribute>,
+        /// Content document for a `<template>` element, if any.
+        template: Option<SinkId>,
+        mathml_integration_point: bool,
+    },
+}
+
+struct SinkNode {
+    parent: Option<SinkId>,
+    children: Vec<SinkId>,
+    data: SinkData,
+}
+
+struct ArenaSink {
+    nodes: RefCell<Vec<SinkNode>>,
+    quirks: Cell<QuirksMode>,
+}
+
+/// Owned element name so `elem_name` can return a value that borrows from
+/// itself, freeing the `Handle` to be a plain index instead of a reference into
+/// the (interior-mutable) arena.
+#[derive(Debug)]
+struct OwnedElemName(QualName);
+
+impl ElemName for OwnedElemName {
+    fn ns(&self) -> &Namespace {
+        &self.0.ns
+    }
+
+    fn local_name(&self) -> &LocalName {
+        &self.0.local
+    }
+}
+
+impl ArenaSink {
+    fn new() -> Self {
+        Self {
+            nodes: RefCell::new(vec![SinkNode {
+                parent: None,
+                children: Vec::new(),
+                data: SinkData::Document,
+            }]),
+            quirks: Cell::new(QuirksMode::NoQuirks),
+        }
+    }
+
+    fn push(&self, data: SinkData) -> SinkId {
+        let mut nodes = self.nodes.borrow_mut();
+        let id = nodes.len();
+        nodes.push(SinkNode {
+            parent: None,
+            children: Vec::new(),
+            data,
+        });
+        id
+    }
+
+    fn attach(&self, parent: SinkId, child: SinkId) {
+        let mut nodes = self.nodes.borrow_mut();
+        nodes[child].parent = Some(parent);
+        nodes[parent].children.push(child);
+    }
+
+    fn insert_at(&self, parent: SinkId, index: usize, child: SinkId) {
+        let mut nodes = self.nodes.borrow_mut();
+        nodes[child].parent = Some(parent);
+        nodes[parent].children.insert(index, child);
+    }
+
+    fn detach(&self, target: SinkId) {
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(parent) = nodes[target].parent.take() {
+            nodes[parent].children.retain(|&child| child != target);
+        }
+    }
+
+    fn parent_and_index(&self, target: SinkId) -> Option<(SinkId, usize)> {
+        let nodes = self.nodes.borrow();
+        let parent = nodes[target].parent?;
+        let index = nodes[parent]
+            .children
+            .iter()
+            .position(|&child| child == target)
+            .expect("node has parent but is missing from its children");
+        Some((parent, index))
+    }
+}
+
+impl TreeSink for ArenaSink {
+    type Handle = SinkId;
+    type Output = Dom;
+    type ElemName<'a>
+        = OwnedElemName
+    where
+        Self: 'a;
+
+    fn finish(self) -> Dom {
+        let sink = self.nodes.into_inner();
+        let mut dom = Dom {
+            nodes: vec![Node {
+                parent: None,
+                children: Vec::new(),
+                data: NodeData::Document,
+            }],
+        };
+        lower(&sink, 0, 0, &mut dom);
+        dom
+    }
+
+    fn parse_error(&self, _msg: Cow<'static, str>) {}
+
+    fn get_document(&self) -> SinkId {
+        0
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a SinkId) -> OwnedElemName {
+        match &self.nodes.borrow()[*target].data {
+            SinkData::Element { name, .. } => OwnedElemName(name.clone()),
+            _ => panic!("elem_name called on a non-element node"),
+        }
+    }
+
+    fn create_element(
+        &self,
+        name: QualName,
+        attrs: Vec<Attribute>,
+        flags: ElementFlags,
+    ) -> SinkId {
+        let template = flags.template.then(|| self.push(SinkData::Document));
+        self.push(SinkData::Element {
+            name,
+            attrs,
+            template,
+            mathml_integration_point: flags.mathml_annotation_xml_integration_point,
+        })
+    }
+
+    fn create_comment(&self, _text: StrTendril) -> SinkId {
+        self.push(SinkData::Comment)
+    }
+
+    fn create_pi(&self, _target: StrTendril, _data: StrTendril) -> SinkId {
+        self.push(SinkData::ProcessingInstruction)
+    }
+
+    fn append(&self, parent: &SinkId, child: NodeOrText<SinkId>) {
+        match child {
+            NodeOrText::AppendText(text) => {
+                // Merge with a trailing text sibling, matching the spec/RcDom.
+                {
+                    let mut nodes = self.nodes.borrow_mut();
+                    if let Some(&last) = nodes[*parent].children.last() {
+                        if let SinkData::Text(existing) = &mut nodes[last].data {
+                            existing.push_str(&text);
+                            return;
+                        }
+                    }
+                }
+                let id = self.push(SinkData::Text(text.to_string()));
+                self.attach(*parent, id);
+            }
+            NodeOrText::AppendNode(id) => self.attach(*parent, id),
+        }
+    }
+
+    fn append_before_sibling(&self, sibling: &SinkId, child: NodeOrText<SinkId>) {
+        let (parent, index) = self
+            .parent_and_index(*sibling)
+            .expect("append_before_sibling on a node without a parent");
+
+        match child {
+            NodeOrText::AppendText(text) => {
+                // Merge with the text node immediately before the insertion point.
+                if index > 0 {
+                    let mut nodes = self.nodes.borrow_mut();
+                    let prev = nodes[parent].children[index - 1];
+                    if let SinkData::Text(existing) = &mut nodes[prev].data {
+                        existing.push_str(&text);
+                        return;
+                    }
+                }
+                let id = self.push(SinkData::Text(text.to_string()));
+                self.insert_at(parent, index, id);
+            }
+            NodeOrText::AppendNode(id) => {
+                self.detach(id);
+                self.insert_at(parent, index, id);
+            }
+        }
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &SinkId,
+        prev_element: &SinkId,
+        child: NodeOrText<SinkId>,
+    ) {
+        let has_parent = self.nodes.borrow()[*element].parent.is_some();
+        if has_parent {
+            self.append_before_sibling(element, child);
+        } else {
+            self.append(prev_element, child);
+        }
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        _name: StrTendril,
+        _public_id: StrTendril,
+        _system_id: StrTendril,
+    ) {
+        let id = self.push(SinkData::Doctype);
+        self.attach(0, id);
+    }
+
+    fn get_template_contents(&self, target: &SinkId) -> SinkId {
+        match &self.nodes.borrow()[*target].data {
+            SinkData::Element {
+                template: Some(contents),
+                ..
+            } => *contents,
+            _ => panic!("get_template_contents on a non-template element"),
+        }
+    }
+
+    fn same_node(&self, x: &SinkId, y: &SinkId) -> bool {
+        x == y
+    }
+
+    fn set_quirks_mode(&self, mode: QuirksMode) {
+        self.quirks.set(mode);
+    }
+
+    fn add_attrs_if_missing(&self, target: &SinkId, attrs: Vec<Attribute>) {
+        let mut nodes = self.nodes.borrow_mut();
+        if let SinkData::Element { attrs: existing, .. } = &mut nodes[*target].data {
+            for attr in attrs {
+                if !existing.iter().any(|present| present.name == attr.name) {
+                    existing.push(attr);
+                }
+            }
+        }
+    }
+
+    fn remove_from_parent(&self, target: &SinkId) {
+        self.detach(*target);
+    }
+
+    fn reparent_children(&self, node: &SinkId, new_parent: &SinkId) {
+        let mut nodes = self.nodes.borrow_mut();
+        let moved = std::mem::take(&mut nodes[*node].children);
+        for &child in &moved {
+            nodes[child].parent = Some(*new_parent);
+        }
+        nodes[*new_parent].children.extend(moved);
+    }
+
+    fn is_mathml_annotation_xml_integration_point(&self, target: &SinkId) -> bool {
+        matches!(
+            &self.nodes.borrow()[*target].data,
+            SinkData::Element {
+                mathml_integration_point: true,
+                ..
+            }
+        )
+    }
+}
+
+/// Lower the sink's full tree into the public [`Dom`], keeping only rendered
+/// node kinds (document, elements, text) and discarding doctypes, comments, and
+/// processing instructions. Element and attribute names are lowercased to match
+/// the rest of the engine.
+fn lower(sink: &[SinkNode], sink_id: SinkId, dom_parent: NodeId, dom: &mut Dom) {
+    for &child in &sink[sink_id].children {
+        let data = match &sink[child].data {
+            SinkData::Element { name, attrs, .. } => NodeData::Element {
+                name: name.local.as_ref().to_ascii_lowercase(),
+                attrs: attrs
+                    .iter()
+                    .map(|attr| {
+                        (
+                            attr.name.local.as_ref().to_ascii_lowercase(),
+                            attr.value.to_string(),
+                        )
+                    })
+                    .collect(),
+            },
+            SinkData::Text(text) => NodeData::Text(text.clone()),
+            _ => continue,
+        };
+
+        let id = dom.nodes.len();
+        dom.nodes.push(Node {
+            parent: Some(dom_parent),
+            children: Vec::new(),
+            data,
+        });
+        dom.nodes[dom_parent].children.push(id);
+        lower(sink, child, id, dom);
     }
 }
 
@@ -209,6 +481,82 @@ mod tests {
             for &child in &node.children {
                 assert_eq!(dom.node(child).parent, Some(id));
             }
+        }
+    }
+
+    #[test]
+    fn drops_comments_and_doctype_keeps_structure() {
+        let dom = Dom::parse("<!DOCTYPE html><!-- c --><table><tr><td>x</td></tr></table>");
+        let tags = tags(&dom);
+        assert!(tags.contains(&"table"));
+        assert!(tags.contains(&"tr"));
+        assert!(tags.contains(&"td"));
+        // tbody is implied by the HTML tree builder.
+        assert!(tags.contains(&"tbody"));
+    }
+
+    /// The custom arena sink must produce the same tree the reference RcDom
+    /// implementation does. We compare a normalized document outline.
+    #[test]
+    fn matches_rcdom_reference_tree() {
+        use markup5ever_rcdom::{NodeData as RcData, RcDom};
+
+        fn our_outline(html: &str) -> Vec<String> {
+            let dom = Dom::parse(html);
+            let mut out = Vec::new();
+            fn walk(dom: &Dom, id: NodeId, depth: usize, out: &mut Vec<String>) {
+                for &child in &dom.node(id).children {
+                    match &dom.node(child).data {
+                        NodeData::Element { name, .. } => {
+                            out.push(format!("{}e:{name}", "  ".repeat(depth)))
+                        }
+                        NodeData::Text(t) => {
+                            out.push(format!("{}t:{}", "  ".repeat(depth), t.trim()))
+                        }
+                        NodeData::Document => {}
+                    }
+                    walk(dom, child, depth + 1, out);
+                }
+            }
+            walk(&dom, 0, 0, &mut out);
+            out
+        }
+
+        fn rc_outline(html: &str) -> Vec<String> {
+            let dom = html5ever::parse_document(RcDom::default(), Default::default())
+                .from_utf8()
+                .read_from(&mut html.as_bytes())
+                .unwrap();
+            let mut out = Vec::new();
+            fn walk(handle: &markup5ever_rcdom::Handle, depth: usize, out: &mut Vec<String>) {
+                for child in handle.children.borrow().iter() {
+                    match &child.data {
+                        RcData::Element { name, .. } => out.push(format!(
+                            "{}e:{}",
+                            "  ".repeat(depth),
+                            name.local.as_ref().to_ascii_lowercase()
+                        )),
+                        RcData::Text { contents } => {
+                            out.push(format!("{}t:{}", "  ".repeat(depth), contents.borrow().trim()))
+                        }
+                        _ => continue,
+                    }
+                    walk(child, depth + 1, out);
+                }
+            }
+            walk(&dom.document, 0, &mut out);
+            out
+        }
+
+        for sample in [
+            "<p>hi</p>",
+            "<div><span>a</span>b<em>c</em></div>",
+            "<p>one<p>two",
+            "<table><tr><td class='x'>1</td><th>2</th></tr></table>",
+            "<ul><li>a<li>b</ul>",
+            "<!DOCTYPE html><html><head><title>t</title></head><body><h1>H</h1></body></html>",
+        ] {
+            assert_eq!(our_outline(sample), rc_outline(sample), "mismatch for {sample:?}");
         }
     }
 }
