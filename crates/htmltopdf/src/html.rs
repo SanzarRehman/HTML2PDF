@@ -1334,34 +1334,44 @@ fn parse_css_background_color(value: &str) -> Option<Color> {
 }
 
 fn parse_css_color(value: &str) -> Option<Color> {
-    let value = value.trim().trim_matches('"').trim_matches('\'');
+    let value = value.trim().trim_matches('"').trim_matches('\'').trim();
 
     if value.eq_ignore_ascii_case("transparent") {
         return None;
     }
 
-    match value.to_ascii_lowercase().as_str() {
-        "black" => return Some(Color::BLACK),
-        "white" => return Some(Color::WHITE),
-        "red" => return Some(Color::from_rgb_u8(255, 0, 0)),
-        "green" => return Some(Color::from_rgb_u8(0, 128, 0)),
-        "blue" => return Some(Color::from_rgb_u8(0, 0, 255)),
-        "yellow" => return Some(Color::from_rgb_u8(255, 255, 0)),
-        _ => {}
+    if let Some(hex) = value.strip_prefix('#') {
+        return parse_hex_color(hex);
     }
 
-    let Some(hex) = value.strip_prefix('#') else {
-        return None;
-    };
+    // Functional notation: rgb()/rgba()/hsl()/hsla(), with comma or space-
+    // separated components and an optional `/ alpha` (alpha is ignored since the
+    // engine renders opaque colors today).
+    if let Some(open) = value.find('(') {
+        let stripped = value.strip_suffix(')')?;
+        let function = value[..open].trim().to_ascii_lowercase();
+        let args = &stripped[open + 1..];
+        return match function.as_str() {
+            "rgb" | "rgba" => parse_rgb_function(args),
+            "hsl" | "hsla" => parse_hsl_function(args),
+            _ => None,
+        };
+    }
 
+    named_color(&value.to_ascii_lowercase())
+}
+
+fn parse_hex_color(hex: &str) -> Option<Color> {
     match hex.len() {
-        3 => {
+        // #rgb and #rgba (alpha ignored).
+        3 | 4 => {
             let r = expand_hex_nibble(hex.as_bytes()[0])?;
             let g = expand_hex_nibble(hex.as_bytes()[1])?;
             let b = expand_hex_nibble(hex.as_bytes()[2])?;
             Some(Color::from_rgb_u8(r, g, b))
         }
-        6 => {
+        // #rrggbb and #rrggbbaa (alpha ignored).
+        6 | 8 => {
             let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
@@ -1380,6 +1390,119 @@ fn expand_hex_nibble(byte: u8) -> Option<u8> {
     };
 
     Some(value * 17)
+}
+
+/// Split color-function arguments on commas, slashes (alpha separator), and
+/// whitespace, so both legacy `rgb(r, g, b)` and modern `rgb(r g b / a)` work.
+fn color_components(args: &str) -> Vec<&str> {
+    args.split([',', '/', ' ', '\t', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn parse_rgb_function(args: &str) -> Option<Color> {
+    let parts = color_components(args);
+    if parts.len() < 3 {
+        return None;
+    }
+    Some(Color::from_rgb_u8(
+        parse_rgb_channel(parts[0])?,
+        parse_rgb_channel(parts[1])?,
+        parse_rgb_channel(parts[2])?,
+    ))
+}
+
+/// A single rgb() channel: either 0..=255 or a percentage.
+fn parse_rgb_channel(part: &str) -> Option<u8> {
+    let scaled = if let Some(percent) = part.strip_suffix('%') {
+        percent.trim().parse::<f32>().ok()? / 100.0 * 255.0
+    } else {
+        part.parse::<f32>().ok()?
+    };
+    Some(scaled.round().clamp(0.0, 255.0) as u8)
+}
+
+fn parse_hsl_function(args: &str) -> Option<Color> {
+    let parts = color_components(args);
+    if parts.len() < 3 {
+        return None;
+    }
+    let hue = parts[0].trim_end_matches("deg").trim().parse::<f32>().ok()?;
+    let saturation = parts[1].trim_end_matches('%').trim().parse::<f32>().ok()? / 100.0;
+    let lightness = parts[2].trim_end_matches('%').trim().parse::<f32>().ok()? / 100.0;
+    Some(hsl_to_color(hue, saturation.clamp(0.0, 1.0), lightness.clamp(0.0, 1.0)))
+}
+
+fn hsl_to_color(hue: f32, saturation: f32, lightness: f32) -> Color {
+    let hue = (hue.rem_euclid(360.0)) / 360.0;
+    let (r, g, b) = if saturation == 0.0 {
+        (lightness, lightness, lightness)
+    } else {
+        let q = if lightness < 0.5 {
+            lightness * (1.0 + saturation)
+        } else {
+            lightness + saturation - lightness * saturation
+        };
+        let p = 2.0 * lightness - q;
+        (
+            hue_to_rgb(p, q, hue + 1.0 / 3.0),
+            hue_to_rgb(p, q, hue),
+            hue_to_rgb(p, q, hue - 1.0 / 3.0),
+        )
+    };
+
+    // Quantize through the same 0..=255 path every other color uses, so equal
+    // colors compare equal regardless of how they were written.
+    let to_u8 = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Color::from_rgb_u8(to_u8(r), to_u8(g), to_u8(b))
+}
+
+fn hue_to_rgb(p: f32, q: f32, t: f32) -> f32 {
+    let t = t.rem_euclid(1.0);
+    if t < 1.0 / 6.0 {
+        p + (q - p) * 6.0 * t
+    } else if t < 1.0 / 2.0 {
+        q
+    } else if t < 2.0 / 3.0 {
+        p + (q - p) * (2.0 / 3.0 - t) * 6.0
+    } else {
+        p
+    }
+}
+
+/// A practical subset of CSS named colors. Keeps the original six mappings
+/// exactly (black/white/red/green/blue/yellow) and adds common extras.
+fn named_color(name: &str) -> Option<Color> {
+    let (r, g, b) = match name {
+        "black" => (0, 0, 0),
+        "white" => (255, 255, 255),
+        "red" => (255, 0, 0),
+        "green" => (0, 128, 0),
+        "blue" => (0, 0, 255),
+        "yellow" => (255, 255, 0),
+        "silver" => (192, 192, 192),
+        "gray" | "grey" => (128, 128, 128),
+        "maroon" => (128, 0, 0),
+        "olive" => (128, 128, 0),
+        "lime" => (0, 255, 0),
+        "aqua" | "cyan" => (0, 255, 255),
+        "teal" => (0, 128, 128),
+        "navy" => (0, 0, 128),
+        "fuchsia" | "magenta" => (255, 0, 255),
+        "purple" => (128, 0, 128),
+        "orange" => (255, 165, 0),
+        "pink" => (255, 192, 203),
+        "brown" => (165, 42, 42),
+        "gold" => (255, 215, 0),
+        "lightgray" | "lightgrey" => (211, 211, 211),
+        "darkgray" | "darkgrey" => (169, 169, 169),
+        "whitesmoke" => (245, 245, 245),
+        "lightblue" => (173, 216, 230),
+        "lightgreen" => (144, 238, 144),
+        _ => return None,
+    };
+    Some(Color::from_rgb_u8(r, g, b))
 }
 
 impl CellStyle {
@@ -1638,6 +1761,47 @@ mod tests {
         assert_eq!(style.white_space, Some(super::WhiteSpace::NoWrap));
         assert_eq!(style.overflow_wrap, Some(super::OverflowWrap::BreakWord));
         assert_eq!(style.word_break, Some(super::WordBreak::BreakAll));
+    }
+
+    #[test]
+    fn parses_rgb_hsl_and_named_colors() {
+        use crate::color::Color;
+        // rgb() with commas and with modern space/slash syntax.
+        assert_eq!(
+            super::parse_css_color("rgb(18, 52, 86)"),
+            Some(Color::from_rgb_u8(18, 52, 86))
+        );
+        assert_eq!(
+            super::parse_css_color("rgba(18 52 86 / 50%)"),
+            Some(Color::from_rgb_u8(18, 52, 86))
+        );
+        // Percentage channels.
+        assert_eq!(
+            super::parse_css_color("rgb(100%, 0%, 0%)"),
+            Some(Color::from_rgb_u8(255, 0, 0))
+        );
+        // hsl(): pure red and a gray.
+        assert_eq!(
+            super::parse_css_color("hsl(0, 100%, 50%)"),
+            Some(Color::from_rgb_u8(255, 0, 0))
+        );
+        assert_eq!(
+            super::parse_css_color("hsl(0, 0%, 50%)"),
+            Some(Color::from_rgb_u8(128, 128, 128))
+        );
+        // Extended named colors and 4/8-digit hex (alpha ignored).
+        assert_eq!(
+            super::parse_css_color("teal"),
+            Some(Color::from_rgb_u8(0, 128, 128))
+        );
+        assert_eq!(
+            super::parse_css_color("#11223344"),
+            Some(Color::from_rgb_u8(0x11, 0x22, 0x33))
+        );
+        // Original mappings unchanged.
+        assert_eq!(super::parse_css_color("red"), Some(Color::from_rgb_u8(255, 0, 0)));
+        assert_eq!(super::parse_css_color("white"), Some(Color::WHITE));
+        assert_eq!(super::parse_css_color("bogus"), None);
     }
 
     #[test]
