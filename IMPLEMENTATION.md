@@ -83,7 +83,8 @@ parser, DOM, CSS, cascade, and font metrics get rebuilt. See
 - [x] Replace `font_size * 0.52` width guesses in layout with measured widths.
 - [x] Add `html5ever`-backed arena DOM (`dom.rs`) with parsing tests.
 - [x] Route generic block extraction (headings/paragraphs/lists) through the DOM.
-- [ ] Route table row/cell extraction through the DOM (replace raw-text scan).
+- [x] Route table row/cell extraction through the DOM (replace raw-text scan).
+- [ ] Skip the RcDom intermediate with a custom `html5ever` `TreeSink` (RAM).
 - [ ] Replace substring CSS rule lookup with a `cssparser` stylesheet model.
 - [ ] Build computed-style cascade over the DOM (specificity + inheritance).
 - [ ] Derive a box tree from computed `display`.
@@ -402,6 +403,25 @@ Current Rust output after first-pass table-cell vertical alignment:
   full CSS inline/table baseline algorithm. Baseline currently behaves like top
   alignment until proper table row baseline calculation exists.
 
+Current Rust output after routing table extraction through the DOM:
+
+- Command: `target/release/htmltopdf reg-2-9-1.html out/reg-step3.pdf`
+- Result: succeeds
+- Output size: 492,740 bytes
+- Output is **byte-identical** to the previous (raw-text) table render, so the
+  DOM migration changed structure parsing without changing any rendered output.
+- Single conversion wall time: about 0.07 s user.
+- Peak RSS from `/usr/bin/time -l`: about 50 MB (up from ~27 MB).
+- 16-worker x 3-run concurrency: 48 PDFs, about 13 ms average wall time per PDF.
+- Behavior change: `<tr>`/`<td>`/`<th>` structure, colspans, `<thead>`/
+  `<tbody>`/`<tfoot>` sections, and CSS `display: table-*-group` overrides now
+  come from the real html5ever DOM instead of raw-text substring scanning.
+  Malformed/mis-nested table HTML now follows the HTML tree-construction spec.
+- Cost noted: peak RSS rose because the transient `RcDom` (`Rc<RefCell>`) tree
+  is built for all 22k cells before lowering into the arena. Still under the
+  100 MB target; a custom `TreeSink` that builds the arena directly is the
+  follow-up to remove the intermediate (tracked above).
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -420,7 +440,8 @@ that attach cleanly once the spine exists.
 
 - [x] Replace ad hoc HTML parsing with `html5ever` (arena DOM).
 - [x] Add real font metrics (Helvetica AFM); remove `0.52` width guesses.
-- [ ] Route table extraction through the DOM instead of raw-text scanning.
+- [x] Route table extraction through the DOM instead of raw-text scanning.
+- [ ] Skip the transient RcDom with a custom `TreeSink` to cut parse-time RAM.
 - [ ] Replace substring CSS lookup with a `cssparser` stylesheet + cascade.
 - [ ] Add inheritance and computed-style model over the DOM.
 - [ ] Derive a box tree from computed `display`; layout consumes the box tree.

@@ -158,11 +158,10 @@ pub fn parse(input: &str) -> Document {
     let table_style = parse_table_style(input);
     let table_columns = parse_table_columns(input);
     let stylesheet = parse_stylesheet(input);
-    let normalized = normalize_html_text(input);
-    let mut blocks = parse_table_rows(&normalized, &stylesheet);
+    let dom = crate::dom::Dom::parse(input);
 
+    let mut blocks = tables_from_dom(&dom, &stylesheet);
     if blocks.is_empty() {
-        let dom = crate::dom::Dom::parse(input);
         blocks = blocks_from_dom(&dom);
     }
 
@@ -308,45 +307,6 @@ fn push_text(blocks: &mut Vec<Block>, kind: BlockKind, current: &mut String) {
     });
 }
 
-fn normalize_html_text(input: &str) -> String {
-    let without_scripts = strip_element(input, "script");
-    let without_styles = strip_element(&without_scripts, "style");
-
-    decode_entities(&without_styles)
-}
-
-fn strip_element(input: &str, element: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0;
-    let lower = input.to_ascii_lowercase();
-    let start_tag = format!("<{element}");
-    let end_tag = format!("</{element}>");
-
-    while let Some(relative_start) = lower[cursor..].find(&start_tag) {
-        let start = cursor + relative_start;
-        output.push_str(&input[cursor..start]);
-
-        let Some(relative_end) = lower[start..].find(&end_tag) else {
-            return output;
-        };
-
-        cursor = start + relative_end + end_tag.len();
-    }
-
-    output.push_str(&input[cursor..]);
-    output
-}
-
-fn decode_entities(input: &str) -> String {
-    input
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-}
-
 fn parse_table_columns(input: &str) -> Vec<f32> {
     let mut columns = Vec::new();
     let mut cursor = 0;
@@ -407,45 +367,66 @@ fn find_css_rule<'a>(input: &'a str, selector: &str) -> Option<&'a str> {
     Some(&input[open + 1..close])
 }
 
-fn parse_table_rows(input: &str, stylesheet: &Stylesheet) -> Vec<Block> {
-    let lower = input.to_ascii_lowercase();
-    if !lower.contains("<table") {
-        return Vec::new();
-    }
-
+/// Extract table rows and cells from the real DOM.
+///
+/// A single depth-first walk tracks the current table section (the `<thead>` /
+/// `<tbody>` / `<tfoot>` ancestor, with its CSS `display` group honored) and
+/// emits one `Block` per `<tr>`. This replaces the former raw-text `<tr>`/`<td>`
+/// scanner; the cascade that resolves cell styles is still the substring-indexed
+/// `Stylesheet` and moves to `cssparser` in the next step (ADR 0002).
+fn tables_from_dom(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> Vec<Block> {
     let mut rows = Vec::new();
-    let mut cursor = 0;
-    let mut section = TableSection::Body;
     let mut cell_style_cache = HashMap::new();
+    collect_table_rows(
+        dom,
+        dom.root(),
+        TableSection::Body,
+        stylesheet,
+        &mut cell_style_cache,
+        &mut rows,
+    );
+    rows
+}
 
-    while let Some(relative_start) = lower[cursor..].find("<tr") {
-        let row_start = cursor + relative_start;
-        update_table_section(&lower[cursor..row_start], &mut section, stylesheet);
+fn collect_table_rows(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    section: TableSection,
+    stylesheet: &Stylesheet,
+    cache: &mut HashMap<String, CellStyle>,
+    rows: &mut Vec<Block>,
+) {
+    let node = dom.node(id);
+    let mut child_section = section;
 
-        let Some(relative_open_end) = lower[row_start..].find('>') else {
-            break;
-        };
-        let open_tag = &input[row_start + 1..row_start + relative_open_end];
-        let row_content_start = row_start + relative_open_end + 1;
-        let Some(relative_row_end) = lower[row_content_start..].find("</tr>") else {
-            break;
-        };
-        let row_content_end = row_content_start + relative_row_end;
-        let row_html = &input[row_content_start..row_content_end];
-        let cells = parse_table_cells(row_html, stylesheet, &mut cell_style_cache);
-
-        if !cells.is_empty() {
-            rows.push(Block {
-                kind: table_row_kind(section, open_tag, stylesheet),
-                text: String::new(),
-                cells,
-            });
+    match node.tag() {
+        Some("thead") | Some("tbody") | Some("tfoot") => {
+            let default = match node.tag() {
+                Some("thead") => TableSection::Header,
+                Some("tfoot") => TableSection::Footer,
+                _ => TableSection::Body,
+            };
+            // A CSS `display: table-*-group` on the section element overrides the
+            // tag default (matches browser computed display).
+            child_section = display_to_table_section(computed_display_for_node(dom, id, stylesheet))
+                .unwrap_or(default);
         }
-
-        cursor = row_content_end + "</tr>".len();
+        Some("tr") => {
+            let cells = cells_from_row(dom, id, stylesheet, cache);
+            if !cells.is_empty() {
+                rows.push(Block {
+                    kind: row_kind(dom, id, section, stylesheet),
+                    text: String::new(),
+                    cells,
+                });
+            }
+        }
+        _ => {}
     }
 
-    rows
+    for &child in &node.children {
+        collect_table_rows(dom, child, child_section, stylesheet, cache, rows);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,60 +443,16 @@ enum CssDisplay {
     TableFooterGroup,
 }
 
-fn update_table_section(segment: &str, section: &mut TableSection, stylesheet: &Stylesheet) {
-    let mut cursor = 0;
-
-    while let Some(relative_start) = segment[cursor..].find('<') {
-        let start = cursor + relative_start;
-        let Some(relative_end) = segment[start..].find('>') else {
-            break;
-        };
-        let raw_tag = &segment[start + 1..start + relative_end];
-        let tag = raw_tag
-            .trim()
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        let next_section = match tag.as_str() {
-            "thead" => Some(TableSection::Header),
-            "/thead" => {
-                *section = TableSection::Body;
-                None
-            }
-            "tbody" => Some(TableSection::Body),
-            "/tbody" => {
-                *section = TableSection::Body;
-                None
-            }
-            "tfoot" => Some(TableSection::Footer),
-            "/tfoot" => {
-                *section = TableSection::Body;
-                None
-            }
-            _ => None,
-        };
-
-        if let Some(default_section) = next_section {
-            *section = display_to_table_section(display_for_open_tag(raw_tag, stylesheet))
-                .unwrap_or(default_section);
-        }
-
-        cursor = start + relative_end + 1;
-    }
-}
-
-fn table_row_kind(section: TableSection, open_tag: &str, stylesheet: &Stylesheet) -> BlockKind {
-    if let Some(display_section) =
-        display_to_table_section(display_for_open_tag(open_tag, stylesheet))
-    {
-        return match display_section {
-            TableSection::Header => BlockKind::TableHeaderRow,
-            TableSection::Body => BlockKind::TableRow,
-            TableSection::Footer => BlockKind::TableFooterRow,
-        };
-    }
+fn row_kind(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    section: TableSection,
+    stylesheet: &Stylesheet,
+) -> BlockKind {
+    // A `display: table-*-group` on the row itself overrides the inherited
+    // section, matching the old open-tag behavior.
+    let section =
+        display_to_table_section(computed_display_for_node(dom, id, stylesheet)).unwrap_or(section);
 
     match section {
         TableSection::Header => BlockKind::TableHeaderRow,
@@ -532,93 +469,91 @@ fn display_to_table_section(display: Option<CssDisplay>) -> Option<TableSection>
     }
 }
 
-fn display_for_open_tag(open_tag: &str, stylesheet: &Stylesheet) -> Option<CssDisplay> {
-    let tag = tag_name_from_open_tag(open_tag);
-    let class_attr = parse_attr(open_tag, "class").unwrap_or_default();
-    let classes = class_attr.split_whitespace().collect::<Vec<_>>();
-    let inline_style = parse_attr(open_tag, "style").unwrap_or_default();
-    let mut declarations = stylesheet.computed_declarations(&tag, &classes);
+fn computed_display_for_node(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    stylesheet: &Stylesheet,
+) -> Option<CssDisplay> {
+    let node = dom.node(id);
+    let tag = node.tag().unwrap_or_default();
+    let classes = node.classes().collect::<Vec<_>>();
+    let inline_style = node.attr("style").unwrap_or_default();
+    let mut declarations = stylesheet.computed_declarations(tag, &classes);
 
     if !inline_style.is_empty() {
-        declarations.merge_inline(parse_style_declarations(&inline_style));
+        declarations.merge_inline(parse_style_declarations(inline_style));
     }
 
     declarations.resolved().display
 }
 
-fn parse_table_cells(
-    row_html: &str,
+fn cells_from_row(
+    dom: &crate::dom::Dom,
+    tr_id: crate::dom::NodeId,
     stylesheet: &Stylesheet,
-    style_cache: &mut HashMap<String, CellStyle>,
+    cache: &mut HashMap<String, CellStyle>,
 ) -> Vec<TableCell> {
-    let lower = row_html.to_ascii_lowercase();
-    let mut cursor = 0;
     let mut cells = Vec::new();
 
-    while let Some((relative_start, tag_name)) = find_next_cell_tag(&lower[cursor..]) {
-        let cell_start = cursor + relative_start;
-        let Some(relative_open_end) = lower[cell_start..].find('>') else {
-            break;
-        };
+    for &child in &dom.node(tr_id).children {
+        let node = dom.node(child);
+        if !matches!(node.tag(), Some("td") | Some("th")) {
+            continue;
+        }
 
-        let open_tag = &row_html[cell_start + 1..cell_start + relative_open_end];
-        let content_start = cell_start + relative_open_end + 1;
-        let close_tag = format!("</{tag_name}>");
-        let Some(relative_cell_end) = lower[content_start..].find(&close_tag) else {
-            break;
-        };
-        let content_end = content_start + relative_cell_end;
-        let raw_text = strip_tags(&row_html[content_start..content_end]);
-        let text = collapse_whitespace(&decode_entities(&raw_text));
+        let mut text = String::new();
+        collect_text(dom, child, &mut text);
+        let text = collapse_whitespace(&text);
+
+        let colspan = node
+            .attr("colspan")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
 
         cells.push(TableCell {
             text,
-            colspan: parse_usize_attr(open_tag, "colspan").unwrap_or(1).max(1),
-            style: cached_cell_style(open_tag, stylesheet, style_cache),
+            colspan,
+            style: cell_style_for_node(dom, child, stylesheet, cache),
         });
-
-        cursor = content_end + close_tag.len();
     }
 
     cells
 }
 
-fn cached_cell_style(
-    open_tag: &str,
+/// Concatenate all descendant text of a node. html5ever has already decoded
+/// entities, so no further decoding is required.
+fn collect_text(dom: &crate::dom::Dom, id: crate::dom::NodeId, out: &mut String) {
+    match &dom.node(id).data {
+        crate::dom::NodeData::Text(text) => out.push_str(text),
+        _ => {
+            for &child in &dom.node(id).children {
+                collect_text(dom, child, out);
+            }
+        }
+    }
+}
+
+fn cell_style_for_node(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
     stylesheet: &Stylesheet,
     cache: &mut HashMap<String, CellStyle>,
 ) -> CellStyle {
-    let key = open_tag.trim().to_string();
+    let node = dom.node(id);
+    let tag = node.tag().unwrap_or_default();
+    let class_attr = node.attr("class").unwrap_or_default();
+    let inline_style = node.attr("style").unwrap_or_default();
 
+    // Spreadsheet exports reuse a handful of class combinations across thousands
+    // of cells, so cache the resolved style by (tag, class, inline) identity.
+    let key = format!("{tag}|{class_attr}|{inline_style}");
     if let Some(style) = cache.get(&key) {
         return *style;
     }
 
-    let style = parse_cell_style(open_tag, stylesheet);
-    cache.insert(key, style);
-    style
-}
-
-fn find_next_cell_tag(input: &str) -> Option<(usize, &'static str)> {
-    let td = input.find("<td");
-    let th = input.find("<th");
-
-    match (td, th) {
-        (Some(td), Some(th)) if td <= th => Some((td, "td")),
-        (Some(_), Some(th)) => Some((th, "th")),
-        (Some(td), None) => Some((td, "td")),
-        (None, Some(th)) => Some((th, "th")),
-        (None, None) => None,
-    }
-}
-
-fn parse_cell_style(open_tag: &str, stylesheet: &Stylesheet) -> CellStyle {
-    let tag = tag_name_from_open_tag(open_tag);
-    let class_attr = parse_attr(open_tag, "class").unwrap_or_default();
-    let inline_style = parse_attr(open_tag, "style").unwrap_or_default();
     let classes = class_attr.split_whitespace().collect::<Vec<_>>();
-
-    let mut declarations = stylesheet.computed_declarations(&tag, &classes);
+    let mut declarations = stylesheet.computed_declarations(tag, &classes);
     let mut style = declarations.resolved().cell;
 
     if style.align.is_none() {
@@ -632,61 +567,12 @@ fn parse_cell_style(open_tag: &str, stylesheet: &Stylesheet) -> CellStyle {
     if !inline_style.is_empty() {
         declarations = StyleDeclarations::default();
         declarations.normal.cell = style;
-        declarations.merge_inline(parse_style_declarations(&inline_style));
+        declarations.merge_inline(parse_style_declarations(inline_style));
         style = declarations.resolved().cell;
     }
 
+    cache.insert(key, style);
     style
-}
-
-fn strip_tags(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut in_tag = false;
-
-    for ch in input.chars() {
-        match (in_tag, ch) {
-            (false, '<') => in_tag = true,
-            (true, '>') => in_tag = false,
-            (false, _) => output.push(ch),
-            (true, _) => {}
-        }
-    }
-
-    output
-}
-
-fn parse_attr(open_tag: &str, attr: &str) -> Option<String> {
-    let lower = open_tag.to_ascii_lowercase();
-    let needle = format!("{attr}=");
-    let start = lower.find(&needle)? + needle.len();
-    let bytes = open_tag.as_bytes();
-    let quote = *bytes.get(start)?;
-
-    if quote != b'\'' && quote != b'"' {
-        return None;
-    }
-
-    let value_start = start + 1;
-    let value_end = bytes[value_start..]
-        .iter()
-        .position(|byte| *byte == quote)
-        .map(|position| value_start + position)?;
-
-    Some(open_tag[value_start..value_end].to_string())
-}
-
-fn parse_usize_attr(open_tag: &str, attr: &str) -> Option<usize> {
-    parse_attr(open_tag, attr)?.parse().ok()
-}
-
-fn tag_name_from_open_tag(open_tag: &str) -> String {
-    open_tag
-        .trim()
-        .trim_start_matches('/')
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
 }
 
 fn parse_css_number_after(input: &str, marker: &str) -> Option<f32> {
