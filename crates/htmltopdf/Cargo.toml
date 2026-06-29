@@ -9,6 +9,7 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+cssparser = "0.37.0"
 flate2 = "1"
 html5ever = "0.39"
 

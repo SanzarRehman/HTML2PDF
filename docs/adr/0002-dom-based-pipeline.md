@@ -117,7 +117,11 @@ Costs:
    **Done.**
 3. Route table row/cell extraction through the DOM. **Done.**
 4. Custom arena `TreeSink` to drop the RcDom intermediate. **Done.**
-5. Replace substring CSS lookup with a `cssparser` stylesheet + real cascade.
+5. Replace the hand-rolled CSS tokenizer with `cssparser`; source `<style>` CSS
+   from the DOM. The cascade model, selector model, and value parsing are
+   reused, so output is unchanged while comments, strings/`url()`, nested
+   blocks, and `@media` are now handled correctly. **Done.** (`@page`/column
+   geometry still uses a substring scan; folding it in is a follow-up.)
 6. Computed-style model with inheritance.
 7. Box tree from computed `display`; layout consumes the box tree.
 8. Font embedding/subsetting with `ttf-parser`/`fontdb`.

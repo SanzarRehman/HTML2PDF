@@ -440,6 +440,23 @@ Current Rust output after the custom arena `TreeSink` (no RcDom):
   is the legitimate price of a real DOM and is still far under the 100 MB target
   and far below Chromium. String interning is a possible later optimization.
 
+Current Rust output after the `cssparser`-based stylesheet:
+
+- Command: `target/release/htmltopdf reg-2-9-1.html out/reg-css.pdf`
+- Result: succeeds; output **byte-identical** to the previous render.
+- The hand-rolled CSS tokenizer (`<style>` substring scan, `find('{')` rule
+  splitting, `split(';')` declaration splitting, `split(',')` selector
+  splitting) is replaced by `cssparser`. `<style>` text now comes from the DOM.
+- Reused unchanged: the cascade (specificity, source order, `!important`), the
+  selector model (rightmost compound: tag + classes), and all value parsing
+  (`apply_style_declaration`, `parse_css_color`, `parse_css_length`).
+- New correctness, covered by tests: CSS comments anywhere (including inside
+  selectors and declaration lists), `;`/`{` inside quoted values and `url()`,
+  rules nested in `@media`, and multiple `<style>` elements.
+- Peak RSS and throughput unchanged (~44 MB single, ~13 ms/PDF at 16 workers).
+- Remaining: `@page` margins and column widths still use the `find_css_rule`
+  substring scan; folding them into the `cssparser` stylesheet is the follow-up.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -460,7 +477,9 @@ that attach cleanly once the spine exists.
 - [x] Add real font metrics (Helvetica AFM); remove `0.52` width guesses.
 - [x] Route table extraction through the DOM instead of raw-text scanning.
 - [x] Skip the transient RcDom with a custom `TreeSink` to cut parse-time RAM.
-- [ ] Replace substring CSS lookup with a `cssparser` stylesheet + cascade.
+- [x] Replace the hand-rolled CSS tokenizer with `cssparser`; source `<style>`
+      CSS from the DOM. (Cascade model, selectors, and value parsing reused.)
+- [ ] Migrate `@page` / column-width geometry off `find_css_rule` substring scan.
 - [ ] Add inheritance and computed-style model over the DOM.
 - [ ] Derive a box tree from computed `display`; layout consumes the box tree.
 - [ ] Add font embedding + subsetting (`ttf-parser`/`fontdb`); then real metrics

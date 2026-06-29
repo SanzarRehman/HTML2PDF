@@ -1,5 +1,10 @@
 use std::collections::HashMap;
 
+use cssparser::{
+    AtRuleParser, CowRcStr, DeclarationParser, ParseError, Parser, ParserInput, ParserState,
+    QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
+};
+
 use crate::color::Color;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,8 +162,8 @@ pub fn parse(input: &str) -> Document {
     let page_style = parse_page_style(input);
     let table_style = parse_table_style(input);
     let table_columns = parse_table_columns(input);
-    let stylesheet = parse_stylesheet(input);
     let dom = crate::dom::Dom::parse(input);
+    let stylesheet = parse_stylesheet(&collect_style_css(&dom));
 
     let mut blocks = tables_from_dom(&dom, &stylesheet);
     if blocks.is_empty() {
@@ -765,191 +770,369 @@ impl DeclarationLayer {
     }
 }
 
-fn parse_stylesheet(input: &str) -> Stylesheet {
+/// Concatenate the text content of every `<style>` element in the document.
+/// Reading from the parsed DOM is robust where the old `<style>` substring scan
+/// was not (attributes on the tag, commented-out tags, etc.).
+fn collect_style_css(dom: &crate::dom::Dom) -> String {
+    let mut css = String::new();
+    for node in &dom.nodes {
+        if node.tag() == Some("style") {
+            for &child in &node.children {
+                if let crate::dom::NodeData::Text(text) = &dom.node(child).data {
+                    css.push_str(text);
+                    css.push('\n');
+                }
+            }
+        }
+    }
+    css
+}
+
+/// Parse a stylesheet using `cssparser`'s tokenizer for robust rule, selector
+/// list, declaration, comment, string, and `@media` handling. The cascade model
+/// (specificity, source order, `!important`) and the value/selector parsers are
+/// reused unchanged, so output stays identical for inputs the old hand-rolled
+/// tokenizer already handled while gaining correctness on the ones it did not
+/// (comments anywhere, `;`/`{` inside strings or `url()`, nested blocks).
+fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut stylesheet = Stylesheet::default();
     let mut order = 0;
 
-    for css in extract_style_blocks(input) {
-        parse_css_rules(css, &mut order, &mut stylesheet.rules);
-    }
+    let mut input = ParserInput::new(css);
+    let mut parser = Parser::new(&mut input);
+    let mut rule_parser = RuleParser;
+    let mut rules = StyleSheetParser::new(&mut parser, &mut rule_parser);
 
-    stylesheet.build_indexes();
-
-    stylesheet
-}
-
-fn extract_style_blocks(input: &str) -> Vec<&str> {
-    let mut blocks = Vec::new();
-    let lower = input.to_ascii_lowercase();
-    let mut cursor = 0;
-
-    while let Some(relative_style_start) = lower[cursor..].find("<style") {
-        let style_start = cursor + relative_style_start;
-        let Some(relative_open_end) = lower[style_start..].find('>') else {
-            break;
-        };
-        let css_start = style_start + relative_open_end + 1;
-        let Some(relative_style_end) = lower[css_start..].find("</style>") else {
-            break;
-        };
-        let css_end = css_start + relative_style_end;
-        blocks.push(&input[css_start..css_end]);
-        cursor = css_end + "</style>".len();
-    }
-
-    blocks
-}
-
-fn parse_css_rules(css: &str, order: &mut usize, rules: &mut Vec<StyleRule>) {
-    let mut cursor = 0;
-
-    while let Some(relative_open) = css[cursor..].find('{') {
-        let open = cursor + relative_open;
-        let Some(close) = find_matching_brace(css, open) else {
-            break;
-        };
-        let selectors = &css[cursor..open];
-        let declarations = &css[open + 1..close];
-        let trimmed_selectors = selectors.trim();
-
-        if trimmed_selectors.starts_with("@media") {
-            parse_css_rules(declarations, order, rules);
-            cursor = close + 1;
-            continue;
-        }
-
-        if trimmed_selectors.starts_with('@') {
-            cursor = close + 1;
-            continue;
-        }
-
-        let declarations = parse_style_declarations(declarations);
-
-        for selector in parse_simple_selectors(selectors) {
-            rules.push(StyleRule {
+    while let Some(result) = rules.next() {
+        let Ok(parsed) = result else { continue };
+        for (selector, declarations) in parsed {
+            stylesheet.rules.push(StyleRule {
                 specificity: selector.specificity(),
                 selector,
                 declarations,
-                order: *order,
+                order,
             });
-            *order += 1;
-        }
-
-        cursor = close + 1;
-    }
-}
-
-fn find_matching_brace(input: &str, open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-
-    for (offset, ch) in input[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(open + offset);
-                }
-            }
-            _ => {}
+            order += 1;
         }
     }
 
-    None
+    stylesheet.build_indexes();
+    stylesheet
 }
 
+/// Parse an inline `style="..."` declaration list with `cssparser`.
 fn parse_style_declarations(declarations: &str) -> StyleDeclarations {
     let mut parsed = StyleDeclarations::default();
 
-    for declaration in declarations.split(';') {
-        let Some((property, value)) = declaration.split_once(':') else {
-            continue;
-        };
-        let property = property.trim().to_ascii_lowercase();
-        let (value, important) = normalize_declaration_value(value);
-        let target = if important {
-            &mut parsed.important
+    let mut input = ParserInput::new(declarations);
+    let mut parser = Parser::new(&mut input);
+    let mut decl_parser = DeclParser {
+        declarations: &mut parsed,
+    };
+    let mut items = RuleBodyParser::new(&mut parser, &mut decl_parser);
+    while let Some(result) = items.next() {
+        let _ = result;
+    }
+
+    parsed
+}
+
+/// A parsed style rule's prelude is a selector list; its block is a declaration
+/// list. One comma-separated rule expands into several `(selector, decls)` pairs.
+type ParsedRule = (SimpleSelector, StyleDeclarations);
+
+struct RuleParser;
+
+enum AtRuleKind {
+    /// `@media`: parse the nested block as if its rules were top-level.
+    Media,
+    /// Any other at-rule: ignored.
+    Other,
+}
+
+impl<'i> QualifiedRuleParser<'i> for RuleParser {
+    type Prelude = Vec<SimpleSelector>;
+    type QualifiedRule = Vec<ParsedRule>;
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        Ok(parse_selector_list(input))
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
+        let declarations = parse_declaration_block(input);
+        Ok(prelude
+            .into_iter()
+            .map(|selector| (selector, declarations))
+            .collect())
+    }
+}
+
+impl<'i> AtRuleParser<'i> for RuleParser {
+    type Prelude = AtRuleKind;
+    type AtRule = Vec<ParsedRule>;
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        consume_remaining(input);
+        if name.eq_ignore_ascii_case("media") {
+            Ok(AtRuleKind::Media)
         } else {
-            &mut parsed.normal
+            Ok(AtRuleKind::Other)
+        }
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        match prelude {
+            AtRuleKind::Media => {
+                let mut inner = RuleParser;
+                let mut rules = StyleSheetParser::new(input, &mut inner);
+                let mut collected = Vec::new();
+                while let Some(result) = rules.next() {
+                    if let Ok(mut parsed) = result {
+                        collected.append(&mut parsed);
+                    }
+                }
+                Ok(collected)
+            }
+            AtRuleKind::Other => Ok(Vec::new()),
+        }
+    }
+
+    fn rule_without_block(
+        &mut self,
+        _prelude: Self::Prelude,
+        _start: &ParserState,
+    ) -> Result<Self::AtRule, ()> {
+        // At-rules without a block (e.g. `@import`, `@charset`) contribute no
+        // style rules to the cascade.
+        Ok(Vec::new())
+    }
+}
+
+/// Parse a declaration list (a rule's `{ ... }` body) into a `StyleDeclarations`.
+fn parse_declaration_block(input: &mut Parser<'_, '_>) -> StyleDeclarations {
+    let mut declarations = StyleDeclarations::default();
+    let mut decl_parser = DeclParser {
+        declarations: &mut declarations,
+    };
+    let mut items = RuleBodyParser::new(input, &mut decl_parser);
+    while let Some(result) = items.next() {
+        let _ = result;
+    }
+    declarations
+}
+
+/// Applies each declaration into the normal/important layers, reusing the
+/// existing value normalization and property mapping.
+struct DeclParser<'a> {
+    declarations: &'a mut StyleDeclarations,
+}
+
+impl<'i> DeclarationParser<'i> for DeclParser<'_> {
+    type Declaration = ();
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        _start: &ParserState,
+    ) -> Result<(), ParseError<'i, ()>> {
+        let value_start = input.position();
+        consume_remaining(input);
+        let raw_value = input.slice_from(value_start);
+
+        let property = name.to_ascii_lowercase();
+        let (value, important) = normalize_declaration_value(raw_value);
+        let layer = if important {
+            &mut self.declarations.important
+        } else {
+            &mut self.declarations.normal
         };
 
-        apply_style_declaration(target, &property, &value);
+        apply_style_declaration(layer, &property, &value);
+        Ok(())
     }
-
-    parsed
 }
 
-fn parse_simple_selectors(selectors: &str) -> Vec<SimpleSelector> {
-    let mut parsed = Vec::new();
+// Declaration lists may, per the CSS syntax spec, contain at-rules and (in
+// nesting) qualified rules. We don't support those inside a block, so reject
+// them with empty implementations and only opt into declaration parsing.
+impl<'i> AtRuleParser<'i> for DeclParser<'_> {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+}
 
-    for selector in selectors.split(',') {
-        if let Some(selector) = parse_simple_selector(selector) {
-            parsed.push(selector);
+impl<'i> QualifiedRuleParser<'i> for DeclParser<'_> {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+impl<'i> RuleBodyItemParser<'i, (), ()> for DeclParser<'_> {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+/// Consume the rest of a delimited `cssparser` parser, descending into and
+/// skipping any nested `{}`/`()`/`[]`/function blocks, so a following
+/// `slice_from` captures the full source text of a prelude or declaration value.
+fn consume_remaining(input: &mut Parser<'_, '_>) {
+    while let Ok(token) = input.next_including_whitespace().map(|token| token.clone()) {
+        if matches!(
+            token,
+            Token::Function(_)
+                | Token::ParenthesisBlock
+                | Token::SquareBracketBlock
+                | Token::CurlyBracketBlock
+        ) {
+            let _ = input.parse_nested_block(|nested| -> Result<(), ParseError<'_, ()>> {
+                consume_remaining(nested);
+                Ok(())
+            });
         }
     }
-
-    parsed
 }
 
-fn parse_simple_selector(selector: &str) -> Option<SimpleSelector> {
-    let compound = selector
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, '>' | '+' | '~'))
-        .filter(|part| !part.is_empty())
-        .next_back()?
-        .trim();
+/// Parse a comma-separated selector list from `cssparser` tokens into the
+/// engine's `SimpleSelector` model (rightmost compound: an optional type tag
+/// plus class names). Tokenizing rather than string-splitting means comments
+/// inside selectors are skipped and `,`/combinators inside blocks (e.g.
+/// `:not(...)`, attribute selectors) do not split the list incorrectly.
+///
+/// Selectors using ids, the universal selector, or anything unsupported in the
+/// rightmost compound are dropped, matching the prior parser. Pseudo-classes and
+/// attribute selectors end the compound but keep the tag/classes parsed so far.
+fn parse_selector_list<'i>(input: &mut Parser<'i, '_>) -> Vec<SimpleSelector> {
+    let mut selectors = Vec::new();
+    let mut current = CompoundBuilder::default();
 
-    if compound.is_empty() || compound == "*" || compound.contains('#') {
-        return None;
-    }
-
-    let mut tag = None;
-    let mut classes = Vec::new();
-    let mut cursor = 0;
-    let chars = compound.chars().collect::<Vec<_>>();
-
-    if chars.first().is_some_and(|ch| ch.is_ascii_alphabetic()) {
-        let tag_end = chars
-            .iter()
-            .position(|ch| !is_identifier_char(*ch))
-            .unwrap_or(chars.len());
-        tag = Some(
-            chars[..tag_end]
-                .iter()
-                .collect::<String>()
-                .to_ascii_lowercase(),
-        );
-        cursor = tag_end;
-    }
-
-    while cursor < chars.len() {
-        match chars[cursor] {
-            '.' => {
-                cursor += 1;
-                let class_start = cursor;
-                while cursor < chars.len() && is_identifier_char(chars[cursor]) {
-                    cursor += 1;
-                }
-
-                if class_start == cursor {
-                    return None;
-                }
-
-                classes.push(chars[class_start..cursor].iter().collect::<String>());
+    while let Ok(token) = input.next_including_whitespace().map(|token| token.clone()) {
+        match token {
+            Token::Comma => {
+                current.finish_into(&mut selectors);
+                current = CompoundBuilder::default();
             }
-            ':' | '[' => break,
-            _ => return None,
+            // Combinators only separate compounds when another compound actually
+            // follows. Defer the reset so trailing whitespace before `{` (or
+            // before a comma) does not wipe the rightmost compound.
+            Token::WhiteSpace(_)
+            | Token::Delim('>')
+            | Token::Delim('+')
+            | Token::Delim('~') => current.pending_combinator = true,
+            // Blocks (attribute selectors, functional pseudo-classes): start a
+            // fresh compound if one is pending, end it, and consume the block.
+            Token::Function(_)
+            | Token::ParenthesisBlock
+            | Token::SquareBracketBlock
+            | Token::CurlyBracketBlock => {
+                current.begin_compound();
+                current.stop();
+                let _ = input.parse_nested_block(|nested| -> Result<(), ParseError<'_, ()>> {
+                    consume_remaining(nested);
+                    Ok(())
+                });
+            }
+            _ if current.stopped => {}
+            Token::Delim('.') => {
+                current.begin_compound();
+                current.expect_class = true;
+            }
+            Token::Ident(name) => {
+                current.begin_compound();
+                current.push_ident(&name);
+            }
+            Token::Colon => {
+                current.begin_compound();
+                current.stop();
+            }
+            // Ids and the universal selector are unsupported: drop the selector.
+            Token::IDHash(_) | Token::Hash(_) | Token::Delim('*') => {
+                current.begin_compound();
+                current.reject();
+            }
+            _ => current.reject(),
         }
     }
 
-    if tag.is_none() && classes.is_empty() {
-        return None;
-    }
-
-    Some(SimpleSelector { tag, classes })
+    current.finish_into(&mut selectors);
+    selectors
 }
 
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'
+#[derive(Default)]
+struct CompoundBuilder {
+    tag: Option<String>,
+    classes: Vec<String>,
+    rejected: bool,
+    stopped: bool,
+    expect_class: bool,
+    pending_combinator: bool,
+}
+
+impl CompoundBuilder {
+    /// Apply a deferred combinator: if one is pending, the tokens seen so far
+    /// belonged to an earlier compound and only the rightmost compound matters,
+    /// so discard them and begin fresh.
+    fn begin_compound(&mut self) {
+        if self.pending_combinator {
+            *self = CompoundBuilder::default();
+        }
+    }
+
+    fn stop(&mut self) {
+        self.stopped = true;
+        self.expect_class = false;
+    }
+
+    fn reject(&mut self) {
+        self.rejected = true;
+    }
+
+    fn push_ident(&mut self, name: &str) {
+        if self.expect_class {
+            // Class names are case-sensitive; only type names are lowercased.
+            self.classes.push(name.to_string());
+            self.expect_class = false;
+        } else if self.tag.is_none() && self.classes.is_empty() {
+            self.tag = Some(name.to_ascii_lowercase());
+        } else {
+            self.reject();
+        }
+    }
+
+    fn finish_into(self, out: &mut Vec<SimpleSelector>) {
+        if self.rejected || (self.tag.is_none() && self.classes.is_empty()) {
+            return;
+        }
+        out.push(SimpleSelector {
+            tag: self.tag,
+            classes: self.classes,
+        });
+    }
 }
 
 fn normalize_declaration_value(value: &str) -> (String, bool) {
@@ -1398,6 +1581,80 @@ mod tests {
 
         assert_eq!(style.font_size, Some(12.0));
         assert_eq!(style.align, Some(super::TextAlign::Right));
+    }
+
+    #[test]
+    fn ignores_css_comments_in_rules_and_declarations() {
+        // The old hand-rolled tokenizer split on raw ';' and '{', so a comment
+        // containing them would corrupt parsing. cssparser handles this.
+        let document = parse(
+            r#"
+            <style>
+            /* a stray ; and { } in a comment */
+            td.amount /* comment */ {
+                font-size: 10pt; /* ; ; ; */
+                text-align: right;
+            }
+            </style>
+            <table><tr><td class="amount">9.00</td></tr></table>
+            "#,
+        );
+        let style = document.blocks[0].cells[0].style;
+
+        assert_eq!(style.font_size, Some(10.0));
+        assert_eq!(style.align, Some(super::TextAlign::Right));
+    }
+
+    #[test]
+    fn handles_semicolons_inside_string_values() {
+        // A ';' inside a quoted value must not end the declaration early.
+        let document = parse(
+            r#"
+            <style>
+            td.q { font-family: "Weird; Font"; text-align: center; }
+            </style>
+            <table><tr><td class="q">x</td></tr></table>
+            "#,
+        );
+
+        assert_eq!(
+            document.blocks[0].cells[0].style.align,
+            Some(super::TextAlign::Center)
+        );
+    }
+
+    #[test]
+    fn parses_rules_inside_media_blocks() {
+        let document = parse(
+            r#"
+            <style>
+            @media print {
+                td.amount { text-align: right; font-size: 12pt; }
+            }
+            </style>
+            <table><tr><td class="amount">9.00</td></tr></table>
+            "#,
+        );
+        let style = document.blocks[0].cells[0].style;
+
+        assert_eq!(style.align, Some(super::TextAlign::Right));
+        assert_eq!(style.font_size, Some(12.0));
+    }
+
+    #[test]
+    fn reads_style_css_from_the_dom() {
+        // Two separate <style> elements both contribute to the cascade.
+        let document = parse(
+            r#"
+            <style>td.a { text-align: right; }</style>
+            <style>td.a { font-size: 9pt; }</style>
+            <table><tr><td class="a">9.00</td></tr></table>
+            "#,
+        );
+        let style = document.blocks[0].cells[0].style;
+
+        assert_eq!(style.align, Some(super::TextAlign::Right));
+        assert_eq!(style.font_size, Some(9.0));
     }
 
     #[test]
