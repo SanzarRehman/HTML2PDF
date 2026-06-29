@@ -2,6 +2,7 @@
 members = [
     "crates/htmltopdf",
     "crates/htmltopdf-cli",
+    "crates/htmltopdf-server",
 ]
 resolver = "2"
 

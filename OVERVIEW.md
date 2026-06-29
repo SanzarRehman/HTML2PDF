@@ -140,6 +140,8 @@ crates/
       color.rs     Color type/helpers
   htmltopdf-cli/        ← the command-line tool
     src/main.rs    `htmltopdf input.html output.pdf` (+ benchmark commands)
+  htmltopdf-server/     ← the HTTP API (for curl / Postman)
+    src/main.rs    POST /render (HTML in, PDF out), thread-pooled
 ```
 
 Two design choices worth knowing:
@@ -175,7 +177,45 @@ cores. (Measured: ~20 ms per PDF at 16 workers, ~50 MB RAM, for the 1.8 MB /
 
 ---
 
-## 7. What works today vs. what's next
+## 7. Run it as an HTTP API (curl / Postman)
+
+Start the server (binds `127.0.0.1:8080` by default; override with an argument
+or the `HTMLTOPDF_ADDR` env var):
+
+```bash
+cargo run --release -p htmltopdf-server
+# or a custom address:
+cargo run --release -p htmltopdf-server -- 0.0.0.0:9000
+```
+
+Endpoints:
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/render` | Request body = HTML; response = `application/pdf` |
+| `GET` | `/health` | Liveness check → `ok` |
+| `GET` | `/` | Usage help |
+
+`POST /render` query options: `landscape=true`, `margin=<points>`,
+`font=<path-or-family>`.
+
+```bash
+# Basic
+curl -X POST http://127.0.0.1:8080/render \
+  -H 'Content-Type: text/html' \
+  --data-binary @examples/invoice.html -o invoice.pdf
+
+# Landscape, 36pt margins, embed the Georgia font
+curl -X POST 'http://127.0.0.1:8080/render?landscape=true&margin=36&font=Georgia' \
+  --data-binary @examples/invoice.html -o invoice.pdf
+```
+
+**In Postman:** method `POST`, URL `http://127.0.0.1:8080/render`, Body → `raw`
+→ paste your HTML (the type can be Text or HTML). Hit Send, then **Save
+Response → Save to a file** to get the PDF. Add query params under the Params
+tab. Each request is handled on its own worker thread, so it scales across cores.
+
+## 8. What works today vs. what's next
 
 **Works now**
 
@@ -209,7 +249,7 @@ and don't claim support for something until it's actually implemented and tested
 
 ---
 
-## 8. The build order we're following
+## 9. The build order we're following
 
 Foundation first, so features attach to something solid. Done ✓ / next ▶:
 

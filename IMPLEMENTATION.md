@@ -553,6 +553,8 @@ that attach cleanly once the spine exists.
       block list today).
 - [x] Add font embedding with real metrics (`ttf-parser`/`fontdb`), opt-in via
       `--font <path|family>`. Subsetting + CID/Unicode still to come.
+- [x] Add an HTTP API crate (`htmltopdf-server`, `tiny_http`): `POST /render`
+      (HTML → PDF), thread-pooled; query options `landscape`/`margin`/`font`.
 - [ ] Add bounded pre-layout JavaScript stage (QuickJS/Boa behind a trait).
 
 ### Features (attach after the spine)
