@@ -1279,14 +1279,15 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "display" if value.eq_ignore_ascii_case("table-footer-group") => {
             target.display = Some(CssDisplay::TableFooterGroup);
         }
-        "text-align" if value.eq_ignore_ascii_case("right") => {
-            target.cell.align = Some(TextAlign::Right);
-        }
-        "text-align" if value.eq_ignore_ascii_case("center") => {
-            target.cell.align = Some(TextAlign::Center);
-        }
-        "text-align" if value.eq_ignore_ascii_case("left") => {
-            target.cell.align = Some(TextAlign::Left);
+        "text-align" => {
+            // `justify` maps to left until real justification exists; `start`/
+            // `end` assume left-to-right text.
+            target.cell.align = match value.to_ascii_lowercase().as_str() {
+                "right" | "end" => Some(TextAlign::Right),
+                "center" => Some(TextAlign::Center),
+                "left" | "start" | "justify" => Some(TextAlign::Left),
+                _ => target.cell.align,
+            };
         }
         "vertical-align" if value.eq_ignore_ascii_case("top") => {
             target.cell.vertical_align = Some(VerticalAlign::Top);
@@ -1300,7 +1301,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "vertical-align" if value.eq_ignore_ascii_case("baseline") => {
             target.cell.vertical_align = Some(VerticalAlign::Baseline);
         }
-        "font-weight" if value.eq_ignore_ascii_case("bold") || value == "700" => {
+        "font-weight" if is_bold_weight(value) => {
             target.cell.bold = true;
         }
         "font-size" => target.cell.font_size = parse_css_length(value),
@@ -1347,6 +1348,15 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         }
         _ => {}
     }
+}
+
+/// CSS `font-weight` values that render as bold: the `bold`/`bolder` keywords or
+/// a numeric weight of 600 or more.
+fn is_bold_weight(value: &str) -> bool {
+    let value = value.trim();
+    value.eq_ignore_ascii_case("bold")
+        || value.eq_ignore_ascii_case("bolder")
+        || value.parse::<u32>().map(|n| n >= 600).unwrap_or(false)
 }
 
 fn parse_css_background_color(value: &str) -> Option<Color> {
@@ -1808,6 +1818,29 @@ mod tests {
         assert_eq!(style.white_space, Some(super::WhiteSpace::NoWrap));
         assert_eq!(style.overflow_wrap, Some(super::OverflowWrap::BreakWord));
         assert_eq!(style.word_break, Some(super::WordBreak::BreakAll));
+    }
+
+    #[test]
+    fn parses_numeric_font_weight_and_align_keywords() {
+        let document = parse(
+            r#"
+            <style>
+            td.heavy { font-weight: 800; }
+            td.j { text-align: justify; }
+            td.e { text-align: end; }
+            </style>
+            <table><tr>
+              <td class="heavy">x</td>
+              <td class="j">y</td>
+              <td class="e">z</td>
+            </tr></table>
+            "#,
+        );
+        let cells = &document.blocks[0].cells;
+
+        assert!(cells[0].style.bold, "font-weight:800 should be bold");
+        assert_eq!(cells[1].style.align, Some(super::TextAlign::Left)); // justify -> left
+        assert_eq!(cells[2].style.align, Some(super::TextAlign::Right)); // end -> right
     }
 
     #[test]
