@@ -20,6 +20,9 @@ pub struct Block {
     pub kind: BlockKind,
     pub text: String,
     pub cells: Vec<TableCell>,
+    /// Computed style for flow blocks (headings/paragraphs). Table-row blocks
+    /// carry styles on their cells instead and leave this at the default.
+    pub style: CellStyle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,10 +167,11 @@ pub fn parse(input: &str) -> Document {
     let table_columns = parse_table_columns(input);
     let dom = crate::dom::Dom::parse(input);
     let stylesheet = parse_stylesheet(&collect_style_css(&dom));
+    let computed = compute_inherited_styles(&dom, &stylesheet);
 
-    let mut blocks = tables_from_dom(&dom, &stylesheet);
+    let mut blocks = tables_from_dom(&dom, &stylesheet, &computed);
     if blocks.is_empty() {
-        blocks = blocks_from_dom(&dom);
+        blocks = blocks_from_dom(&dom, &stylesheet, &computed);
     }
 
     Document {
@@ -178,138 +182,141 @@ pub fn parse(input: &str) -> Document {
     }
 }
 
-/// Extract generic flow content (headings, paragraphs, lists) from the real DOM.
+/// Generate flow-content boxes (headings, paragraphs, lists) from the DOM,
+/// driven by computed `display` and carrying computed style.
 ///
-/// This replaces the former hand-rolled character scanner. Block-level elements
-/// create block boundaries; inline elements contribute their text to the
-/// enclosing block. The table path (`parse_table_rows`) still runs first; this
-/// is the fallback for non-table documents and will itself move fully onto the
-/// DOM as the cascade lands (ADR 0002).
-fn blocks_from_dom(dom: &crate::dom::Dom) -> Vec<Block> {
-    let mut blocks = Vec::new();
-    let mut current = String::new();
-    let mut current_kind = BlockKind::Paragraph;
-
-    visit_block_node(dom, dom.root(), &mut blocks, &mut current_kind, &mut current);
-    push_text(&mut blocks, current_kind, &mut current);
-
-    blocks
+/// This is the box-generation step for non-table documents (ADR 0002 step 7):
+/// block-level elements open a styled box, inline elements contribute their text
+/// to the enclosing box, and `display: none` subtrees are skipped entirely.
+/// Each emitted block carries the computed style of the element that opened it,
+/// so generic content finally honors CSS color, font size, and text alignment.
+/// A fully nested box tree with block/inline layout is the remaining follow-up.
+fn blocks_from_dom(
+    dom: &crate::dom::Dom,
+    stylesheet: &Stylesheet,
+    computed: &[CellStyle],
+) -> Vec<Block> {
+    let mut flow = FlowBuilder::default();
+    visit_flow(dom, dom.root(), stylesheet, computed, &mut flow);
+    flow.flush();
+    flow.blocks
 }
 
-fn visit_block_node(
+#[derive(Default)]
+struct FlowBuilder {
+    blocks: Vec<Block>,
+    text: String,
+    kind: FlowKind,
+    style: CellStyle,
+}
+
+/// The kind of the block currently being accumulated. Defaults to a paragraph.
+#[derive(Clone, Copy, Default)]
+enum FlowKind {
+    Heading1,
+    Heading2,
+    #[default]
+    Paragraph,
+}
+
+impl FlowBuilder {
+    /// Emit the accumulated text (if any) as a block, then clear it.
+    fn flush(&mut self) {
+        let text = collapse_whitespace(&self.text);
+        self.text.clear();
+        if text.is_empty() {
+            return;
+        }
+        self.blocks.push(Block {
+            kind: match self.kind {
+                FlowKind::Heading1 => BlockKind::Heading1,
+                FlowKind::Heading2 => BlockKind::Heading2,
+                FlowKind::Paragraph => BlockKind::Paragraph,
+            },
+            text,
+            cells: Vec::new(),
+            style: self.style,
+        });
+    }
+
+    /// Start a new block: flush the previous one and adopt this element's kind
+    /// and computed style.
+    fn open(&mut self, kind: FlowKind, style: CellStyle) {
+        self.flush();
+        self.kind = kind;
+        self.style = style;
+    }
+
+    /// Close the current block, returning to the default paragraph context.
+    fn close(&mut self) {
+        self.flush();
+        self.kind = FlowKind::Paragraph;
+        self.style = CellStyle::default();
+    }
+}
+
+fn visit_flow(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
-    blocks: &mut Vec<Block>,
-    current_kind: &mut BlockKind,
-    current: &mut String,
+    stylesheet: &Stylesheet,
+    computed: &[CellStyle],
+    flow: &mut FlowBuilder,
 ) {
     use crate::dom::NodeData;
 
     let node = dom.node(id);
     match &node.data {
-        NodeData::Text(text) => current.push_str(text),
+        NodeData::Text(text) => flow.text.push_str(text),
         NodeData::Document => {
             for &child in &node.children {
-                visit_block_node(dom, child, blocks, current_kind, current);
+                visit_flow(dom, child, stylesheet, computed, flow);
             }
         }
         NodeData::Element { name, .. } => {
-            // Non-rendered subtrees contribute no flow text.
-            if matches!(name.as_str(), "head" | "script" | "style") {
+            // Non-rendered subtrees and `display: none` contribute nothing.
+            if matches!(name.as_str(), "head" | "script" | "style")
+                || is_display_none(dom, id, stylesheet)
+            {
                 return;
             }
 
-            *current_kind = handle_tag(name, blocks, *current_kind, current);
-            for &child in &node.children {
-                visit_block_node(dom, child, blocks, current_kind, current);
+            let recurse = |flow: &mut FlowBuilder| {
+                for &child in &node.children {
+                    visit_flow(dom, child, stylesheet, computed, flow);
+                }
+            };
+
+            match name.as_str() {
+                "h1" => {
+                    flow.open(FlowKind::Heading1, computed[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "h2" => {
+                    flow.open(FlowKind::Heading2, computed[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "p" | "div" | "section" | "article" | "main" | "header" | "footer" => {
+                    flow.open(FlowKind::Paragraph, computed[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "li" => {
+                    flow.open(FlowKind::Paragraph, computed[id]);
+                    if flow.text.trim().is_empty() {
+                        flow.text.push_str("- ");
+                    }
+                    recurse(flow);
+                    flow.close();
+                }
+                // A line break ends the current line but keeps the block context.
+                "br" => flow.flush(),
+                // Inline (and structural) elements just contribute their content.
+                _ => recurse(flow),
             }
-            *current_kind = handle_tag(&format!("/{name}"), blocks, *current_kind, current);
         }
     }
-}
-
-fn handle_tag(
-    raw_tag: &str,
-    blocks: &mut Vec<Block>,
-    current_kind: BlockKind,
-    current: &mut String,
-) -> BlockKind {
-    let trimmed = raw_tag.trim();
-    let is_closing = trimmed.starts_with('/');
-    let tag = trimmed
-        .trim_start_matches('/')
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    match tag.as_str() {
-        "h1" => block_boundary(
-            blocks,
-            current_kind,
-            current,
-            BlockKind::Heading1,
-            is_closing,
-        ),
-        "h2" => block_boundary(
-            blocks,
-            current_kind,
-            current,
-            BlockKind::Heading2,
-            is_closing,
-        ),
-        "p" | "div" | "section" | "article" | "main" | "header" | "footer" => block_boundary(
-            blocks,
-            current_kind,
-            current,
-            BlockKind::Paragraph,
-            is_closing,
-        ),
-        "br" => {
-            push_text(blocks, current_kind, current);
-            current_kind
-        }
-        "li" => {
-            if is_closing {
-                push_text(blocks, current_kind, current);
-            } else if current.trim().is_empty() {
-                current.push_str("- ");
-            }
-            BlockKind::Paragraph
-        }
-        _ => current_kind,
-    }
-}
-
-fn block_boundary(
-    blocks: &mut Vec<Block>,
-    current_kind: BlockKind,
-    current: &mut String,
-    next_kind: BlockKind,
-    is_closing: bool,
-) -> BlockKind {
-    push_text(blocks, current_kind, current);
-
-    if is_closing {
-        BlockKind::Paragraph
-    } else {
-        next_kind
-    }
-}
-
-fn push_text(blocks: &mut Vec<Block>, kind: BlockKind, current: &mut String) {
-    let text = collapse_whitespace(current);
-    current.clear();
-
-    if text.is_empty() {
-        return;
-    }
-
-    blocks.push(Block {
-        kind,
-        text,
-        cells: Vec::new(),
-    });
 }
 
 fn parse_table_columns(input: &str) -> Vec<f32> {
@@ -379,15 +386,18 @@ fn find_css_rule<'a>(input: &'a str, selector: &str) -> Option<&'a str> {
 /// `<tfoot>` ancestor, with its CSS `display` group honored) and emits one
 /// `Block` per `<tr>`. Cell styles are looked up from the precomputed table so
 /// each cell carries properties inherited from its ancestors (ADR 0002 step 6).
-fn tables_from_dom(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> Vec<Block> {
-    let computed = compute_inherited_styles(dom, stylesheet);
+fn tables_from_dom(
+    dom: &crate::dom::Dom,
+    stylesheet: &Stylesheet,
+    computed: &[CellStyle],
+) -> Vec<Block> {
     let mut rows = Vec::new();
     collect_table_rows(
         dom,
         dom.root(),
         TableSection::Body,
         stylesheet,
-        &computed,
+        computed,
         &mut rows,
     );
     rows
@@ -423,6 +433,7 @@ fn collect_table_rows(
                     kind: row_kind(dom, id, section, stylesheet),
                     text: String::new(),
                     cells,
+                    style: CellStyle::default(),
                 });
             }
         }
@@ -443,6 +454,7 @@ enum TableSection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CssDisplay {
+    None,
     TableHeaderGroup,
     TableRowGroup,
     TableFooterGroup,
@@ -471,7 +483,12 @@ fn display_to_table_section(display: Option<CssDisplay>) -> Option<TableSection>
         CssDisplay::TableHeaderGroup => Some(TableSection::Header),
         CssDisplay::TableRowGroup => Some(TableSection::Body),
         CssDisplay::TableFooterGroup => Some(TableSection::Footer),
+        CssDisplay::None => None,
     }
+}
+
+fn is_display_none(dom: &crate::dom::Dom, id: crate::dom::NodeId, stylesheet: &Stylesheet) -> bool {
+    computed_display_for_node(dom, id, stylesheet) == Some(CssDisplay::None)
 }
 
 fn computed_display_for_node(
@@ -1230,6 +1247,9 @@ fn normalize_declaration_value(value: &str) -> (String, bool) {
 
 fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value: &str) {
     match property {
+        "display" if value.eq_ignore_ascii_case("none") => {
+            target.display = Some(CssDisplay::None);
+        }
         "display" if value.eq_ignore_ascii_case("table-header-group") => {
             target.display = Some(CssDisplay::TableHeaderGroup);
         }
@@ -1422,6 +1442,58 @@ mod tests {
 
         assert_eq!(document.blocks.len(), 1);
         assert_eq!(document.blocks[0].text, "Visible");
+    }
+
+    #[test]
+    fn skips_display_none_flow_content() {
+        let document = parse(
+            r#"
+            <style>.hidden { display: none; }</style>
+            <p>shown</p>
+            <p class="hidden">secret</p>
+            <div style="display:none">also secret</div>
+            "#,
+        );
+
+        let texts: Vec<&str> = document.blocks.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, vec!["shown"]);
+    }
+
+    #[test]
+    fn applies_computed_style_to_flow_blocks() {
+        let document = parse(
+            r#"
+            <style>
+            p.note { color: #112233; font-size: 14pt; text-align: center; }
+            </style>
+            <p class="note">styled</p>
+            "#,
+        );
+        let block = &document.blocks[0];
+
+        assert_eq!(block.kind, BlockKind::Paragraph);
+        assert_eq!(block.text, "styled");
+        assert_eq!(
+            block.style.color,
+            Some(crate::color::Color::from_rgb_u8(0x11, 0x22, 0x33))
+        );
+        assert_eq!(block.style.font_size, Some(14.0));
+        assert_eq!(block.style.align, Some(super::TextAlign::Center));
+    }
+
+    #[test]
+    fn flow_blocks_inherit_style_from_ancestors() {
+        let document = parse(
+            r#"
+            <style>body { color: #445566; }</style>
+            <body><div><p>deep</p></div></body>
+            "#,
+        );
+
+        assert_eq!(
+            document.blocks[0].style.color,
+            Some(crate::color::Color::from_rgb_u8(0x44, 0x55, 0x66))
+        );
     }
 
     #[test]

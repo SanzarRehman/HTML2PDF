@@ -255,13 +255,16 @@ mod tests {
     #[test]
     fn escapes_pdf_text() {
         let mut page = Page::new();
-        page.push_line(Line {
-            text: "A (test) \\ value".to_string(),
-            x: 48.0,
-            y: 700.0,
-            font_size: 12.0,
-            leading: 16.0,
-        });
+        page.push_colored_line(
+            Line {
+                text: "A (test) \\ value".to_string(),
+                x: 48.0,
+                y: 700.0,
+                font_size: 12.0,
+                leading: 16.0,
+            },
+            Color::BLACK,
+        );
 
         assert_eq!(escape_text("A (test) \\ value"), "A \\(test\\) \\\\ value");
 

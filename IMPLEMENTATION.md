@@ -87,7 +87,8 @@ parser, DOM, CSS, cascade, and font metrics get rebuilt. See
 - [x] Skip the RcDom intermediate with a custom `html5ever` `TreeSink` (RAM).
 - [x] Replace substring CSS rule lookup with a `cssparser` stylesheet model.
 - [x] Build computed-style cascade over the DOM (specificity + inheritance).
-- [ ] Derive a box tree from computed `display`.
+- [x] Generate flow-content boxes from computed `display` (skip `display:none`,
+      carry computed style). Full nested box-tree layout still to come.
 
 ## Previous Sprint: Minimal Vertical Slice
 
@@ -476,6 +477,25 @@ Current Rust output after the computed-style inheritance pass:
   ancestors (including through an implied `<tbody>`), an element's own value
   overrides the inherited one, and `border`/`background-color` do not inherit.
 
+Current Rust output after display-driven flow-content boxes:
+
+- Command: `target/release/htmltopdf reg-2-9-1.html out/reg-box.pdf`
+- Result: succeeds; fixture output **byte-identical** (it uses the table path).
+- Generic (non-table) documents now generate boxes from computed `display`:
+  `display: none` subtrees are skipped, and each heading/paragraph block carries
+  the computed style of the element that opened it. Layout renders generic blocks
+  with computed font size, color, and text alignment (previously fixed 24/18/11pt,
+  always black, always left-aligned).
+- `Block` gained a `style` field; computed styles are now computed once in
+  `parse()` and shared by the table and flow paths.
+- Peak RSS ~50 MB, throughput ~13 ms/PDF at 16 workers (unchanged).
+- New behavior, covered by tests: `display:none` hides flow content (class and
+  inline), and flow blocks pick up `color`/`font-size`/`text-align` from their
+  own rules and from ancestors.
+- Remaining for the box tree: a fully nested block/inline box tree with
+  box-tree-driven layout. Today flow boxes still flatten to a block list, and the
+  table path keeps its specialized layout.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -500,7 +520,11 @@ that attach cleanly once the spine exists.
       CSS from the DOM. (Cascade model, selectors, and value parsing reused.)
 - [ ] Migrate `@page` / column-width geometry off `find_css_rule` substring scan.
 - [x] Add inheritance and computed-style model over the DOM.
-- [ ] Derive a box tree from computed `display`; layout consumes the box tree.
+- [x] Generate flow-content boxes from computed `display` (display:none honored,
+      generic blocks carry computed style). Layout renders them with computed
+      font-size/color/text-align.
+- [ ] Full nested box tree with block/inline layout (boxes still flatten to a
+      block list today).
 - [ ] Add font embedding + subsetting (`ttf-parser`/`fontdb`); then real metrics
       for embedded fonts.
 - [ ] Add bounded pre-layout JavaScript stage (QuickJS/Boa behind a trait).

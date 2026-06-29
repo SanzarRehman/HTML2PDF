@@ -85,17 +85,6 @@ impl Page {
         }
     }
 
-    pub(crate) fn push_line(&mut self, line: Line) {
-        self.commands.push(PaintCommand::SetFillColor(Color::BLACK));
-        self.commands.push(PaintCommand::Text(TextCommand {
-            text: line.text.clone(),
-            x: line.x,
-            y: line.y,
-            font_size: line.font_size,
-        }));
-        self.lines.push(line);
-    }
-
     pub(crate) fn push_colored_line(&mut self, line: Line, color: Color) {
         self.commands.push(PaintCommand::SetFillColor(color));
         self.commands.push(PaintCommand::Text(TextCommand {
@@ -201,10 +190,13 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
             continue;
         }
 
-        let font_size = font_size_for(block.kind);
+        // Computed style overrides the per-kind defaults where CSS set a value.
+        let font_size = block.style.font_size.unwrap_or(font_size_for(block.kind));
         let leading = font_size * 1.35;
         let before = spacing_before(block.kind);
         let after = spacing_after(block.kind);
+        let color = block.style.color.unwrap_or(Color::BLACK);
+        let align = block.style.align.unwrap_or(TextAlign::Left);
 
         y -= before;
         ensure_space(&mut pages, &mut y, options, leading);
@@ -212,14 +204,28 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
         for line in wrap_text(&block.text, content_width, font_size) {
             ensure_space(&mut pages, &mut y, options, leading);
 
+            let text_width = estimate_text_width(&line, font_size);
+            let x = match align {
+                TextAlign::Left => options.margin_left,
+                TextAlign::Center => {
+                    options.margin_left + ((content_width - text_width) / 2.0).max(0.0)
+                }
+                TextAlign::Right => {
+                    options.margin_left + (content_width - text_width).max(0.0)
+                }
+            };
+
             let page = pages.last_mut().expect("at least one page exists");
-            page.push_line(Line {
-                text: line,
-                x: options.margin_left,
-                y,
-                font_size,
-                leading,
-            });
+            page.push_colored_line(
+                Line {
+                    text: line,
+                    x,
+                    y,
+                    font_size,
+                    leading,
+                },
+                color,
+            );
 
             y -= leading;
         }
@@ -742,6 +748,7 @@ mod tests {
             blocks: (0..200)
                 .map(|index| Block {
                     kind: BlockKind::Paragraph,
+                    style: Default::default(),
                     text: format!("Paragraph {index}"),
                     cells: Vec::new(),
                 })
@@ -764,6 +771,7 @@ mod tests {
             table_columns: vec![30.0, 70.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![
                     crate::html::TableCell {
@@ -807,6 +815,7 @@ mod tests {
             table_columns: vec![100.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "Warning".to_string(),
@@ -840,6 +849,7 @@ mod tests {
             table_columns: vec![100.0, 100.0, 100.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![
                     crate::html::TableCell {
@@ -890,6 +900,7 @@ mod tests {
             table_columns: vec![20.0, 200.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "This cell has enough words to wrap into multiple lines".to_string(),
@@ -926,6 +937,7 @@ mod tests {
             table_columns: vec![20.0, 200.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "A".to_string(),
@@ -957,6 +969,7 @@ mod tests {
             table_columns: vec![60.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "1000055403@example.com".to_string(),
@@ -1008,6 +1021,7 @@ mod tests {
             table_columns: vec![60.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "1000055403@example.com".to_string(),
@@ -1060,6 +1074,7 @@ mod tests {
             table_columns: vec![100.0, 300.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "Wide".to_string(),
@@ -1103,6 +1118,7 @@ mod tests {
             table_columns: vec![100.0, 300.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
                     text: "Report title".to_string(),
@@ -1160,6 +1176,7 @@ mod tests {
         ];
         let mut blocks = vec![Block {
             kind: BlockKind::TableHeaderRow,
+            style: Default::default(),
             text: String::new(),
             cells: header_cells,
         }];
@@ -1167,6 +1184,7 @@ mod tests {
         for index in 0..12 {
             blocks.push(Block {
                 kind: BlockKind::TableRow,
+                style: Default::default(),
                 text: String::new(),
                 cells: vec![
                     crate::html::TableCell {
