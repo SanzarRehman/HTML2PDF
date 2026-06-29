@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/htmltopdf",
+    "crates/htmltopdf-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = ""
+rust-version = "1.86"
