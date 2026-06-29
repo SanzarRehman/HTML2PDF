@@ -29,6 +29,10 @@ pub struct Block {
 pub enum BlockKind {
     Heading1,
     Heading2,
+    Heading3,
+    Heading4,
+    Heading5,
+    Heading6,
     Paragraph,
     TableHeaderRow,
     TableRow,
@@ -211,6 +215,10 @@ struct FlowBuilder {
 enum FlowKind {
     Heading1,
     Heading2,
+    Heading3,
+    Heading4,
+    Heading5,
+    Heading6,
     #[default]
     Paragraph,
 }
@@ -227,6 +235,10 @@ impl FlowBuilder {
             kind: match self.kind {
                 FlowKind::Heading1 => BlockKind::Heading1,
                 FlowKind::Heading2 => BlockKind::Heading2,
+                FlowKind::Heading3 => BlockKind::Heading3,
+                FlowKind::Heading4 => BlockKind::Heading4,
+                FlowKind::Heading5 => BlockKind::Heading5,
+                FlowKind::Heading6 => BlockKind::Heading6,
                 FlowKind::Paragraph => BlockKind::Paragraph,
             },
             text,
@@ -287,6 +299,26 @@ fn visit_flow(
                 }
                 "h2" => {
                     flow.open(FlowKind::Heading2, computed.style[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "h3" => {
+                    flow.open(FlowKind::Heading3, computed.style[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "h4" => {
+                    flow.open(FlowKind::Heading4, computed.style[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "h5" => {
+                    flow.open(FlowKind::Heading5, computed.style[id]);
+                    recurse(flow);
+                    flow.close();
+                }
+                "h6" => {
+                    flow.open(FlowKind::Heading6, computed.style[id]);
                     recurse(flow);
                     flow.close();
                 }
@@ -1595,6 +1627,23 @@ mod tests {
 
         assert_eq!(document.blocks.len(), 1);
         assert_eq!(document.blocks[0].text, "Visible");
+    }
+
+    #[test]
+    fn parses_all_heading_levels() {
+        let document = parse("<h1>a</h1><h2>b</h2><h3>c</h3><h4>d</h4><h5>e</h5><h6>f</h6>");
+        let kinds: Vec<BlockKind> = document.blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                BlockKind::Heading1,
+                BlockKind::Heading2,
+                BlockKind::Heading3,
+                BlockKind::Heading4,
+                BlockKind::Heading5,
+                BlockKind::Heading6,
+            ]
+        );
     }
 
     #[test]

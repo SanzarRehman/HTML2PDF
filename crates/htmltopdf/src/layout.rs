@@ -702,6 +702,10 @@ fn font_size_for(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 24.0,
         BlockKind::Heading2 => 18.0,
+        BlockKind::Heading3 => 14.0,
+        BlockKind::Heading4 => 12.0,
+        BlockKind::Heading5 => 10.5,
+        BlockKind::Heading6 => 9.0,
         BlockKind::Paragraph
         | BlockKind::TableHeaderRow
         | BlockKind::TableRow
@@ -713,6 +717,7 @@ fn spacing_before(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 0.0,
         BlockKind::Heading2 => 10.0,
+        BlockKind::Heading3 | BlockKind::Heading4 | BlockKind::Heading5 | BlockKind::Heading6 => 8.0,
         BlockKind::Paragraph
         | BlockKind::TableHeaderRow
         | BlockKind::TableRow
@@ -724,6 +729,7 @@ fn spacing_after(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 12.0,
         BlockKind::Heading2 => 8.0,
+        BlockKind::Heading3 | BlockKind::Heading4 | BlockKind::Heading5 | BlockKind::Heading6 => 6.0,
         BlockKind::Paragraph
         | BlockKind::TableHeaderRow
         | BlockKind::TableRow
