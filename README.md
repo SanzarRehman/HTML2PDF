@@ -49,8 +49,8 @@ Works today:
 - Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes.
 - Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
   alignment, wrapping, clipping, and repeated table headers.
-- CSS colors, font sizes, bold text, text alignment, margins, padding, block
-  backgrounds, and basic borders.
+- CSS colors, font sizes, bold text, text alignment, margins, padding (with
+  vertical margin collapse), block backgrounds, and basic borders.
 - Pagination, page margins, landscape pages, compressed PDF streams.
 - Built-in Helvetica metrics and optional embedded TrueType/OpenType fonts.
 - Font subsetting for `glyf`-based TrueType fonts, with full-font fallback for
@@ -204,8 +204,9 @@ Important engine modules:
 | `box_tree.rs` | Nested flow box tree |
 | `layout.rs` | Pagination, text wrapping, tables, and page layout |
 | `paint.rs` | Backend-neutral display-list commands |
-| `pdf.rs` | PDF writer, compression, embedded fonts, ToUnicode maps |
-| `font.rs` | Font loading, metrics, encoding, and system font lookup |
+| `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, ToUnicode maps |
+| `font.rs` | Font loading, metrics, WinAnsi encoding, and system font lookup |
+| `subset.rs` | Retain-GIDs TrueType glyph subsetter for embedded fonts |
 
 The display-list boundary is intentional. Layout produces neutral paint
 commands; the PDF backend consumes them. That keeps the engine extensible for
@@ -241,56 +242,9 @@ speed and memory stay visible as fidelity improves.
 - Add more CSS layout modes, including absolute positioning, flexbox, and grid.
 - Harden the HTTP server for production deployment patterns.
 
-## Contributing
+## Author
 
-Contributions are welcome. The project is still young, so the best
-contributions are focused, measured, and tied to tests.
-
-### Good first contributions
-
-- Add small HTML/CSS regression fixtures.
-- Improve docs and examples.
-- Add focused CSS property support with tests.
-- Add PDF writer tests for new paint operators.
-- Improve benchmark scripts and fixture metadata.
-
-### Development workflow
-
-1. Fork the repository and create a feature branch.
-2. Keep changes scoped to one behavior or subsystem.
-3. Add or update tests for the behavior you changed.
-4. Run formatting and tests:
-
-```bash
-cargo fmt
-cargo test
-```
-
-5. For rendering changes, generate a sample PDF:
-
-```bash
-cargo run --release -p htmltopdf-cli -- examples/invoice.html out/invoice.pdf
-```
-
-6. For performance-sensitive changes, run a benchmark:
-
-```bash
-cargo run --release -p htmltopdf-cli -- bench reg-2-9-1.html out/bench 5
-cargo run --release -p htmltopdf-cli -- bench-concurrent reg-2-9-1.html out/bench 16 3
-```
-
-7. Update [IMPLEMENTATION.md](IMPLEMENTATION.md) when the change completes a
-   checklist item or changes benchmark expectations.
-
-### Pull request guidelines
-
-- Explain the problem and the chosen approach.
-- Include before/after notes for rendering behavior when useful.
-- Include benchmark numbers when touching layout, parsing, PDF writing, or
-  concurrency-sensitive code.
-- Do not claim full browser compatibility for partial support.
-- Prefer structured parsers and existing engine boundaries over one-off string
-  scans.
+Sanzar Rahman
 
 ## Design Principles
 
