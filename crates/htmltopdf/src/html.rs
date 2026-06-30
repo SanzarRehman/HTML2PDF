@@ -9,7 +9,11 @@ use crate::color::Color;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Document {
+    /// Table rows (the spreadsheet/table path). Empty for non-table documents.
     pub blocks: Vec<Block>,
+    /// The flow box tree (headings/paragraphs/lists). `Some` only for non-table
+    /// documents; the table path leaves it `None`.
+    pub flow: Option<crate::box_tree::FlowRoot>,
     pub page_style: PageStyle,
     pub table_style: TableStyle,
     pub table_columns: Vec<f32>,
@@ -58,6 +62,10 @@ pub struct CellStyle {
     pub padding_right: Option<f32>,
     pub padding_top: Option<f32>,
     pub padding_bottom: Option<f32>,
+    pub margin_left: Option<f32>,
+    pub margin_right: Option<f32>,
+    pub margin_top: Option<f32>,
+    pub margin_bottom: Option<f32>,
     pub white_space: Option<WhiteSpace>,
     pub overflow_wrap: Option<OverflowWrap>,
     pub word_break: Option<WordBreak>,
@@ -78,6 +86,10 @@ impl Default for CellStyle {
             padding_right: None,
             padding_top: None,
             padding_bottom: None,
+            margin_left: None,
+            margin_right: None,
+            margin_top: None,
+            margin_bottom: None,
             white_space: None,
             overflow_wrap: None,
             word_break: None,
@@ -173,175 +185,311 @@ pub fn parse(input: &str) -> Document {
     let stylesheet = parse_stylesheet(&collect_style_css(&dom));
     let computed = compute_inherited_styles(&dom, &stylesheet);
 
-    let mut blocks = tables_from_dom(&dom, &stylesheet, &computed);
-    if blocks.is_empty() {
-        blocks = blocks_from_dom(&dom, &computed);
-    }
+    let blocks = tables_from_dom(&dom, &stylesheet, &computed);
+    // Tables and flow content are mutually exclusive paths: only build the flow
+    // box tree when the document has no table rows.
+    let flow = if blocks.is_empty() {
+        build_flow(&dom, &computed)
+    } else {
+        None
+    };
 
     Document {
         blocks,
+        flow,
         page_style,
         table_style,
         table_columns,
     }
 }
 
-/// Generate flow-content boxes (headings, paragraphs, lists) from the DOM,
-/// driven by computed `display` and carrying computed style.
-///
-/// This is the box-generation step for non-table documents (ADR 0002 step 7):
-/// block-level elements open a styled box, inline elements contribute their text
-/// to the enclosing box, and `display: none` subtrees are skipped entirely.
-/// Each emitted block carries the computed style of the element that opened it,
-/// so generic content finally honors CSS color, font size, and text alignment.
-/// A fully nested box tree with block/inline layout is the remaining follow-up.
-fn blocks_from_dom(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Vec<Block> {
-    let mut flow = FlowBuilder::default();
-    visit_flow(dom, dom.root(), computed, &mut flow);
-    flow.flush();
-    flow.blocks
+/// Lower the DOM into the flow box tree (ADR 0002 step 8) for non-table
+/// documents: a nested tree of block boxes whose leaves are runs of styled
+/// inline text. Block-level elements open a child box (carrying their computed
+/// indent/alignment and a resolved font size); inline elements thread their
+/// computed style into the runs they contain; `display: none` subtrees are
+/// skipped. Returns `None` when the document carries no visible text.
+fn build_flow(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Option<crate::box_tree::FlowRoot> {
+    let root_ctx = FlowCtx {
+        font_size: crate::layout::font_size_for(BlockKind::Paragraph),
+        bold: false,
+        color: Color::BLACK,
+        align: TextAlign::Left,
+    };
+    let mut acc = ChildAcc::default();
+    build_node(dom, dom.root(), computed, root_ctx, &mut acc);
+    acc.flush_line();
+
+    let root = crate::box_tree::FlowRoot {
+        children: acc.children,
+    };
+    root.has_text().then_some(root)
 }
 
+/// The inline style context threaded down the tree while building flow content.
+#[derive(Clone, Copy)]
+struct FlowCtx {
+    font_size: f32,
+    bold: bool,
+    color: Color,
+    align: TextAlign,
+}
+
+/// Accumulates one block's children, buffering inline text into a pending line
+/// box that is emitted whenever a block boundary (or `<br>`) is reached.
 #[derive(Default)]
-struct FlowBuilder {
-    blocks: Vec<Block>,
-    text: String,
-    kind: FlowKind,
-    style: CellStyle,
+struct ChildAcc {
+    children: Vec<crate::box_tree::BoxChild>,
+    pending: Vec<crate::box_tree::InlineRun>,
 }
 
-/// The kind of the block currently being accumulated. Defaults to a paragraph.
-#[derive(Clone, Copy, Default)]
-enum FlowKind {
-    Heading1,
-    Heading2,
-    Heading3,
-    Heading4,
-    Heading5,
-    Heading6,
-    #[default]
-    Paragraph,
-}
-
-impl FlowBuilder {
-    /// Emit the accumulated text (if any) as a block, then clear it.
-    fn flush(&mut self) {
-        let text = collapse_whitespace(&self.text);
-        self.text.clear();
+impl ChildAcc {
+    /// Append inline text under the current style, merging into the previous run
+    /// when the style matches to keep the run count low.
+    fn push_text(&mut self, text: &str, ctx: &FlowCtx) {
         if text.is_empty() {
             return;
         }
-        self.blocks.push(Block {
-            kind: match self.kind {
-                FlowKind::Heading1 => BlockKind::Heading1,
-                FlowKind::Heading2 => BlockKind::Heading2,
-                FlowKind::Heading3 => BlockKind::Heading3,
-                FlowKind::Heading4 => BlockKind::Heading4,
-                FlowKind::Heading5 => BlockKind::Heading5,
-                FlowKind::Heading6 => BlockKind::Heading6,
-                FlowKind::Paragraph => BlockKind::Paragraph,
-            },
-            text,
-            cells: Vec::new(),
-            style: self.style,
+        if let Some(last) = self.pending.last_mut() {
+            if last.font_size == ctx.font_size && last.bold == ctx.bold && last.color == ctx.color {
+                last.text.push_str(text);
+                return;
+            }
+        }
+        self.pending.push(crate::box_tree::InlineRun {
+            text: text.to_string(),
+            font_size: ctx.font_size,
+            bold: ctx.bold,
+            color: ctx.color,
         });
     }
 
-    /// Start a new block: flush the previous one and adopt this element's kind
-    /// and computed style.
-    fn open(&mut self, kind: FlowKind, style: CellStyle) {
-        self.flush();
-        self.kind = kind;
-        self.style = style;
-    }
-
-    /// Close the current block, returning to the default paragraph context.
-    fn close(&mut self) {
-        self.flush();
-        self.kind = FlowKind::Paragraph;
-        self.style = CellStyle::default();
+    /// Emit the pending inline content as a line box, if it carries any text.
+    fn flush_line(&mut self) {
+        if self.pending.iter().any(|run| !run.text.trim().is_empty()) {
+            self.children
+                .push(crate::box_tree::BoxChild::Line(std::mem::take(&mut self.pending)));
+        } else {
+            self.pending.clear();
+        }
     }
 }
 
-fn visit_flow(
+fn build_node(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
     computed: &ComputedStyles,
-    flow: &mut FlowBuilder,
+    ctx: FlowCtx,
+    acc: &mut ChildAcc,
 ) {
     use crate::dom::NodeData;
 
     let node = dom.node(id);
     match &node.data {
-        NodeData::Text(text) => flow.text.push_str(text),
+        NodeData::Text(text) => acc.push_text(text, &ctx),
         NodeData::Document => {
             for &child in &node.children {
-                visit_flow(dom, child, computed, flow);
+                build_node(dom, child, computed, ctx, acc);
             }
         }
         NodeData::Element { name, .. } => {
+            let tag = name.as_str();
             // Non-rendered subtrees and `display: none` contribute nothing.
-            if matches!(name.as_str(), "head" | "script" | "style") || computed.hidden[id] {
+            if matches!(tag, "head" | "script" | "style" | "title") || computed.hidden[id] {
                 return;
             }
 
-            let recurse = |flow: &mut FlowBuilder| {
+            if tag == "br" {
+                // A line break ends the current line but stays in this block.
+                acc.flush_line();
+            } else if is_block_tag(tag) {
+                acc.flush_line();
+                if let Some(block) = build_block(dom, id, computed, ctx, tag) {
+                    acc.children.push(crate::box_tree::BoxChild::Block(block));
+                }
+            } else {
+                // Inline element: fold its computed style into the context and
+                // let its children contribute to the enclosing line.
+                let child_ctx = inline_ctx(&ctx, computed, id, tag);
                 for &child in &node.children {
-                    visit_flow(dom, child, computed, flow);
+                    build_node(dom, child, computed, child_ctx, acc);
                 }
-            };
-
-            match name.as_str() {
-                "h1" => {
-                    flow.open(FlowKind::Heading1, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "h2" => {
-                    flow.open(FlowKind::Heading2, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "h3" => {
-                    flow.open(FlowKind::Heading3, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "h4" => {
-                    flow.open(FlowKind::Heading4, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "h5" => {
-                    flow.open(FlowKind::Heading5, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "h6" => {
-                    flow.open(FlowKind::Heading6, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "p" | "div" | "section" | "article" | "main" | "header" | "footer" => {
-                    flow.open(FlowKind::Paragraph, computed.style[id]);
-                    recurse(flow);
-                    flow.close();
-                }
-                "li" => {
-                    flow.open(FlowKind::Paragraph, computed.style[id]);
-                    if flow.text.trim().is_empty() {
-                        flow.text.push_str("- ");
-                    }
-                    recurse(flow);
-                    flow.close();
-                }
-                // A line break ends the current line but keeps the block context.
-                "br" => flow.flush(),
-                // Inline (and structural) elements just contribute their content.
-                _ => recurse(flow),
             }
         }
     }
+}
+
+/// Build a block box for a block-level element, recursing into its children.
+fn build_block(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    computed: &ComputedStyles,
+    parent: FlowCtx,
+    tag: &str,
+) -> Option<crate::box_tree::BlockBox> {
+    let kind = block_kind_for(tag);
+    let own = &computed.style[id];
+
+    let font_size = own.font_size.unwrap_or(crate::layout::font_size_for(kind));
+    let bold = parent.bold || own.bold || is_heading(kind) || tag == "th";
+    let color = own.color.unwrap_or(parent.color);
+    let align = own.align.unwrap_or(parent.align);
+
+    // CSS margins (default to the per-kind spacing when unset) and padding. List
+    // and blockquote nesting fold into `margin.left` so it accumulates as they
+    // nest.
+    let nesting_indent = if matches!(tag, "ul" | "ol" | "blockquote" | "dd") {
+        LIST_INDENT
+    } else {
+        0.0
+    };
+    let margin = crate::box_tree::Edges {
+        top: own.margin_top.unwrap_or_else(|| crate::layout::spacing_before(kind)),
+        right: own.margin_right.unwrap_or(0.0),
+        bottom: own.margin_bottom.unwrap_or_else(|| crate::layout::spacing_after(kind)),
+        left: own.margin_left.unwrap_or(0.0) + nesting_indent,
+    };
+    let padding = crate::box_tree::Edges {
+        top: own.padding_top.unwrap_or(0.0),
+        right: own.padding_right.unwrap_or(0.0),
+        bottom: own.padding_bottom.unwrap_or(0.0),
+        left: own.padding_left.unwrap_or(0.0),
+    };
+    // A white background matches the page, so it is treated as "no background".
+    let background = own
+        .background_color
+        .filter(|color| *color != Color::WHITE);
+
+    let child_ctx = FlowCtx {
+        font_size,
+        bold,
+        color,
+        align,
+    };
+
+    let mut acc = ChildAcc::default();
+    if tag == "li" {
+        let marker = li_marker(dom, id);
+        acc.push_text(&marker, &child_ctx);
+    }
+    for &child in &dom.node(id).children {
+        build_node(dom, child, computed, child_ctx, &mut acc);
+    }
+    acc.flush_line();
+
+    if acc.children.is_empty() {
+        return None;
+    }
+    Some(crate::box_tree::BlockBox {
+        kind,
+        margin,
+        padding,
+        align,
+        background,
+        border: own.border,
+        children: acc.children,
+    })
+}
+
+/// Fold an inline element's computed style into the surrounding context. Block
+/// alignment is unaffected; `<b>`/`<strong>` force bold even without a rule
+/// (there is no UA stylesheet).
+fn inline_ctx(parent: &FlowCtx, computed: &ComputedStyles, id: crate::dom::NodeId, tag: &str) -> FlowCtx {
+    let own = &computed.style[id];
+    FlowCtx {
+        font_size: own.font_size.unwrap_or(parent.font_size),
+        bold: parent.bold || own.bold || matches!(tag, "b" | "strong"),
+        color: own.color.unwrap_or(parent.color),
+        align: parent.align,
+    }
+}
+
+/// The list marker for an `<li>`: a bullet for `<ul>` (or a bare item), or a
+/// 1-based number for `<ol>`.
+fn li_marker(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> String {
+    let parent = dom.node(id).parent;
+    let ordered = parent
+        .map(|p| dom.node(p).tag() == Some("ol"))
+        .unwrap_or(false);
+
+    if !ordered {
+        return "\u{2022}  ".to_string();
+    }
+
+    let mut number = 1;
+    if let Some(p) = parent {
+        for &sibling in &dom.node(p).children {
+            if sibling == id {
+                break;
+            }
+            if dom.node(sibling).tag() == Some("li") {
+                number += 1;
+            }
+        }
+    }
+    format!("{number}.  ")
+}
+
+/// Fixed left-indent step applied per list / blockquote nesting level.
+const LIST_INDENT: f32 = 24.0;
+
+fn is_heading(kind: BlockKind) -> bool {
+    matches!(
+        kind,
+        BlockKind::Heading1
+            | BlockKind::Heading2
+            | BlockKind::Heading3
+            | BlockKind::Heading4
+            | BlockKind::Heading5
+            | BlockKind::Heading6
+    )
+}
+
+fn block_kind_for(tag: &str) -> BlockKind {
+    match tag {
+        "h1" => BlockKind::Heading1,
+        "h2" => BlockKind::Heading2,
+        "h3" => BlockKind::Heading3,
+        "h4" => BlockKind::Heading4,
+        "h5" => BlockKind::Heading5,
+        "h6" => BlockKind::Heading6,
+        _ => BlockKind::Paragraph,
+    }
+}
+
+/// Block-level tags that open their own box. Everything else is treated as
+/// inline (its text joins the enclosing line box).
+fn is_block_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "h1" | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "p"
+            | "div"
+            | "section"
+            | "article"
+            | "main"
+            | "header"
+            | "footer"
+            | "nav"
+            | "aside"
+            | "blockquote"
+            | "figure"
+            | "figcaption"
+            | "address"
+            | "pre"
+            | "ul"
+            | "ol"
+            | "li"
+            | "dl"
+            | "dt"
+            | "dd"
+            | "form"
+            | "fieldset"
+    )
 }
 
 fn parse_table_columns(input: &str) -> Vec<f32> {
@@ -670,6 +818,10 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         padding_right: own.padding_right,
         padding_top: own.padding_top,
         padding_bottom: own.padding_bottom,
+        margin_left: own.margin_left,
+        margin_right: own.margin_right,
+        margin_top: own.margin_top,
+        margin_bottom: own.margin_bottom,
         background_color: own.background_color,
     }
 }
@@ -773,6 +925,19 @@ fn parse_css_length(value: &str) -> Option<f32> {
         "cm" => Some(number * 72.0 / 2.54),
         "mm" => Some(number * 72.0 / 25.4),
         _ => None,
+    }
+}
+
+/// Parse a `margin`/`padding` shorthand into `[top, right, bottom, left]` using
+/// the CSS 1-to-4 value rule. Non-length tokens (e.g. `auto`) become `None`.
+fn parse_box_edges(value: &str) -> [Option<f32>; 4] {
+    let parts: Vec<Option<f32>> = value.split_whitespace().map(parse_css_length).collect();
+    match parts.as_slice() {
+        [a] => [*a, *a, *a, *a],
+        [a, b] => [*a, *b, *a, *b],
+        [a, b, c] => [*a, *b, *c, *b],
+        [a, b, c, d, ..] => [*a, *b, *c, *d],
+        [] => [None; 4],
     }
 }
 
@@ -1344,6 +1509,24 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "padding-right" => target.cell.padding_right = parse_css_length(value),
         "padding-top" => target.cell.padding_top = parse_css_length(value),
         "padding-bottom" => target.cell.padding_bottom = parse_css_length(value),
+        "padding" => {
+            let [top, right, bottom, left] = parse_box_edges(value);
+            target.cell.padding_top = top;
+            target.cell.padding_right = right;
+            target.cell.padding_bottom = bottom;
+            target.cell.padding_left = left;
+        }
+        "margin-left" => target.cell.margin_left = parse_css_length(value),
+        "margin-right" => target.cell.margin_right = parse_css_length(value),
+        "margin-top" => target.cell.margin_top = parse_css_length(value),
+        "margin-bottom" => target.cell.margin_bottom = parse_css_length(value),
+        "margin" => {
+            let [top, right, bottom, left] = parse_box_edges(value);
+            target.cell.margin_top = top;
+            target.cell.margin_right = right;
+            target.cell.margin_bottom = bottom;
+            target.cell.margin_left = left;
+        }
         "overflow" if value.eq_ignore_ascii_case("visible") => {
             target.cell.overflow = Some(Overflow::Visible);
         }
@@ -1579,6 +1762,10 @@ impl CellStyle {
         self.padding_right = other.padding_right.or(self.padding_right);
         self.padding_top = other.padding_top.or(self.padding_top);
         self.padding_bottom = other.padding_bottom.or(self.padding_bottom);
+        self.margin_left = other.margin_left.or(self.margin_left);
+        self.margin_right = other.margin_right.or(self.margin_right);
+        self.margin_top = other.margin_top.or(self.margin_top);
+        self.margin_bottom = other.margin_bottom.or(self.margin_bottom);
         self.white_space = other.white_space.or(self.white_space);
         self.overflow_wrap = other.overflow_wrap.or(self.overflow_wrap);
         self.word_break = other.word_break.or(self.word_break);
@@ -1609,30 +1796,94 @@ fn collapse_whitespace(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{parse, BlockKind};
+    use crate::box_tree::{BlockBox, BoxChild, FlowRoot, InlineRun};
+
+    /// All block boxes in document order (depth-first), flattening the tree so
+    /// flow-content tests can assert on leaf blocks regardless of nesting.
+    fn flow_blocks(flow: &FlowRoot) -> Vec<&BlockBox> {
+        fn walk<'a>(children: &'a [BoxChild], out: &mut Vec<&'a BlockBox>) {
+            for child in children {
+                if let BoxChild::Block(block) = child {
+                    out.push(block);
+                    walk(&block.children, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&flow.children, &mut out);
+        out
+    }
+
+    /// The block's directly-contained inline text (its own line boxes only),
+    /// with whitespace collapsed — i.e. text not inside a nested child block.
+    fn block_text(block: &BlockBox) -> String {
+        let mut text = String::new();
+        for child in &block.children {
+            if let BoxChild::Line(runs) = child {
+                for run in runs {
+                    text.push_str(&run.text);
+                }
+            }
+        }
+        super::collapse_whitespace(&text)
+    }
+
+    /// The first inline run of the block's first line box.
+    fn first_run(block: &BlockBox) -> &InlineRun {
+        block
+            .children
+            .iter()
+            .find_map(|child| match child {
+                BoxChild::Line(runs) => runs.first(),
+                _ => None,
+            })
+            .expect("block has an inline run")
+    }
 
     #[test]
     fn extracts_blocks() {
         let document = parse("<h1>Title</h1><p>Hello <strong>world</strong>.</p>");
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
 
-        assert_eq!(document.blocks.len(), 2);
-        assert_eq!(document.blocks[0].kind, BlockKind::Heading1);
-        assert_eq!(document.blocks[0].text, "Title");
-        assert_eq!(document.blocks[1].text, "Hello world.");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, BlockKind::Heading1);
+        assert_eq!(block_text(blocks[0]), "Title");
+        assert_eq!(block_text(blocks[1]), "Hello world.");
+    }
+
+    #[test]
+    fn bold_inline_runs_are_marked_bold() {
+        let document = parse("<p>Hello <strong>world</strong>.</p>");
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let runs = match &blocks[0].children[0] {
+            BoxChild::Line(runs) => runs,
+            _ => panic!("expected an inline line"),
+        };
+
+        // "Hello " is not bold; "world" (inside <strong>) is.
+        let bolds: Vec<bool> = runs.iter().map(|run| run.bold).collect();
+        assert_eq!(runs.iter().find(|r| r.text.contains("world")).unwrap().bold, true);
+        assert!(bolds.contains(&false));
     }
 
     #[test]
     fn ignores_script_and_style_content() {
         let document =
             parse("<style>body{}</style><h1>Visible</h1><script>alert('hidden')</script>");
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
 
-        assert_eq!(document.blocks.len(), 1);
-        assert_eq!(document.blocks[0].text, "Visible");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(block_text(blocks[0]), "Visible");
     }
 
     #[test]
     fn parses_all_heading_levels() {
         let document = parse("<h1>a</h1><h2>b</h2><h3>c</h3><h4>d</h4><h5>e</h5><h6>f</h6>");
-        let kinds: Vec<BlockKind> = document.blocks.iter().map(|b| b.kind).collect();
+        let flow = document.flow.expect("flow tree");
+        let kinds: Vec<BlockKind> = flow_blocks(&flow).iter().map(|b| b.kind).collect();
         assert_eq!(
             kinds,
             vec![
@@ -1647,6 +1898,40 @@ mod tests {
     }
 
     #[test]
+    fn nests_blocks_and_indents_lists() {
+        let document = parse("<div><p>outer</p><ul><li>one</li><li>two</li></ul></div>");
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+
+        // div > (p, ul > (li, li)). The list container is indented (its items lay
+        // out inside that indent), and each item carries a bullet marker.
+        assert!(
+            blocks.iter().any(|b| b.margin.left >= super::LIST_INDENT),
+            "the list container is indented"
+        );
+        let li_one = blocks
+            .iter()
+            .find(|b| block_text(b).contains("one"))
+            .unwrap();
+        assert!(block_text(li_one).starts_with('\u{2022}'), "bullet marker present");
+    }
+
+    #[test]
+    fn numbers_ordered_list_items() {
+        let document = parse("<ol><li>first</li><li>second</li></ol>");
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let texts: Vec<String> = blocks
+            .iter()
+            .map(|b| block_text(b))
+            .filter(|t| t.contains("first") || t.contains("second"))
+            .collect();
+
+        // `block_text` collapses the marker's padding (the renderer does too).
+        assert_eq!(texts, vec!["1. first".to_string(), "2. second".to_string()]);
+    }
+
+    #[test]
     fn skips_display_none_flow_content() {
         let document = parse(
             r#"
@@ -1656,9 +1941,10 @@ mod tests {
             <div style="display:none">also secret</div>
             "#,
         );
+        let flow = document.flow.expect("flow tree");
+        let texts: Vec<String> = flow_blocks(&flow).iter().map(|b| block_text(b)).collect();
 
-        let texts: Vec<&str> = document.blocks.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(texts, vec!["shown"]);
+        assert_eq!(texts, vec!["shown".to_string()]);
     }
 
     #[test]
@@ -1671,16 +1957,35 @@ mod tests {
             <p class="note">styled</p>
             "#,
         );
-        let block = &document.blocks[0];
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let block = blocks[0];
+        let run = first_run(block);
 
         assert_eq!(block.kind, BlockKind::Paragraph);
-        assert_eq!(block.text, "styled");
-        assert_eq!(
-            block.style.color,
-            Some(crate::color::Color::from_rgb_u8(0x11, 0x22, 0x33))
+        assert_eq!(block_text(block), "styled");
+        assert_eq!(block.align, super::TextAlign::Center);
+        assert_eq!(run.color, crate::color::Color::from_rgb_u8(0x11, 0x22, 0x33));
+        assert_eq!(run.font_size, 14.0);
+    }
+
+    #[test]
+    fn parses_block_margin_and_padding_shorthands() {
+        let document = parse(
+            r#"<div style="margin: 10pt 20pt 30pt 40pt; padding: 5pt 6pt">x</div>"#,
         );
-        assert_eq!(block.style.font_size, Some(14.0));
-        assert_eq!(block.style.align, Some(super::TextAlign::Center));
+        let flow = document.flow.expect("flow tree");
+        let block = flow_blocks(&flow)[0];
+
+        assert_eq!(block.margin.top, 10.0);
+        assert_eq!(block.margin.right, 20.0);
+        assert_eq!(block.margin.bottom, 30.0);
+        assert_eq!(block.margin.left, 40.0);
+        // Two-value padding: top/bottom = 5, right/left = 6.
+        assert_eq!(block.padding.top, 5.0);
+        assert_eq!(block.padding.right, 6.0);
+        assert_eq!(block.padding.bottom, 5.0);
+        assert_eq!(block.padding.left, 6.0);
     }
 
     #[test]
@@ -1691,10 +1996,13 @@ mod tests {
             <body><div><p>deep</p></div></body>
             "#,
         );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let deep = blocks.iter().find(|b| block_text(b) == "deep").unwrap();
 
         assert_eq!(
-            document.blocks[0].style.color,
-            Some(crate::color::Color::from_rgb_u8(0x44, 0x55, 0x66))
+            first_run(deep).color,
+            crate::color::Color::from_rgb_u8(0x44, 0x55, 0x66)
         );
     }
 

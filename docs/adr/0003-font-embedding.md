@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted (2026-06-29). Builds on ADR 0002 step 8.
+Accepted (2026-06-29). Builds on ADR 0002 step 8. The simple
+`/TrueType`+`/WinAnsiEncoding` embedding described here is **superseded by ADR
+0005** (Type0/Identity-H composite + ToUnicode); the metrics and `/FontFile2`
+program described here are reused unchanged.
 
 ## Context
 

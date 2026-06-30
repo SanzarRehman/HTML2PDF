@@ -88,7 +88,10 @@ parser, DOM, CSS, cascade, and font metrics get rebuilt. See
 - [x] Replace substring CSS rule lookup with a `cssparser` stylesheet model.
 - [x] Build computed-style cascade over the DOM (specificity + inheritance).
 - [x] Generate flow-content boxes from computed `display` (skip `display:none`,
-      carry computed style). Full nested box-tree layout still to come.
+      carry computed style).
+- [x] Build the nested flow box tree (block/inline) and lay it out recursively:
+      nested blocks, list/blockquote indentation, list markers, and per-run
+      inline color/font-size; WinAnsi-encode non-ASCII text in the PDF writer.
 
 ## Previous Sprint: Minimal Vertical Slice
 
@@ -522,6 +525,84 @@ Font embedding (opt-in via `--font <path|family>`):
 - Follow-ups: glyph subsetting (full font embedded today), and CID/`Identity-H`
   + `ToUnicode` for non-Latin/CJK.
 
+Nested flow box tree (`box_tree.rs`):
+
+- Non-table documents now lower to a nested tree of block boxes whose leaves are
+  runs of styled inline text (`html::build_flow`), and layout walks that tree
+  recursively (`layout::layout_flow`) instead of rendering a flat `Vec<Block>`.
+- New behavior, covered by tests: blocks nest (a `<div>` containing a `<p>` and
+  trailing text keeps them as interleaved anonymous blocks); `<ul>`/`<ol>` and
+  `<blockquote>` indent their contents (indent accumulates as they nest); list
+  items carry a bullet / `1.`-style marker; inline `<strong>`/`<b>` mark runs
+  bold; and inline `color`/`font-size` (e.g. a `<span>`) apply per run inside a
+  paragraph. Whitespace is collapsed across run boundaries during wrapping, and
+  alignment is honored per block.
+- PDF text writer now WinAnsi-encodes non-ASCII characters via octal escapes
+  (`font::char_to_winansi`) instead of replacing them with `?`, so the bullet,
+  en/em dashes, curly quotes, the euro sign, and Latin-1 accents render. The
+  fixture is pure ASCII, so its output stays **byte-identical** (492,740 bytes).
+- The table path is untouched and remains byte-identical; tables and flow content
+  are mutually exclusive (`Document.flow` is `Some` only when there are no table
+  rows).
+- Remaining for flow layout: inline images and a true baseline model. Bold is
+  tracked per run but has no glyph effect until a bold face is embedded.
+- Over-long words now break character-by-character as a last resort so flow text
+  never runs off the page (a pragmatic deviation from CSS `overflow-wrap:
+  normal`; honoring the property for earlier/explicit breaks is a follow-up).
+
+CSS box model on flow blocks:
+
+- `margin` and `padding` are parsed (1-to-4-value shorthands and longhands) into
+  computed style and resolved onto each block's `Edges`. List/blockquote nesting
+  folds into `margin.left`; when CSS sets no margin, the per-kind heading/
+  paragraph spacing is used as the default.
+- Vertical margins collapse: layout threads a "carried" margin and collapses
+  adjacent margins (sibling-to-sibling and parent-to-first/last-child) to their
+  maximum, flushing only when content, padding, or a border/background edge
+  intervenes (verified: two 20pt-margin paragraphs sit 20pt apart, not 40pt).
+- Block `background-color` (non-white) and `border` paint as one rectangle per
+  page the block spans, inserted *before* the content already emitted on that
+  page so they sit behind text and nested boxes stack correctly (ancestors
+  behind descendants). Verified on a card/callout sample: 2 background fills and
+  1 border stroke precede all 141 text operations.
+- The table path is unchanged and the ASCII fixture stays **byte-identical**
+  (492,740 bytes).
+- Remaining: borders are a uniform 1pt box (no per-side width/style/color or
+  rounded corners), `margin: auto` centering, and `box-sizing` are not handled.
+
+CID/Unicode font embedding (Type0/Identity-H):
+
+- Embedded fonts (`--font <path|family>`) are now written as a PDF Type0
+  composite with a `CIDFontType2` descendant, `Identity-H` encoding,
+  `/CIDToGIDMap /Identity`, a per-glyph `/W` width array, and a `/ToUnicode`
+  CMap. Text is emitted as 2-byte glyph ids; the glyph ids, widths, and
+  glyph→Unicode mapping are resolved for exactly the characters the document
+  uses (`font::cid_layout`).
+- Effect: **any Unicode text renders** with an embedded font (previously
+  non-WinAnsi characters became `?`), and the text stays selectable/searchable
+  via ToUnicode. Verified with `pdffonts` (CID TrueType / Identity-H / emb yes /
+  uni yes) and `pdftotext` round-trip on Latin (incl. curly quotes/em dash) and
+  CJK (`你好世界` / `这是中文测试`).
+- The default (no `--font`) standard-14 Helvetica path is unchanged and still
+  WinAnsi, so the ASCII fixture stays **byte-identical** (492,740 bytes).
+Glyph subsetting (retain-GIDs, `subset.rs`):
+
+- The embedded font program is now subset to the glyphs the document uses (plus
+  `.notdef` and composite components, transitively): the `glyf`/`loca` tables are
+  rebuilt and every other table copied verbatim, recomputing the table directory,
+  per-table checksums, and the `head` checksum adjustment. Glyph ids are **not**
+  renumbered (retain-GIDs), so the `/W`, `/ToUnicode`, and `/CIDToGIDMap
+  /Identity` from the Type0 setup stay valid; the subset font gets an `ABCDEF+`
+  name tag.
+- Only `glyf`-based TrueType is subset; CFF/OpenType-CFF (no `glyf`) falls back to
+  full embedding. `.ttc` inputs work (the output is a standalone single-font
+  sfnt).
+- Effect (measured): embedding Arial for a short doc went 477 KB → 123 KB; an
+  STHeiti CJK doc went 33.3 MB → 0.65 MB. Verified the subset re-parses, kept
+  glyphs retain outlines and dropped ones do not (unit test), `pdffonts` reports
+  `sub yes` / `uni yes`, and `pdftotext` still round-trips Latin and CJK.
+- The default Helvetica path is untouched, so the ASCII fixture is byte-identical.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -549,10 +630,16 @@ that attach cleanly once the spine exists.
 - [x] Generate flow-content boxes from computed `display` (display:none honored,
       generic blocks carry computed style). Layout renders them with computed
       font-size/color/text-align.
-- [ ] Full nested box tree with block/inline layout (boxes still flatten to a
-      block list today).
+- [x] Full nested box tree with block/inline layout (`box_tree.rs`): non-table
+      documents lower to a nested tree of block boxes whose leaves are styled
+      inline runs, laid out recursively (indentation, lists, per-run color/size).
+- [x] CSS box model on flow blocks: `margin`/`padding` (shorthands + longhands),
+      vertical margin collapse, and per-page-fragment block backgrounds and
+      borders painted behind content.
 - [x] Add font embedding with real metrics (`ttf-parser`/`fontdb`), opt-in via
-      `--font <path|family>`. Subsetting + CID/Unicode still to come.
+      `--font <path|family>`, as a Type0/Identity-H composite with a ToUnicode
+      CMap (any Unicode renders + stays selectable) and **retain-GIDs glyph
+      subsetting** (`subset.rs`) so only used glyphs are embedded.
 - [x] Add an HTTP API crate (`htmltopdf-server`, `tiny_http`): `POST /render`
       (HTML → PDF), thread-pooled; query options `landscape`/`margin`/`font`.
 - [ ] Add bounded pre-layout JavaScript stage (QuickJS/Boa behind a trait).

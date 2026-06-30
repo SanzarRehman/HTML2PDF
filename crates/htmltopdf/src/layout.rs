@@ -172,6 +172,10 @@ pub struct Rect {
 }
 
 pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page> {
+    if let Some(flow) = &document.flow {
+        return layout_flow(flow, options);
+    }
+
     let mut pages = vec![Page::new()];
     let mut y = options.page_size.height - options.margin_top;
     let content_width = options.page_size.width - options.margin_left - options.margin_right;
@@ -179,71 +183,434 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
     let mut repeated_table_header: Option<Vec<TableCell>> = None;
 
     for block in &document.blocks {
-        if is_table_row_kind(block.kind) {
-            if repeated_table_header.is_none() && block.kind == BlockKind::TableHeaderRow {
-                repeated_table_header = Some(block.cells.clone());
-            }
-            let header = if block.kind == BlockKind::TableHeaderRow {
-                None
-            } else {
-                repeated_table_header.as_deref()
-            };
-
-            layout_table_row(
-                block.cells.as_slice(),
-                &table_geometry,
-                &mut pages,
-                &mut y,
-                options,
-                header,
-            );
-            continue;
+        if repeated_table_header.is_none() && block.kind == BlockKind::TableHeaderRow {
+            repeated_table_header = Some(block.cells.clone());
         }
+        let header = if block.kind == BlockKind::TableHeaderRow {
+            None
+        } else {
+            repeated_table_header.as_deref()
+        };
 
-        // Computed style overrides the per-kind defaults where CSS set a value.
-        let font_size = block.style.font_size.unwrap_or(font_size_for(block.kind));
-        let leading = font_size * 1.35;
-        let before = spacing_before(block.kind);
-        let after = spacing_after(block.kind);
-        let color = block.style.color.unwrap_or(Color::BLACK);
-        let align = block.style.align.unwrap_or(TextAlign::Left);
-
-        y -= before;
-        ensure_space(&mut pages, &mut y, options, leading);
-
-        for line in wrap_text(&block.text, content_width, font_size, &options.font) {
-            ensure_space(&mut pages, &mut y, options, leading);
-
-            let text_width = estimate_text_width(&line, font_size, &options.font);
-            let x = match align {
-                TextAlign::Left => options.margin_left,
-                TextAlign::Center => {
-                    options.margin_left + ((content_width - text_width) / 2.0).max(0.0)
-                }
-                TextAlign::Right => {
-                    options.margin_left + (content_width - text_width).max(0.0)
-                }
-            };
-
-            let page = pages.last_mut().expect("at least one page exists");
-            page.push_colored_line(
-                Line {
-                    text: line,
-                    x,
-                    y,
-                    font_size,
-                    leading,
-                },
-                color,
-            );
-
-            y -= leading;
-        }
-
-        y -= after;
+        layout_table_row(
+            block.cells.as_slice(),
+            &table_geometry,
+            &mut pages,
+            &mut y,
+            options,
+            header,
+        );
     }
 
     pages
+}
+
+/// Lay out the flow box tree by walking it recursively. Each block establishes a
+/// containing block (an x offset and a width); its inline content is wrapped to
+/// that width, and nested blocks indent by their margin/padding. The root
+/// contributes no spacing of its own.
+///
+/// Vertical margins collapse: a "carried" margin is threaded through the walk and
+/// adjacent margins (sibling-to-sibling and parent-to-child) collapse to their
+/// maximum, flushed only when real content or a padding edge intervenes.
+fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec<Page> {
+    let mut pages = vec![Page::new()];
+    let mut y = options.page_size.height - options.margin_top;
+    let content_width = options.page_size.width - options.margin_left - options.margin_right;
+    let mut carried = 0.0;
+
+    layout_box_children(
+        &flow.children,
+        options.margin_left,
+        content_width,
+        TextAlign::Left,
+        &mut pages,
+        &mut y,
+        &mut carried,
+        options,
+    );
+
+    pages
+}
+
+/// Drop the carried (collapsed) margin into the page as vertical space.
+fn flush_margin(y: &mut f32, carried: &mut f32) {
+    *y -= *carried;
+    *carried = 0.0;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_box_children(
+    children: &[crate::box_tree::BoxChild],
+    x: f32,
+    width: f32,
+    align: TextAlign,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    carried: &mut f32,
+    options: &RenderOptions,
+) {
+    use crate::box_tree::BoxChild;
+
+    for child in children {
+        match child {
+            BoxChild::Block(block) => {
+                layout_block_box(block, x, width, pages, y, carried, options)
+            }
+            BoxChild::Line(runs) => {
+                // Content flushes any pending margin above it.
+                flush_margin(y, carried);
+                layout_line_box(runs, x, width, align, pages, y, options);
+            }
+        }
+    }
+}
+
+fn layout_block_box(
+    block: &crate::box_tree::BlockBox,
+    x: f32,
+    width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    carried: &mut f32,
+    options: &RenderOptions,
+) {
+    // This block's top margin collapses with the margin carried from above.
+    *carried = carried.max(block.margin.top);
+
+    let decorated = block.border || block.background.is_some();
+    let inner_x = x + block.margin.left + block.padding.left;
+    let inner_width =
+        (width - block.margin.left - block.margin.right - block.padding.left - block.padding.right)
+            .max(1.0);
+
+    // Top padding — or any border/background — is a barrier: it ends the collapse
+    // and separates the block's margin from its first child's margin.
+    if block.padding.top > 0.0 || decorated {
+        flush_margin(y, carried);
+        *y -= block.padding.top;
+    }
+
+    // Record the border box's top edge so its background/border can be painted
+    // per page fragment once the content height is known.
+    let start_page = pages.len() - 1;
+    let start_index = pages[start_page].commands.len();
+    let start_y = *y + block.padding.top;
+    let box_x = x + block.margin.left;
+    let box_width = (width - block.margin.left - block.margin.right).max(1.0);
+
+    layout_box_children(
+        &block.children,
+        inner_x,
+        inner_width,
+        block.align,
+        pages,
+        y,
+        carried,
+        options,
+    );
+
+    // Bottom padding (or a border/background) likewise contains the last child's
+    // margin rather than letting it collapse out of the box.
+    if block.padding.bottom > 0.0 || decorated {
+        flush_margin(y, carried);
+        *y -= block.padding.bottom;
+    }
+
+    if decorated {
+        let end_page = pages.len() - 1;
+        let end_y = *y;
+        paint_decorations(
+            pages, options, block, start_page, start_index, start_y, end_page, end_y, box_x,
+            box_width,
+        );
+    }
+
+    // This block's bottom margin collapses with whatever is carried out of it.
+    *carried = carried.max(block.margin.bottom);
+}
+
+/// Paint a decorated block's background and border, one rectangle per page the
+/// block spans. Each rectangle is inserted *before* the content already emitted
+/// on that page (at the recorded command index for the start page, at the front
+/// for continuation pages), so decorations paint behind text and nested boxes
+/// stack correctly (ancestors behind descendants).
+#[allow(clippy::too_many_arguments)]
+fn paint_decorations(
+    pages: &mut [Page],
+    options: &RenderOptions,
+    block: &crate::box_tree::BlockBox,
+    start_page: usize,
+    start_index: usize,
+    start_y: f32,
+    end_page: usize,
+    end_y: f32,
+    x: f32,
+    width: f32,
+) {
+    let page_top = options.page_size.height - options.margin_top;
+    let page_bottom = options.margin_bottom;
+
+    for page_index in start_page..=end_page {
+        let top = if page_index == start_page { start_y } else { page_top };
+        let bottom = if page_index == end_page { end_y } else { page_bottom };
+        let height = top - bottom;
+        if height <= 0.0 {
+            continue;
+        }
+
+        let mut commands = Vec::new();
+        if let Some(color) = block.background {
+            commands.push(PaintCommand::SetFillColor(color));
+            commands.push(PaintCommand::FillRect(RectCommand {
+                x,
+                y: bottom,
+                width,
+                height,
+            }));
+        }
+        if block.border {
+            commands.push(PaintCommand::SetStrokeColor(Color::BLACK));
+            commands.push(PaintCommand::StrokeRect(RectCommand {
+                x,
+                y: bottom,
+                width,
+                height,
+            }));
+        }
+
+        let at = if page_index == start_page { start_index } else { 0 };
+        pages[page_index].commands.splice(at..at, commands);
+    }
+}
+
+/// Wrap one line box's runs to `width` and paint each visual line, honoring the
+/// per-run font size and color and the block's text alignment.
+fn layout_line_box(
+    runs: &[crate::box_tree::InlineRun],
+    x: f32,
+    width: f32,
+    align: TextAlign,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    options: &RenderOptions,
+) {
+    for visual in wrap_inline_runs(runs, width, &options.font) {
+        let line_width: f32 = visual
+            .iter()
+            .map(|piece| estimate_text_width(&piece.text, piece.font_size, &options.font))
+            .sum();
+        // Leading follows the tallest run on the line.
+        let max_font = visual
+            .iter()
+            .map(|piece| piece.font_size)
+            .fold(0.0_f32, f32::max);
+        let leading = max_font * 1.35;
+
+        ensure_space(pages, y, options, leading);
+
+        let mut px = match align {
+            TextAlign::Left => x,
+            TextAlign::Center => x + ((width - line_width) / 2.0).max(0.0),
+            TextAlign::Right => x + (width - line_width).max(0.0),
+        };
+
+        let page = pages.last_mut().expect("at least one page exists");
+        for piece in &visual {
+            let piece_width = estimate_text_width(&piece.text, piece.font_size, &options.font);
+            page.push_colored_line(
+                Line {
+                    text: piece.text.clone(),
+                    x: px,
+                    y: *y,
+                    font_size: piece.font_size,
+                    leading,
+                },
+                piece.color,
+            );
+            px += piece_width;
+        }
+
+        *y -= leading;
+    }
+}
+
+/// A piece of a wrapped visual line: text in one style, positioned left-to-right.
+struct LinePiece {
+    text: String,
+    font_size: f32,
+    color: Color,
+}
+
+/// Wrap styled inline runs into visual lines. Whitespace is collapsed across run
+/// boundaries (so `Hello <b>world</b>.` keeps a single space and no space before
+/// the period), and words are placed greedily. A word wider than the whole line
+/// is broken character-by-character as a last resort, so flow text never runs off
+/// the page edge (a pragmatic deviation from CSS `overflow-wrap: normal`, which
+/// would let it overflow — losing content is worse for paged output).
+fn wrap_inline_runs(
+    runs: &[crate::box_tree::InlineRun],
+    max_width: f32,
+    font: &crate::font::Font,
+) -> Vec<Vec<LinePiece>> {
+    let tokens = tokenize_runs(runs);
+
+    let mut lines: Vec<Vec<LinePiece>> = Vec::new();
+    let mut current: Vec<LinePiece> = Vec::new();
+    let mut current_width = 0.0_f32;
+
+    for token in tokens {
+        let token_width: f32 = token
+            .pieces
+            .iter()
+            .map(|piece| estimate_text_width(&piece.text, piece.font_size, font))
+            .sum();
+
+        // A token wider than the line can never fit by wrapping; start it on a
+        // fresh line and break it across lines character by character.
+        if token_width > max_width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0.0;
+            }
+            break_long_token(&token.pieces, max_width, font, &mut lines, &mut current, &mut current_width);
+            continue;
+        }
+
+        let space_width = if current.is_empty() {
+            0.0
+        } else {
+            estimate_text_width(" ", token.space_font_size, font)
+        };
+
+        if !current.is_empty() && current_width + space_width + token_width > max_width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0.0;
+        }
+
+        if !current.is_empty() {
+            // Re-measure the separator at the (possibly new) line's leading run.
+            let space_width = estimate_text_width(" ", token.space_font_size, font);
+            current.push(LinePiece {
+                text: " ".to_string(),
+                font_size: token.space_font_size,
+                color: token.pieces.first().map(|p| p.color).unwrap_or(Color::BLACK),
+            });
+            current_width += space_width;
+        }
+
+        for piece in token.pieces {
+            current_width += estimate_text_width(&piece.text, piece.font_size, font);
+            current.push(piece);
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+/// Break an over-long token across lines, one character at a time, preserving
+/// each character's style. Appends to `current` (flushing full lines into
+/// `lines`) and leaves any trailing partial line in `current` so following
+/// content can continue on it.
+fn break_long_token(
+    pieces: &[LinePiece],
+    max_width: f32,
+    font: &crate::font::Font,
+    lines: &mut Vec<Vec<LinePiece>>,
+    current: &mut Vec<LinePiece>,
+    current_width: &mut f32,
+) {
+    for piece in pieces {
+        for ch in piece.text.chars() {
+            let char_width = estimate_text_width(&ch.to_string(), piece.font_size, font);
+
+            // Wrap before this character if the line already has content and the
+            // character would overflow. A single character wider than the line is
+            // still placed (on its own line) so we never loop forever.
+            if !current.is_empty() && *current_width + char_width > max_width {
+                lines.push(std::mem::take(current));
+                *current_width = 0.0;
+            }
+
+            if let Some(last) = current.last_mut() {
+                if last.font_size == piece.font_size && last.color == piece.color {
+                    last.text.push(ch);
+                    *current_width += char_width;
+                    continue;
+                }
+            }
+            current.push(LinePiece {
+                text: ch.to_string(),
+                font_size: piece.font_size,
+                color: piece.color,
+            });
+            *current_width += char_width;
+        }
+    }
+}
+
+/// A whitespace-delimited token built from the inline run stream. A token may
+/// span several styles (when an inline style change falls inside a word).
+struct Token {
+    pieces: Vec<LinePiece>,
+    /// Font size of the whitespace that preceded this token (for space width).
+    space_font_size: f32,
+}
+
+/// Split styled runs into whitespace-delimited tokens, collapsing runs of
+/// whitespace to single separators and dropping leading/trailing whitespace.
+fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut word: Vec<LinePiece> = Vec::new();
+    // Font size of the most recent whitespace seen since the last token started.
+    let mut pending_space: Option<f32> = None;
+    let mut seen_token = false;
+
+    let finish_word = |word: &mut Vec<LinePiece>,
+                       tokens: &mut Vec<Token>,
+                       pending_space: &mut Option<f32>| {
+        if word.is_empty() {
+            return;
+        }
+        tokens.push(Token {
+            pieces: std::mem::take(word),
+            space_font_size: pending_space.take().unwrap_or(0.0),
+        });
+    };
+
+    for run in runs {
+        for ch in run.text.chars() {
+            if ch.is_whitespace() {
+                finish_word(&mut word, &mut tokens, &mut pending_space);
+                if seen_token {
+                    pending_space = Some(run.font_size);
+                }
+                continue;
+            }
+
+            seen_token = true;
+            // Extend the current word, merging into the last piece if the style
+            // matches so adjacent same-style characters stay in one piece.
+            if let Some(last) = word.last_mut() {
+                if last.font_size == run.font_size && last.color == run.color {
+                    last.text.push(ch);
+                    continue;
+                }
+            }
+            word.push(LinePiece {
+                text: ch.to_string(),
+                font_size: run.font_size,
+                color: run.color,
+            });
+        }
+    }
+    finish_word(&mut word, &mut tokens, &mut pending_space);
+
+    tokens
 }
 
 fn ensure_space(pages: &mut Vec<Page>, y: &mut f32, options: &RenderOptions, needed: f32) -> bool {
@@ -570,10 +937,6 @@ fn cell_width(columns: &[f32], start: usize, colspan: usize) -> f32 {
     }
 }
 
-fn wrap_text(text: &str, max_width: f32, font_size: f32, font: &crate::font::Font) -> Vec<String> {
-    wrap_text_with_mode(text, max_width, font_size, WhiteSpace::Normal, false, font)
-}
-
 fn wrap_text_with_mode(
     text: &str,
     max_width: f32,
@@ -723,7 +1086,7 @@ fn truncate_to_width(
     format!("{prefix}{ellipsis}")
 }
 
-fn font_size_for(kind: BlockKind) -> f32 {
+pub(crate) fn font_size_for(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 24.0,
         BlockKind::Heading2 => 18.0,
@@ -738,7 +1101,7 @@ fn font_size_for(kind: BlockKind) -> f32 {
     }
 }
 
-fn spacing_before(kind: BlockKind) -> f32 {
+pub(crate) fn spacing_before(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 0.0,
         BlockKind::Heading2 => 10.0,
@@ -750,7 +1113,7 @@ fn spacing_before(kind: BlockKind) -> f32 {
     }
 }
 
-fn spacing_after(kind: BlockKind) -> f32 {
+pub(crate) fn spacing_after(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 12.0,
         BlockKind::Heading2 => 8.0,
@@ -772,23 +1135,187 @@ mod tests {
 
     #[test]
     fn creates_multiple_pages_for_long_documents() {
+        use crate::box_tree::{BlockBox, BoxChild, FlowRoot, InlineRun};
+
+        let children = (0..200)
+            .map(|index| {
+                BoxChild::Block(BlockBox {
+                    kind: BlockKind::Paragraph,
+                    margin: crate::box_tree::Edges::default(),
+                    padding: crate::box_tree::Edges::default(),
+                    align: crate::html::TextAlign::Left,
+                    background: None,
+                    border: false,
+                    children: vec![BoxChild::Line(vec![InlineRun {
+                        text: format!("Paragraph {index}"),
+                        font_size: 11.0,
+                        bold: false,
+                        color: Color::BLACK,
+                    }])],
+                })
+            })
+            .collect();
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
-            blocks: (0..200)
-                .map(|index| Block {
-                    kind: BlockKind::Paragraph,
-                    style: Default::default(),
-                    text: format!("Paragraph {index}"),
-                    cells: Vec::new(),
-                })
-                .collect(),
+            flow: Some(FlowRoot { children }),
+            blocks: Vec::new(),
         };
 
         let pages = layout_document(&document, &RenderOptions::default());
 
         assert!(pages.len() > 1);
+    }
+
+    #[test]
+    fn breaks_over_long_words_to_stay_on_page() {
+        use crate::box_tree::{BlockBox, BoxChild, Edges, FlowRoot, InlineRun};
+
+        // A single unbroken token far wider than the content width.
+        let long = "M".repeat(400);
+        let document = Document {
+            page_style: crate::html::PageStyle::default(),
+            table_style: crate::html::TableStyle::default(),
+            table_columns: Vec::new(),
+            flow: Some(FlowRoot {
+                children: vec![BoxChild::Block(BlockBox {
+                    kind: BlockKind::Paragraph,
+                    margin: Edges::default(),
+                    padding: Edges::default(),
+                    align: crate::html::TextAlign::Left,
+                    background: None,
+                    border: false,
+                    children: vec![BoxChild::Line(vec![InlineRun {
+                        text: long,
+                        font_size: 12.0,
+                        bold: false,
+                        color: Color::BLACK,
+                    }])],
+                })],
+            }),
+            blocks: Vec::new(),
+        };
+
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let content_width =
+            options.page_size.width - options.margin_left - options.margin_right;
+
+        let line_count: usize = pages.iter().map(|page| page.lines.len()).sum();
+        assert!(line_count > 1, "the long word must break across lines");
+        for page in &pages {
+            for line in &page.lines {
+                let width = estimate_text_width(&line.text, line.font_size, &options.font);
+                assert!(
+                    width <= content_width + 0.01,
+                    "each broken line must fit the content width"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn collapses_adjacent_block_margins() {
+        use crate::box_tree::{BlockBox, BoxChild, Edges, FlowRoot, InlineRun};
+
+        let para = |text: &str| {
+            BoxChild::Block(BlockBox {
+                kind: BlockKind::Paragraph,
+                margin: Edges {
+                    top: 20.0,
+                    right: 0.0,
+                    bottom: 20.0,
+                    left: 0.0,
+                },
+                padding: Edges::default(),
+                align: crate::html::TextAlign::Left,
+                background: None,
+                border: false,
+                children: vec![BoxChild::Line(vec![InlineRun {
+                    text: text.to_string(),
+                    font_size: 10.0,
+                    bold: false,
+                    color: Color::BLACK,
+                }])],
+            })
+        };
+        let document = Document {
+            page_style: crate::html::PageStyle::default(),
+            table_style: crate::html::TableStyle::default(),
+            table_columns: Vec::new(),
+            flow: Some(FlowRoot {
+                children: vec![para("first"), para("second")],
+            }),
+            blocks: Vec::new(),
+        };
+
+        let pages = layout_document(&document, &RenderOptions::default());
+        let lines = &pages[0].lines;
+        assert_eq!(lines.len(), 2);
+
+        let leading = 10.0 * 1.35;
+        let gap = lines[0].y - lines[1].y;
+        // Collapsed: gap = leading + max(20, 20) = leading + 20, NOT leading + 40.
+        assert!(
+            (gap - (leading + 20.0)).abs() < 0.01,
+            "expected collapsed gap {}, got {gap}",
+            leading + 20.0
+        );
+    }
+
+    #[test]
+    fn paints_block_background_behind_text() {
+        use crate::box_tree::{BlockBox, BoxChild, Edges, FlowRoot, InlineRun};
+
+        let document = Document {
+            page_style: crate::html::PageStyle::default(),
+            table_style: crate::html::TableStyle::default(),
+            table_columns: Vec::new(),
+            flow: Some(FlowRoot {
+                children: vec![BoxChild::Block(BlockBox {
+                    kind: BlockKind::Paragraph,
+                    margin: Edges::default(),
+                    padding: Edges {
+                        top: 6.0,
+                        right: 6.0,
+                        bottom: 6.0,
+                        left: 6.0,
+                    },
+                    align: crate::html::TextAlign::Left,
+                    background: Some(Color::from_rgb_u8(255, 0, 0)),
+                    border: true,
+                    children: vec![BoxChild::Line(vec![InlineRun {
+                        text: "boxed".to_string(),
+                        font_size: 11.0,
+                        bold: false,
+                        color: Color::BLACK,
+                    }])],
+                })],
+            }),
+            blocks: Vec::new(),
+        };
+
+        let pages = layout_document(&document, &RenderOptions::default());
+        let commands = &pages[0].commands;
+
+        // Background fill and border stroke both present...
+        let fill = commands
+            .iter()
+            .position(|c| matches!(c, PaintCommand::FillRect(_)))
+            .expect("background fill present");
+        let stroke = commands
+            .iter()
+            .position(|c| matches!(c, PaintCommand::StrokeRect(_)))
+            .expect("border stroke present");
+        let text = commands
+            .iter()
+            .position(|c| matches!(c, PaintCommand::Text(_)))
+            .expect("text present");
+
+        // ...and both are painted before the text (i.e. behind it).
+        assert!(fill < text, "background must paint behind text");
+        assert!(stroke < text, "border must paint before text");
     }
 
     #[test]
@@ -799,6 +1326,7 @@ mod tests {
                 ..Default::default()
             },
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![30.0, 70.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -843,6 +1371,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![100.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -877,6 +1406,7 @@ mod tests {
             table_style: crate::html::TableStyle {
                 row_height: Some(60.0),
             },
+            flow: None,
             table_columns: vec![100.0, 100.0, 100.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -928,6 +1458,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![20.0, 200.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -966,6 +1497,7 @@ mod tests {
                 row_height: Some(15.0),
             },
             table_columns: vec![20.0, 200.0],
+            flow: None,
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -997,6 +1529,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![60.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -1050,6 +1583,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![60.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -1104,6 +1638,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![100.0, 300.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -1149,6 +1684,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![100.0, 300.0],
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -1245,6 +1781,7 @@ mod tests {
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
+            flow: None,
             table_columns: vec![20.0, 80.0],
             blocks,
         };

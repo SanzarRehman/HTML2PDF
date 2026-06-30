@@ -1,3 +1,4 @@
+mod box_tree;
 mod color;
 mod dom;
 mod font;
@@ -5,6 +6,7 @@ mod html;
 mod layout;
 pub mod paint;
 mod pdf;
+mod subset;
 
 use std::fmt;
 
@@ -46,7 +48,8 @@ impl Engine {
 
     pub fn render_html(&self, html: &str, options: RenderOptions) -> Result<Vec<u8>> {
         let document = html::parse(html);
-        if document.blocks.is_empty() {
+        let has_flow = document.flow.as_ref().is_some_and(|flow| flow.has_text());
+        if document.blocks.is_empty() && !has_flow {
             return Err(Error::EmptyDocument);
         }
 

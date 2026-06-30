@@ -121,10 +121,6 @@ pub struct TrueTypeFont {
     pub italic_angle: f32,
     pub flags: u32,
     pub stem_v: i32,
-    pub first_char: u8,
-    pub last_char: u8,
-    /// Glyph advances (PDF 1000-unit em) for codes `first_char..=last_char`.
-    pub widths: Vec<i32>,
 }
 
 impl Default for Font {
@@ -207,7 +203,58 @@ impl Font {
     }
 }
 
+/// The glyph data needed to embed a font as a PDF Type0/CIDFontType2 composite:
+/// the character-to-glyph mapping (for writing text as glyph ids under
+/// `Identity-H`), per-glyph advance widths (for `/W`), and a glyph-to-Unicode
+/// map (for the `/ToUnicode` CMap, so the text stays extractable/searchable).
+pub struct CidLayout {
+    /// Used characters → glyph id. Characters with no glyph are omitted (they
+    /// render as `.notdef`).
+    pub char_to_gid: std::collections::BTreeMap<char, u16>,
+    /// `(glyph id, advance in 1000-unit em)` for each used glyph, sorted by id.
+    pub widths: Vec<(u16, i32)>,
+    /// Glyph id → a representative Unicode scalar (for `/ToUnicode`).
+    pub gid_to_unicode: std::collections::BTreeMap<u16, char>,
+}
+
 impl TrueTypeFont {
+    /// A subset of the font program containing only `used_gids` (plus `.notdef`
+    /// and composite components), or `None` if it cannot be subset (e.g. a
+    /// CFF/OpenType-CFF font) — in which case the caller embeds the full program.
+    pub fn subset(&self, used_gids: &std::collections::BTreeSet<u16>) -> Option<Vec<u8>> {
+        crate::subset::subset(&self.data, self.index, used_gids)
+    }
+
+    /// Resolve the glyph ids, widths, and Unicode mapping for a set of used
+    /// characters, by re-parsing the (already validated) face once. Used only at
+    /// PDF-write time, so the per-call parse cost is paid once per render.
+    pub fn cid_layout(&self, used_chars: &std::collections::BTreeSet<char>) -> CidLayout {
+        use std::collections::BTreeMap;
+
+        let mut char_to_gid = BTreeMap::new();
+        let mut gid_to_unicode = BTreeMap::new();
+        let mut widths = BTreeMap::new();
+
+        if let Ok(face) = ttf_parser::Face::parse(&self.data, self.index) {
+            for &ch in used_chars {
+                let Some(gid) = face.glyph_index(ch) else {
+                    continue;
+                };
+                char_to_gid.insert(ch, gid.0);
+                gid_to_unicode.entry(gid.0).or_insert(ch);
+                let advance = face.glyph_hor_advance(gid).unwrap_or(0);
+                let width = (advance as f32 * 1000.0 / self.units_per_em).round() as i32;
+                widths.insert(gid.0, width);
+            }
+        }
+
+        CidLayout {
+            char_to_gid,
+            widths: widths.into_iter().collect(),
+            gid_to_unicode,
+        }
+    }
+
     fn parse(data: Vec<u8>, index: u32) -> Result<TrueTypeFont, String> {
         let face = ttf_parser::Face::parse(&data, index)
             .map_err(|e| format!("failed to parse font: {e}"))?;
@@ -215,21 +262,21 @@ impl TrueTypeFont {
         let units_per_em = face.units_per_em() as f32;
         let to_pdf = |value: i32| (value as f32 * 1000.0 / units_per_em).round() as i32;
 
-        let first_char: u8 = 32;
-        let last_char: u8 = 255;
+        // Cache WinAnsi-range advances for fast text measurement. (Glyphs outside
+        // this range are resolved on demand when the font is embedded as a Type0
+        // composite; see `cid_layout`.)
         let mut advances = HashMap::new();
-        let mut widths = Vec::with_capacity((last_char - first_char + 1) as usize);
-
-        for code in first_char..=last_char {
-            let ch = winansi_to_char(code);
-            let units = ch
-                .and_then(|c| face.glyph_index(c))
+        for code in 32u8..=255 {
+            let Some(ch) = winansi_to_char(code) else {
+                continue;
+            };
+            let units = face
+                .glyph_index(ch)
                 .and_then(|gid| face.glyph_hor_advance(gid))
                 .unwrap_or(0);
-            if let (Some(c), true) = (ch, units != 0) {
-                advances.insert(c, units);
+            if units != 0 {
+                advances.insert(ch, units);
             }
-            widths.push((units as f32 * 1000.0 / units_per_em).round() as i32);
         }
 
         let default_advance = [' ', 'n', 'o']
@@ -270,9 +317,6 @@ impl TrueTypeFont {
             italic_angle,
             flags,
             stem_v: 80,
-            first_char,
-            last_char,
-            widths,
             data,
             index,
         })
@@ -355,6 +399,47 @@ fn winansi_to_char(code: u8) -> Option<char> {
         _ => code as char,
     };
     Some(mapped)
+}
+
+/// Map a Unicode scalar to its WinAnsi (CP1252) byte, if one exists. The inverse
+/// of [`winansi_to_char`]; used when writing PDF text strings under
+/// `/WinAnsiEncoding`, so Latin-1 text and the CP1252 specials (curly quotes,
+/// dashes, the bullet, the euro sign, …) survive into the PDF.
+pub(crate) fn char_to_winansi(ch: char) -> Option<u8> {
+    let byte = match ch {
+        // ASCII and Latin-1 are identity in WinAnsi.
+        '\u{20}'..='\u{7E}' | '\u{A0}'..='\u{FF}' => ch as u32 as u8,
+        // CP1252 specials in the 0x80..=0x9F range.
+        '\u{20AC}' => 0x80,
+        '\u{201A}' => 0x82,
+        '\u{0192}' => 0x83,
+        '\u{201E}' => 0x84,
+        '\u{2026}' => 0x85,
+        '\u{2020}' => 0x86,
+        '\u{2021}' => 0x87,
+        '\u{02C6}' => 0x88,
+        '\u{2030}' => 0x89,
+        '\u{0160}' => 0x8A,
+        '\u{2039}' => 0x8B,
+        '\u{0152}' => 0x8C,
+        '\u{017D}' => 0x8E,
+        '\u{2018}' => 0x91,
+        '\u{2019}' => 0x92,
+        '\u{201C}' => 0x93,
+        '\u{201D}' => 0x94,
+        '\u{2022}' => 0x95,
+        '\u{2013}' => 0x96,
+        '\u{2014}' => 0x97,
+        '\u{02DC}' => 0x98,
+        '\u{2122}' => 0x99,
+        '\u{0161}' => 0x9A,
+        '\u{203A}' => 0x9B,
+        '\u{0153}' => 0x9C,
+        '\u{017E}' => 0x9E,
+        '\u{0178}' => 0x9F,
+        _ => return None,
+    };
+    Some(byte)
 }
 
 #[cfg(test)]

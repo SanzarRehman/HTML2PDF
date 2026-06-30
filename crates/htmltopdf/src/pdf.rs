@@ -26,10 +26,11 @@ impl std::error::Error for PdfError {}
 pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, PdfError> {
     let page_count = pages.len();
     let embedded = options.font.embedding();
-    // An embedded TrueType font needs two extra objects: a FontDescriptor and
-    // the FontFile2 stream.
+    // An embedded font is written as a Type0/Identity-H composite, which needs
+    // four extra objects after the pages: the descendant CIDFont, the
+    // FontDescriptor, the FontFile2 program, and the ToUnicode CMap.
     let base_object_count = 3 + (page_count * 2);
-    let object_count = base_object_count + if embedded.is_some() { 2 } else { 0 };
+    let object_count = base_object_count + if embedded.is_some() { 4 } else { 0 };
 
     if object_count > u16::MAX as usize {
         return Err(PdfError::TooManyObjects);
@@ -39,8 +40,42 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
     let pages_id = 2;
     let font_id = 3;
     let first_page_id = 4;
-    let descriptor_id = base_object_count + 1;
-    let fontfile_id = base_object_count + 2;
+    let descendant_id = base_object_count + 1;
+    let descriptor_id = base_object_count + 2;
+    let fontfile_id = base_object_count + 3;
+    let tounicode_id = base_object_count + 4;
+
+    // For an embedded font, resolve the glyph ids / widths / Unicode mapping for
+    // exactly the characters this document uses.
+    let cid = embedded.map(|font| {
+        let used: std::collections::BTreeSet<char> = pages
+            .iter()
+            .flat_map(|page| page.commands.iter())
+            .filter_map(|command| match command {
+                PaintCommand::Text(text) => Some(text.text.chars()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        font.cid_layout(&used)
+    });
+
+    // Subset the embedded program to the used glyphs when possible (retain-GIDs,
+    // so the maps above stay valid); fall back to the full program. A subset font
+    // gets a `ABCDEF+` name prefix, as PDF readers expect.
+    let used_gids: Option<std::collections::BTreeSet<u16>> = cid
+        .as_ref()
+        .map(|cid| cid.char_to_gid.values().copied().collect());
+    let font_program: Option<Vec<u8>> = match (embedded, used_gids.as_ref()) {
+        (Some(font), Some(gids)) => font.subset(gids),
+        _ => None,
+    };
+    let base_font_name: Option<String> = embedded.map(|font| {
+        match (&font_program, used_gids.as_ref()) {
+            (Some(_), Some(gids)) => format!("{}+{}", subset_tag(gids), font.postscript_name),
+            _ => font.postscript_name.clone(),
+        }
+    });
 
     let mut writer = PdfWriter::new();
     writer.write_header();
@@ -56,41 +91,36 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
         &format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"),
     );
 
-    // The font object (id 3, referenced as /F1 by every page).
+    // The font object (id 3, referenced as /F1 by every page). With no embedded
+    // font it is the standard-14 Helvetica; with one it is a Type0 composite
+    // whose descendant CIDFont is written after the pages.
     match embedded {
         None => writer.object(
             font_id,
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         ),
-        Some(font) => {
-            let widths = font
-                .widths
-                .iter()
-                .map(|w| w.to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
+        Some(_) => {
             writer.object(
                 font_id,
                 &format!(
                     concat!(
-                        "<< /Type /Font /Subtype /TrueType /BaseFont /{} ",
-                        "/FirstChar {} /LastChar {} /Widths [{}] ",
-                        "/FontDescriptor {} 0 R /Encoding /WinAnsiEncoding >>"
+                        "<< /Type /Font /Subtype /Type0 /BaseFont /{name} ",
+                        "/Encoding /Identity-H /DescendantFonts [{desc} 0 R] ",
+                        "/ToUnicode {tu} 0 R >>"
                     ),
-                    font.postscript_name,
-                    font.first_char,
-                    font.last_char,
-                    widths,
-                    descriptor_id
+                    name = base_font_name.as_deref().unwrap_or(""),
+                    desc = descendant_id,
+                    tu = tounicode_id
                 ),
             );
         }
     }
 
+    let char_to_gid = cid.as_ref().map(|cid| &cid.char_to_gid);
     for (index, page) in pages.iter().enumerate() {
         let page_id = first_page_id + (index * 2);
         let content_id = page_id + 1;
-        let content = page_content(page);
+        let content = page_content(page, char_to_gid);
 
         writer.object(
             page_id,
@@ -108,8 +138,31 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
         writer.stream_object(content_id, content.as_bytes())?;
     }
 
-    // The embedded font's descriptor and program, after the pages.
-    if let Some(font) = embedded {
+    // The embedded font's descendant CIDFont, descriptor, program, and the
+    // ToUnicode CMap, after the pages.
+    if let (Some(font), Some(cid)) = (embedded, cid.as_ref()) {
+        let name = base_font_name.as_deref().unwrap_or(&font.postscript_name);
+        let w_array = cid
+            .widths
+            .iter()
+            .map(|(gid, width)| format!("{gid} [{width}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        writer.object(
+            descendant_id,
+            &format!(
+                concat!(
+                    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} ",
+                    "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> ",
+                    "/FontDescriptor {desc} 0 R /CIDToGIDMap /Identity /DW 1000 ",
+                    "/W [{w}] >>"
+                ),
+                name = name,
+                desc = descriptor_id,
+                w = w_array
+            ),
+        );
+
         writer.object(
             descriptor_id,
             &format!(
@@ -119,7 +172,7 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
                     "/Ascent {} /Descent {} /CapHeight {} /StemV {} ",
                     "/FontFile2 {} 0 R >>"
                 ),
-                font.postscript_name,
+                name,
                 font.flags,
                 font.bbox[0],
                 font.bbox[1],
@@ -133,11 +186,69 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
                 fontfile_id
             ),
         );
-        writer.font_file_object(fontfile_id, &font.data)?;
+        // Retain-GIDs keeps the /W, /ToUnicode, and Identity map valid against the
+        // (possibly subset) program.
+        let program = font_program.as_deref().unwrap_or(&font.data);
+        writer.font_file_object(fontfile_id, program)?;
+        writer.stream_object(tounicode_id, to_unicode_cmap(cid).as_bytes())?;
     }
 
     writer.finish(catalog_id, object_count);
     Ok(writer.into_bytes())
+}
+
+/// A deterministic six-uppercase-letter subset tag (the `ABCDEF+` prefix PDF
+/// readers use to recognize a subset font), derived from the used glyph ids.
+fn subset_tag(used_gids: &std::collections::BTreeSet<u16>) -> String {
+    // FNV-1a over the sorted glyph ids, then base-26 into six letters.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for gid in used_gids {
+        hash ^= u64::from(*gid);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut tag = String::with_capacity(6);
+    for _ in 0..6 {
+        tag.push((b'A' + (hash % 26) as u8) as char);
+        hash /= 26;
+    }
+    tag
+}
+
+/// Build a `/ToUnicode` CMap mapping glyph ids back to Unicode, so text in a
+/// Type0/Identity-H font stays selectable and searchable.
+fn to_unicode_cmap(cid: &crate::font::CidLayout) -> String {
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n\
+         12 dict begin\n\
+         begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n\
+         /CMapType 2 def\n\
+         1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+
+    // `beginbfchar` blocks are limited to 100 entries each by the spec.
+    let entries: Vec<(u16, char)> = cid.gid_to_unicode.iter().map(|(&g, &c)| (g, c)).collect();
+    for chunk in entries.chunks(100) {
+        cmap.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (gid, ch) in chunk {
+            cmap.push_str(&format!("<{:04X}> <{}>\n", gid, utf16_be_hex(*ch)));
+        }
+        cmap.push_str("endbfchar\n");
+    }
+
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    cmap
+}
+
+/// Hex-encode a character as UTF-16BE (a surrogate pair for astral scalars),
+/// as required by `/ToUnicode` destination strings.
+fn utf16_be_hex(ch: char) -> String {
+    let mut buf = [0u16; 2];
+    ch.encode_utf16(&mut buf)
+        .iter()
+        .map(|unit| format!("{unit:04X}"))
+        .collect()
 }
 
 fn compress_stream(stream: &[u8]) -> Result<Vec<u8>, PdfError> {
@@ -146,7 +257,10 @@ fn compress_stream(stream: &[u8]) -> Result<Vec<u8>, PdfError> {
     encoder.finish().map_err(PdfError::Compression)
 }
 
-fn page_content(page: &Page) -> String {
+fn page_content(
+    page: &Page,
+    char_to_gid: Option<&std::collections::BTreeMap<char, u16>>,
+) -> String {
     let mut content = String::new();
 
     for command in &page.commands {
@@ -195,7 +309,22 @@ fn page_content(page: &Page) -> String {
                 content.push_str("BT\n");
                 content.push_str(&format!("/F1 {:.2} Tf\n", text.font_size));
                 content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
-                content.push_str(&format!("({}) Tj\n", escape_text(&text.text)));
+                match char_to_gid {
+                    // Embedded Type0/Identity-H font: write glyph ids as a
+                    // 2-byte-per-glyph hex string.
+                    Some(map) => {
+                        content.push('<');
+                        for ch in text.text.chars() {
+                            let gid = map.get(&ch).copied().unwrap_or(0);
+                            content.push_str(&format!("{gid:04X}"));
+                        }
+                        content.push_str("> Tj\n");
+                    }
+                    // Standard-14 Helvetica: a WinAnsi literal string.
+                    None => {
+                        content.push_str(&format!("({}) Tj\n", escape_text(&text.text)));
+                    }
+                }
                 content.push_str("ET\n");
             }
         }
@@ -215,8 +344,16 @@ fn escape_text(text: &str) -> String {
             '\r' => output.push_str("\\r"),
             '\n' => output.push_str("\\n"),
             '\t' => output.push_str("\\t"),
-            _ if ch.is_ascii() => output.push(ch),
-            _ => output.push('?'),
+            // Printable ASCII is written literally.
+            _ if ch.is_ascii_graphic() || ch == ' ' => output.push(ch),
+            // Other characters are emitted as their WinAnsi byte via an octal
+            // escape (the font is declared `/WinAnsiEncoding`), so Latin-1 text
+            // and CP1252 specials (bullet, dashes, curly quotes, accents) render
+            // instead of becoming `?`.
+            _ => match crate::font::char_to_winansi(ch) {
+                Some(byte) => output.push_str(&format!("\\{byte:03o}")),
+                None => output.push('?'),
+            },
         }
     }
 
@@ -328,7 +465,70 @@ mod tests {
     use crate::layout::{Line, Page, RenderOptions};
     use crate::paint::{PaintCommand, RectCommand};
 
-    use super::{escape_text, page_content, write_pdf};
+    use super::{escape_text, page_content, to_unicode_cmap, utf16_be_hex, write_pdf};
+
+    #[test]
+    fn utf16_be_hex_encodes_bmp_and_astral() {
+        assert_eq!(utf16_be_hex('A'), "0041");
+        assert_eq!(utf16_be_hex('世'), "4E16");
+        // Astral scalar -> UTF-16 surrogate pair.
+        assert_eq!(utf16_be_hex('\u{10348}'), "D800DF48");
+    }
+
+    #[test]
+    fn to_unicode_cmap_maps_glyphs_back_to_text() {
+        let mut gid_to_unicode = std::collections::BTreeMap::new();
+        gid_to_unicode.insert(36u16, 'A');
+        gid_to_unicode.insert(0x4E16u16, '世');
+        let cid = crate::font::CidLayout {
+            char_to_gid: std::collections::BTreeMap::new(),
+            widths: Vec::new(),
+            gid_to_unicode,
+        };
+
+        let cmap = to_unicode_cmap(&cid);
+        assert!(cmap.contains("/CMapType 2"));
+        assert!(cmap.contains("2 beginbfchar"));
+        assert!(cmap.contains("<0024> <0041>")); // gid 36 -> 'A'
+        assert!(cmap.contains("<4E16> <4E16>")); // gid 0x4E16 -> '世'
+        assert!(cmap.contains("endcmap"));
+    }
+
+    #[test]
+    fn embeds_type0_font_when_a_face_is_available() {
+        // Use any system TrueType we can find; skip cleanly if none resolves
+        // (keeps the test deterministic on machines without that font).
+        let candidates = [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ];
+        let Some(path) = candidates.iter().find(|p| std::path::Path::new(p).is_file()) else {
+            return;
+        };
+
+        let options = RenderOptions::default()
+            .with_font(&crate::font::FontSource::Path((*path).into()))
+            .expect("load font");
+        let mut page = Page::new();
+        page.push_colored_line(
+            Line {
+                text: "Hi".to_string(),
+                x: 48.0,
+                y: 700.0,
+                font_size: 12.0,
+                leading: 16.0,
+            },
+            Color::BLACK,
+        );
+
+        let pdf = write_pdf(&[page], &options).expect("render");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Subtype /Type0"));
+        assert!(text.contains("/Encoding /Identity-H"));
+        assert!(text.contains("/Subtype /CIDFontType2"));
+        assert!(text.contains("/CIDToGIDMap /Identity"));
+        assert!(text.contains("/ToUnicode"));
+    }
 
     #[test]
     fn escapes_pdf_text() {
@@ -353,6 +553,17 @@ mod tests {
     }
 
     #[test]
+    fn encodes_winansi_specials_as_octal() {
+        // Bullet (0x95), en dash (0x96), right curly quote (0x92), é (0xE9 Latin-1).
+        assert_eq!(escape_text("\u{2022}"), "\\225");
+        assert_eq!(escape_text("\u{2013}"), "\\226");
+        assert_eq!(escape_text("\u{2019}"), "\\222");
+        assert_eq!(escape_text("é"), "\\351");
+        // A character outside WinAnsi still degrades to `?`.
+        assert_eq!(escape_text("\u{4E2D}"), "?");
+    }
+
+    #[test]
     fn writes_clip_scope_operators() {
         let mut page = Page::new();
         page.commands.push(PaintCommand::PushClipRect(RectCommand {
@@ -370,7 +581,7 @@ mod tests {
             }));
         page.commands.push(PaintCommand::PopClip);
 
-        let content = page_content(&page);
+        let content = page_content(&page, None);
 
         assert!(content.contains("q\n10.00 20.00 30.00 40.00 re W n\n"));
         assert!(content.contains("Q\n"));
@@ -384,7 +595,7 @@ mod tests {
         page.commands
             .push(PaintCommand::SetStrokeColor(Color::from_rgb_u8(0, 0, 255)));
 
-        let content = page_content(&page);
+        let content = page_content(&page, None);
 
         assert!(content.contains("1.0000 0.0000 0.0000 rg\n"));
         assert!(content.contains("0.0000 0.0000 1.0000 RG\n"));

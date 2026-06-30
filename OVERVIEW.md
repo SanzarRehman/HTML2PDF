@@ -132,9 +132,12 @@ crates/
       lib.rs       Public API: Engine::render_html(html, options) -> PDF bytes
       dom.rs       HTML parsing into our compact "arena" DOM (custom html5ever sink)
       html.rs      CSS parsing, the cascade, computed styles + inheritance,
-                   and turning the DOM into boxes (tables + flow content)
-      font.rs      Text measurement (real Helvetica character widths)
-      layout.rs    Placing boxes on pages, text wrapping, pagination, tables
+                   and turning the DOM into boxes (tables + the flow box tree)
+      box_tree.rs  The nested block/inline box tree for non-table documents
+      font.rs      Text measurement (real Helvetica widths) + WinAnsi encoding
+      subset.rs    Retain-GIDs TrueType glyph subsetter for embedded fonts
+      layout.rs    Placing boxes on pages, text wrapping, pagination, tables,
+                   and recursive flow box-tree layout
       paint.rs     The display list (neutral draw commands)
       pdf.rs       Writing the actual PDF file + compression
       color.rs     Color type/helpers
@@ -244,17 +247,31 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   start/end), headings `h1`–`h6`.
 - Tables: rows, cells, colspans, `<thead>/<tbody>/<tfoot>`, repeated headers,
   per-cell styles, borders, backgrounds, alignment, text wrapping/clipping.
-- Flow content: headings/paragraphs/lists with computed font-size, color, align.
+- Flow content: a **nested block/inline box tree** — nested blocks, list and
+  blockquote indentation, list markers (`•` / `1.`), and per-run inline
+  `color`/`font-size`/bold within a paragraph, all wrapped and aligned.
+- **CSS box model on blocks**: `margin`/`padding` (shorthands + longhands),
+  vertical margin collapse, and block `background-color` + `border` painted
+  behind content (per page fragment).
+- Non-ASCII text: WinAnsi/CP1252 characters render with the built-in Helvetica;
+  with an embedded font (`--font`) **any Unicode** renders (Latin, CJK, …) via a
+  Type0/Identity-H composite + ToUnicode CMap, and stays selectable/searchable.
 - Pagination, landscape, page margins, PDF compression, selectable text.
 - **Font embedding** — `--font <path|family>` embeds a TrueType/OpenType font
-  (real metrics via ttf-parser, family lookup via fontdb); text stays selectable.
+  (real metrics via ttf-parser, family lookup via fontdb) as a Type0/Identity-H
+  composite with a ToUnicode CMap, so any Unicode renders and text stays
+  selectable. Glyph **subsetting** (retain-GIDs) embeds only the used glyphs
+  (e.g. a CJK doc dropped from 33 MB to 0.65 MB).
 
 **Not yet (the honest list)**
 
-- A fully nested block/inline **box-tree layout** (flow boxes currently flatten
-  to a simple list; tables use specialized layout).
-- **Font subsetting** (the full font is embedded today) and **CID/Unicode** for
-  non-Latin/CJK text (embedding is WinAnsi/Latin for now).
+- Per-side **border** width/style/color and rounded corners (borders are a
+  uniform 1pt box today), `margin: auto` centering, and `box-sizing`.
+- Inline images and a true text baseline model. Tables keep their own
+  specialized layout. (Over-long words now break to stay on the page; honoring
+  `overflow-wrap`/`word-break` for explicit/earlier breaks is a follow-up.)
+- **JavaScript** (planned as a controlled pre-layout stage).
+- Subsetting covers `glyf`-based TrueType; CFF/OpenType-CFF fonts embed in full.
 - **Images, SVG, flexbox, grid, absolute positioning.**
 - **JavaScript** (planned as a controlled pre-layout stage, later).
 - Folding page-geometry parsing into cssparser (the substring scan above).
@@ -277,9 +294,12 @@ Foundation first, so features attach to something solid. Done ✓ / next ▶:
 ✓ Computed styles + inheritance
 ✓ Box generation from `display` (flow content + display:none)
 ✓ Font embedding (ttf-parser + fontdb, opt-in via --font)
-▶ Full nested box-tree layout
-· Font subsetting + CID/Unicode
-· JavaScript (pre-layout)
+✓ Full nested box-tree layout (box_tree.rs: nesting, lists, inline runs)
+✓ CSS box model on blocks (margins/padding, margin collapse, borders/backgrounds)
+✓ CID/Unicode font embedding (Type0/Identity-H + ToUnicode; any-language text)
+✓ Font subsetting (retain-GIDs glyf/loca rebuild; embed only used glyphs)
+▶ JavaScript (pre-layout stage)
+· CFF/OpenType-CFF subsetting; per-side borders; inline images
 ```
 
 Every step keeps the test suite green and the test spreadsheet rendering
