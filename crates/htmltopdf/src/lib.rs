@@ -6,12 +6,16 @@ mod html;
 mod layout;
 pub mod paint;
 mod pdf;
+mod script;
 mod subset;
 
 use std::fmt;
 
 pub use font::FontSource;
 pub use layout::{PageSize, RenderOptions};
+pub use script::{NoopScriptEngine, ScriptEngine, ScriptLimits, ScriptReport};
+#[cfg(feature = "js")]
+pub use script::BoaScriptEngine;
 
 #[derive(Debug)]
 pub enum Error {
@@ -47,7 +51,23 @@ impl Engine {
     }
 
     pub fn render_html(&self, html: &str, options: RenderOptions) -> Result<Vec<u8>> {
-        let document = html::parse(html);
+        self.render_document(html::parse(html), options)
+    }
+
+    /// Render after running a bounded pre-layout script stage (ADR 0006) that may
+    /// mutate the DOM. Passing [`NoopScriptEngine`] is equivalent to
+    /// [`render_html`](Self::render_html).
+    pub fn render_html_with_scripts(
+        &self,
+        html: &str,
+        options: RenderOptions,
+        engine: &dyn ScriptEngine,
+        limits: &ScriptLimits,
+    ) -> Result<Vec<u8>> {
+        self.render_document(html::parse_scripted(html, engine, limits), options)
+    }
+
+    fn render_document(&self, document: html::Document, options: RenderOptions) -> Result<Vec<u8>> {
         let has_flow = document.flow.as_ref().is_some_and(|flow| flow.has_text());
         if document.blocks.is_empty() && !has_flow {
             return Err(Error::EmptyDocument);
@@ -83,5 +103,42 @@ mod tests {
             error.to_string(),
             "document does not contain renderable text"
         );
+    }
+
+    #[test]
+    fn noop_scripting_matches_static_render() {
+        use super::{NoopScriptEngine, ScriptLimits};
+        let html = "<h1>Hello</h1><p id=\"x\">World</p>";
+        let plain = Engine::new()
+            .render_html(html, RenderOptions::default())
+            .unwrap();
+        let scripted = Engine::new()
+            .render_html_with_scripts(
+                html,
+                RenderOptions::default(),
+                &NoopScriptEngine,
+                &ScriptLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(plain, scripted, "no-op scripting must not change output");
+    }
+
+    #[cfg(feature = "js")]
+    #[test]
+    fn scripting_mutates_rendered_document() {
+        use super::{BoaScriptEngine, ScriptLimits};
+        let html = "<p id=\"x\">OLD</p><script>document.getElementById('x').textContent = 'SCRIPTED'</script>";
+
+        let pdf = Engine::new()
+            .render_html_with_scripts(
+                html,
+                RenderOptions::default(),
+                &BoaScriptEngine,
+                &ScriptLimits::default(),
+            )
+            .expect("scripted render should succeed");
+
+        assert!(pdf.starts_with(b"%PDF-1.7\n"));
+        assert!(pdf.ends_with(b"%%EOF\n"));
     }
 }

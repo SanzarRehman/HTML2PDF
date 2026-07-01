@@ -9,5 +9,9 @@ rust-version.workspace = true
 name = "htmltopdf"
 path = "src/main.rs"
 
+[features]
+# Enable the bounded pre-layout JavaScript stage (forwards to htmltopdf/js).
+js = ["htmltopdf/js"]
+
 [dependencies]
 htmltopdf = { path = "../htmltopdf" }

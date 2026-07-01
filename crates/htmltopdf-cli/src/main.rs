@@ -27,9 +27,11 @@ fn run() -> Result<(), String> {
         return run_concurrent_benchmark(&args[1..]);
     }
 
-    // Optional `--font <path-or-family>` may appear before/among the positionals.
+    // Optional `--font <path-or-family>` and `--js` may appear before/among the
+    // positionals.
     let mut positionals: Vec<std::ffi::OsString> = Vec::new();
     let mut font: Option<String> = None;
+    let mut scripting = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--font" {
@@ -37,6 +39,8 @@ fn run() -> Result<(), String> {
                 .next()
                 .ok_or_else(|| "--font requires a font file path or family name".to_string())?;
             font = Some(value.to_string_lossy().into_owned());
+        } else if arg == "--js" {
+            scripting = true;
         } else {
             positionals.push(arg);
         }
@@ -45,7 +49,7 @@ fn run() -> Result<(), String> {
     if positionals.len() != 2 {
         return Err(
             concat!(
-                "usage: htmltopdf [--font <path|family>] <input.html> <output.pdf>\n",
+                "usage: htmltopdf [--font <path|family>] [--js] <input.html> <output.pdf>\n",
                 "       htmltopdf bench <input.html> <output-dir> [runs]\n",
                 "       htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>"
             )
@@ -59,14 +63,45 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to read {}: {error}", input_path.display()))?;
 
     let options = build_options(font.as_deref())?;
-    let pdf = Engine::new()
-        .render_html(&html, options)
+    let pdf = render(&html, options, scripting)
         .map_err(|error| format!("failed to render {}: {error}", input_path.display()))?;
 
     fs::write(&output_path, pdf)
         .map_err(|error| format!("failed to write {}: {error}", output_path.display()))?;
 
     Ok(())
+}
+
+/// Render, optionally running the bounded pre-layout JavaScript stage when `--js`
+/// is given (requires the `js` build feature).
+#[cfg(feature = "js")]
+fn render(html: &str, options: RenderOptions, scripting: bool) -> Result<Vec<u8>, String> {
+    let engine = Engine::new();
+    if scripting {
+        engine
+            .render_html_with_scripts(
+                html,
+                options,
+                &htmltopdf::BoaScriptEngine,
+                &htmltopdf::ScriptLimits::default(),
+            )
+            .map_err(|error| error.to_string())
+    } else {
+        engine.render_html(html, options).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(feature = "js"))]
+fn render(html: &str, options: RenderOptions, scripting: bool) -> Result<Vec<u8>, String> {
+    if scripting {
+        return Err(
+            "this build has no JavaScript support; rebuild with `--features js` to use --js"
+                .to_string(),
+        );
+    }
+    Engine::new()
+        .render_html(html, options)
+        .map_err(|error| error.to_string())
 }
 
 /// Build render options, loading an embedded font when `--font` was given. A

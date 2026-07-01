@@ -120,8 +120,10 @@ Costs:
 5. Replace the hand-rolled CSS tokenizer with `cssparser`; source `<style>` CSS
    from the DOM. The cascade model, selector model, and value parsing are
    reused, so output is unchanged while comments, strings/`url()`, nested
-   blocks, and `@media` are now handled correctly. **Done.** (`@page`/column
-   geometry still uses a substring scan; folding it in is a follow-up.)
+   blocks, and `@media` are now handled correctly. **Done.** `@page` margins/
+   orientation and the spreadsheet column/row geometry are now parsed with
+   `cssparser` too (a dedicated geometry pass over the DOM's CSS), so no substring
+   scanning of CSS or HTML remains.
 6. Computed-style model with inheritance: a top-down DOM pass resolves each
    node's style, inheriting color/font/text-align/white-space/wrapping from the
    parent and taking border/padding/background/overflow/vertical-align from the

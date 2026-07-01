@@ -178,11 +178,29 @@ impl Default for TableStyle {
 }
 
 pub fn parse(input: &str) -> Document {
-    let page_style = parse_page_style(input);
-    let table_style = parse_table_style(input);
-    let table_columns = parse_table_columns(input);
-    let dom = crate::dom::Dom::parse(input);
-    let stylesheet = parse_stylesheet(&collect_style_css(&dom));
+    finish(crate::dom::Dom::parse(input))
+}
+
+/// Parse, but first run a pre-layout script stage that may mutate the DOM (ADR
+/// 0006). With the `NoopScriptEngine` this is identical to [`parse`].
+pub fn parse_scripted(
+    input: &str,
+    engine: &dyn crate::script::ScriptEngine,
+    limits: &crate::script::ScriptLimits,
+) -> Document {
+    let mut dom = crate::dom::Dom::parse(input);
+    let _report = engine.run(&mut dom, limits);
+    finish(dom)
+}
+
+/// Build a `Document` from a (possibly script-mutated) DOM: parse the stylesheet
+/// and geometry, compute styles, and generate the table rows or flow box tree.
+fn finish(dom: crate::dom::Dom) -> Document {
+    // Source CSS from the DOM's <style> elements and parse it once with
+    // cssparser, for both the cascade and the page/table geometry.
+    let css = collect_style_css(&dom);
+    let (page_style, table_style, table_columns) = parse_page_geometry(&css);
+    let stylesheet = parse_stylesheet(&css);
     let computed = compute_inherited_styles(&dom, &stylesheet);
 
     let blocks = tables_from_dom(&dom, &stylesheet, &computed);
@@ -492,64 +510,244 @@ fn is_block_tag(tag: &str) -> bool {
     )
 }
 
-fn parse_table_columns(input: &str) -> Vec<f32> {
+/// Parse page and table geometry from the stylesheet with `cssparser` (rather
+/// than scanning raw HTML): `@page` margins and orientation, the spreadsheet
+/// column widths (in source order), and the table row height. `@media` blocks are
+/// descended into, matching the old "scan anywhere" behavior.
+fn parse_page_geometry(css: &str) -> (PageStyle, TableStyle, Vec<f32>) {
+    let mut input = ParserInput::new(css);
+    let mut parser = Parser::new(&mut input);
+    let mut geo_parser = GeometryParser;
+    let mut rules = StyleSheetParser::new(&mut parser, &mut geo_parser);
+
+    let mut page = PageStyle::default();
+    let mut table = TableStyle::default();
     let mut columns = Vec::new();
-    let mut cursor = 0;
-    let lower = input.to_ascii_lowercase();
 
-    while let Some(relative_start) = lower[cursor..].find("table.sheet0 col.col") {
-        let start = cursor + relative_start;
-        let Some(relative_end) = lower[start..].find('}') else {
-            break;
-        };
-        let rule = &input[start..start + relative_end];
-
-        if let Some(width) = parse_css_number_after(rule, "width:") {
-            columns.push(width);
+    while let Some(result) = rules.next() {
+        let Ok(items) = result else { continue };
+        for item in items {
+            match item {
+                GeoItem::ColWidth(width) => columns.push(width),
+                GeoItem::RowHeight(height) => {
+                    table.row_height.get_or_insert(height);
+                }
+                GeoItem::Page {
+                    margins,
+                    landscape,
+                } => {
+                    if landscape {
+                        page.orientation = PageOrientation::Landscape;
+                    }
+                    page.margin_top = page.margin_top.or(margins[0]);
+                    page.margin_right = page.margin_right.or(margins[1]);
+                    page.margin_bottom = page.margin_bottom.or(margins[2]);
+                    page.margin_left = page.margin_left.or(margins[3]);
+                }
+            }
         }
-
-        cursor = start + relative_end + 1;
     }
 
-    columns
+    (page, table, columns)
 }
 
-fn parse_page_style(input: &str) -> PageStyle {
-    let lower = input.to_ascii_lowercase();
-    let mut style = PageStyle::default();
-
-    if lower.contains("size: landscape") {
-        style.orientation = PageOrientation::Landscape;
-    }
-
-    if let Some(rule) = find_css_rule(input, "@page") {
-        style.margin_top = parse_css_length_after(rule, "margin-top:");
-        style.margin_right = parse_css_length_after(rule, "margin-right:");
-        style.margin_bottom = parse_css_length_after(rule, "margin-bottom:");
-        style.margin_left = parse_css_length_after(rule, "margin-left:");
-    }
-
-    style
+/// One piece of geometry produced by a single CSS rule.
+enum GeoItem {
+    /// A spreadsheet column width (`table.sheet0 col.colN { width }`).
+    ColWidth(f32),
+    /// A table row height (`table.sheet0 tr { height }`).
+    RowHeight(f32),
+    /// `@page` margins `[top, right, bottom, left]` and `size: landscape`.
+    Page { margins: [Option<f32>; 4], landscape: bool },
 }
 
-fn parse_table_style(input: &str) -> TableStyle {
-    let mut style = TableStyle::default();
+/// A `cssparser` rule parser that extracts only geometry (see [`GeoItem`]).
+struct GeometryParser;
 
-    if let Some(rule) = find_css_rule(input, "table.sheet0 tr") {
-        style.row_height = parse_css_length_after(rule, "height:");
+impl<'i> QualifiedRuleParser<'i> for GeometryParser {
+    type Prelude = Vec<SimpleSelector>;
+    type QualifiedRule = Vec<GeoItem>;
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        Ok(parse_selector_list(input))
     }
 
-    style
+    fn parse_block<'t>(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
+        let decls = parse_geo_declarations(input);
+        let mut items = Vec::new();
+        for selector in &prelude {
+            match selector.tag.as_deref() {
+                Some("col") => {
+                    if let Some(width) = decls.width {
+                        items.push(GeoItem::ColWidth(width));
+                    }
+                }
+                Some("tr") if selector.classes.is_empty() => {
+                    if let Some(height) = decls.height {
+                        items.push(GeoItem::RowHeight(height));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(items)
+    }
 }
 
-fn find_css_rule<'a>(input: &'a str, selector: &str) -> Option<&'a str> {
-    let lower = input.to_ascii_lowercase();
-    let selector = selector.to_ascii_lowercase();
-    let start = lower.find(&selector)?;
-    let open = lower[start..].find('{').map(|position| start + position)?;
-    let close = lower[open..].find('}').map(|position| open + position)?;
+impl<'i> AtRuleParser<'i> for GeometryParser {
+    type Prelude = AtRuleKind;
+    type AtRule = Vec<GeoItem>;
+    type Error = ();
 
-    Some(&input[open + 1..close])
+    fn parse_prelude<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        consume_remaining(input);
+        if name.eq_ignore_ascii_case("media") {
+            Ok(AtRuleKind::Media)
+        } else if name.eq_ignore_ascii_case("page") {
+            Ok(AtRuleKind::Page)
+        } else {
+            Ok(AtRuleKind::Other)
+        }
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        match prelude {
+            AtRuleKind::Media => {
+                let mut inner = GeometryParser;
+                let mut rules = StyleSheetParser::new(input, &mut inner);
+                let mut collected = Vec::new();
+                while let Some(result) = rules.next() {
+                    if let Ok(mut items) = result {
+                        collected.append(&mut items);
+                    }
+                }
+                Ok(collected)
+            }
+            AtRuleKind::Page => {
+                let decls = parse_geo_declarations(input);
+                Ok(vec![GeoItem::Page {
+                    margins: [
+                        decls.margin_top,
+                        decls.margin_right,
+                        decls.margin_bottom,
+                        decls.margin_left,
+                    ],
+                    landscape: decls.landscape,
+                }])
+            }
+            AtRuleKind::Other => Ok(Vec::new()),
+        }
+    }
+
+    fn rule_without_block(&mut self, _prelude: Self::Prelude, _start: &ParserState) -> Result<Self::AtRule, ()> {
+        Ok(Vec::new())
+    }
+}
+
+/// The geometry declarations extracted from one rule body.
+#[derive(Default)]
+struct GeoDecls {
+    width: Option<f32>,
+    height: Option<f32>,
+    margin_top: Option<f32>,
+    margin_right: Option<f32>,
+    margin_bottom: Option<f32>,
+    margin_left: Option<f32>,
+    landscape: bool,
+}
+
+fn parse_geo_declarations(input: &mut Parser<'_, '_>) -> GeoDecls {
+    let mut decls = GeoDecls::default();
+    let mut decl_parser = GeoDeclParser { decls: &mut decls };
+    let mut items = RuleBodyParser::new(input, &mut decl_parser);
+    while let Some(result) = items.next() {
+        let _ = result;
+    }
+    decls
+}
+
+struct GeoDeclParser<'a> {
+    decls: &'a mut GeoDecls,
+}
+
+impl<'i> DeclarationParser<'i> for GeoDeclParser<'_> {
+    type Declaration = ();
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        _start: &ParserState,
+    ) -> Result<(), ParseError<'i, ()>> {
+        let value_start = input.position();
+        consume_remaining(input);
+        let raw_value = input.slice_from(value_start);
+        let (value, _important) = normalize_declaration_value(raw_value);
+
+        match name.to_ascii_lowercase().as_str() {
+            "width" => self.decls.width = parse_css_length(&value),
+            "height" => self.decls.height = parse_css_length(&value),
+            "margin-top" => self.decls.margin_top = parse_css_length(&value),
+            "margin-right" => self.decls.margin_right = parse_css_length(&value),
+            "margin-bottom" => self.decls.margin_bottom = parse_css_length(&value),
+            "margin-left" => self.decls.margin_left = parse_css_length(&value),
+            "margin" => {
+                let [top, right, bottom, left] = parse_box_edges(&value);
+                self.decls.margin_top = top;
+                self.decls.margin_right = right;
+                self.decls.margin_bottom = bottom;
+                self.decls.margin_left = left;
+            }
+            "size" => {
+                if value.to_ascii_lowercase().contains("landscape") {
+                    self.decls.landscape = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl<'i> AtRuleParser<'i> for GeoDeclParser<'_> {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+}
+
+impl<'i> QualifiedRuleParser<'i> for GeoDeclParser<'_> {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+impl<'i> RuleBodyItemParser<'i, (), ()> for GeoDeclParser<'_> {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
+    }
 }
 
 /// Extract table rows and cells from the real DOM.
@@ -881,30 +1079,6 @@ fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
     }
 }
 
-fn parse_css_number_after(input: &str, marker: &str) -> Option<f32> {
-    let lower = input.to_ascii_lowercase();
-    let start = lower.find(marker)? + marker.len();
-    let value = input[start..]
-        .trim_start()
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
-        .collect::<String>();
-
-    value.parse().ok()
-}
-
-fn parse_css_length_after(input: &str, marker: &str) -> Option<f32> {
-    let lower = input.to_ascii_lowercase();
-    let start = lower.find(marker)? + marker.len();
-    let value = input[start..]
-        .trim_start()
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit() || *ch == '.' || ch.is_ascii_alphabetic())
-        .collect::<String>();
-
-    parse_css_length(&value)
-}
-
 fn parse_css_length(value: &str) -> Option<f32> {
     let number = value
         .chars()
@@ -1160,6 +1334,8 @@ struct RuleParser;
 enum AtRuleKind {
     /// `@media`: parse the nested block as if its rules were top-level.
     Media,
+    /// `@page`: parsed by the geometry parser for margins and orientation.
+    Page,
     /// Any other at-rule: ignored.
     Other,
 }
@@ -1226,7 +1402,9 @@ impl<'i> AtRuleParser<'i> for RuleParser {
                 }
                 Ok(collected)
             }
-            AtRuleKind::Other => Ok(Vec::new()),
+            // `@page` carries no content rules for the cascade; geometry is
+            // handled separately by `parse_page_geometry`.
+            AtRuleKind::Page | AtRuleKind::Other => Ok(Vec::new()),
         }
     }
 
@@ -2025,6 +2203,34 @@ mod tests {
         assert_eq!(document.blocks[0].cells.len(), 2);
         assert_eq!(document.blocks[0].cells[0].text, "Student ID");
         assert_eq!(document.blocks[0].cells[0].colspan, 2);
+    }
+
+    #[test]
+    fn parses_page_and_table_geometry_via_cssparser() {
+        let document = parse(
+            r#"
+            <style>
+            tr { text-align: left }
+            @page page0 { margin-left: 0.25in; margin-top: 0.75in; size: landscape; }
+            table.sheet0 col.col0 { width: 30pt }
+            table.sheet0 col.col1 { width: 93pt }
+            table.sheet0 tr { height: 15pt }
+            </style>
+            <table><tr><td>x</td></tr></table>
+            "#,
+        );
+
+        assert_eq!(
+            document.page_style.orientation,
+            super::PageOrientation::Landscape
+        );
+        assert_eq!(document.page_style.margin_left, Some(18.0)); // 0.25in
+        assert_eq!(document.page_style.margin_top, Some(54.0)); // 0.75in
+        // The bare `tr { text-align }` carries no height; the row height comes
+        // from `table.sheet0 tr`.
+        assert_eq!(document.table_style.row_height, Some(15.0));
+        // Column widths in source order.
+        assert_eq!(document.table_columns, vec![30.0, 93.0]);
     }
 
     #[test]

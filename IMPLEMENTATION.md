@@ -458,8 +458,10 @@ Current Rust output after the `cssparser`-based stylesheet:
   selectors and declaration lists), `;`/`{` inside quoted values and `url()`,
   rules nested in `@media`, and multiple `<style>` elements.
 - Peak RSS and throughput unchanged (~44 MB single, ~13 ms/PDF at 16 workers).
-- Remaining: `@page` margins and column widths still use the `find_css_rule`
-  substring scan; folding them into the `cssparser` stylesheet is the follow-up.
+- Update: `@page` margins/orientation, spreadsheet column widths, and the table
+  row height are now parsed from the DOM's `<style>` CSS with `cssparser` (a
+  dedicated geometry pass), replacing the `find_css_rule` substring scan over raw
+  HTML. Output is byte-identical on the fixture.
 
 Current Rust output after the computed-style inheritance pass:
 
@@ -603,6 +605,26 @@ Glyph subsetting (retain-GIDs, `subset.rs`):
   `sub yes` / `uni yes`, and `pdftotext` still round-trips Latin and CJK.
 - The default Helvetica path is untouched, so the ASCII fixture is byte-identical.
 
+Bounded pre-layout JavaScript (first pass, `js` feature):
+
+- `BoaScriptEngine` (Boa, behind the optional `js` cargo feature) runs a
+  document's inline `<script>`s after the DOM is built and before styling/layout
+  (ADR 0006), mutating the DOM. Exposed via `Engine::render_html_with_scripts`
+  and the CLI `--js` flag; default builds have no JS engine and are byte-identical.
+- DOM API: `document.getElementById`, element `textContent` (get/set),
+  `getAttribute`/`setAttribute`, and `console.log`. Runaway loops are stopped by
+  Boa's loop-iteration limit (from `ScriptLimits.max_ticks`); `set_text_content`
+  respects `max_new_nodes`. Each run is isolated (fresh `Context`) and takes the
+  DOM back out of the shared cell afterward.
+- Verified: unit tests execute real scripts (arithmetic, array iteration,
+  attribute round-trips, the loop limit), and end-to-end the CLI turns a template
+  (`PLACEHOLDER`/`0`) into `Invoice #1024` / `Total: $35` only with `--js`.
+- Build note: Boa 0.20's tree pulls `time`/`regress` versions that require rustc
+  1.88; `Cargo.lock` pins `time` 0.3.41 and `regress` 0.10.3 so the `js` feature
+  builds on the workspace's rustc 1.86.
+- Follow-ups: broader DOM (`innerHTML`, `createElement`, traversal), heap and
+  wall-time limit enforcement, and choosing Boa vs QuickJS as the default engine.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -625,7 +647,8 @@ that attach cleanly once the spine exists.
 - [x] Skip the transient RcDom with a custom `TreeSink` to cut parse-time RAM.
 - [x] Replace the hand-rolled CSS tokenizer with `cssparser`; source `<style>`
       CSS from the DOM. (Cascade model, selectors, and value parsing reused.)
-- [ ] Migrate `@page` / column-width geometry off `find_css_rule` substring scan.
+- [x] Migrate `@page` / column-width geometry off `find_css_rule` substring scan
+      (now parsed from the DOM's CSS with `cssparser`; fixture byte-identical).
 - [x] Add inheritance and computed-style model over the DOM.
 - [x] Generate flow-content boxes from computed `display` (display:none honored,
       generic blocks carry computed style). Layout renders them with computed
@@ -642,7 +665,13 @@ that attach cleanly once the spine exists.
       subsetting** (`subset.rs`) so only used glyphs are embedded.
 - [x] Add an HTTP API crate (`htmltopdf-server`, `tiny_http`): `POST /render`
       (HTML → PDF), thread-pooled; query options `landscape`/`margin`/`font`.
-- [ ] Add bounded pre-layout JavaScript stage (QuickJS/Boa behind a trait).
+- [x] Add bounded pre-layout JavaScript stage (Boa behind the `js` feature).
+      First pass: `BoaScriptEngine` runs inline scripts against a minimal
+      `document` DOM API (`getElementById`, `textContent` get/set,
+      `get/setAttribute`, `console.log`) with a loop-iteration limit, mutating the
+      DOM before styling/layout. Opt-in via `Engine::render_html_with_scripts` and
+      the CLI `--js` flag; default builds are unchanged. Broader DOM APIs,
+      `innerHTML`/`createElement`, and heap/wall-time enforcement are follow-ups.
 
 ### Features (attach after the spine)
 
@@ -659,7 +688,9 @@ that attach cleanly once the spine exists.
 - [x] Add first-pass text color and table-cell background color support.
 - [x] Add first-pass table-cell vertical-align support.
 - [ ] Replace first-pass selector cascade with `cssparser`/`selectors` and full computed style.
-- [ ] Add bounded dynamic-HTML execution design before implementing JavaScript.
+- [x] Add bounded dynamic-HTML execution design before implementing JavaScript
+      (ADR 0006 + the `script.rs` seam: `ScriptEngine` trait, `ScriptLimits`,
+      `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).
 - [ ] Add explicit cell overflow modes: visible, hidden, clip, and ellipsis.
 - [x] Add first-pass word-break and overflow-wrap support.
 - [ ] Add full CSS Text Level 3 line-breaking behavior.

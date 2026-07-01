@@ -91,9 +91,11 @@ We keep dependencies tiny on purpose. Here is **everything** we pull in:
 | **fontdb** | Resolves a font *family name* (e.g. `Georgia`) to a font file from the system database. | `font.rs` |
 | **flate2** | Zip-compresses the PDF page content streams and embedded font (`/FlateDecode`). | `pdf.rs` |
 | **markup5ever_rcdom** | *Test only.* A reference DOM we compare our own DOM against, to prove ours is correct. Not in the shipped binary. | `dom.rs` tests |
+| **boa_engine** | *Optional (`js` feature).* A pure-Rust JavaScript engine for the bounded pre-layout script stage. Absent from default builds. | `script.rs` |
 
 That's it. No web framework, no async runtime, no browser. Everything else
-(layout, pagination, fonts, PDF structure, color) is **our own code**.
+(layout, pagination, fonts, PDF structure, color) is **our own code**. The
+JavaScript engine is optional and off by default.
 
 ---
 
@@ -115,11 +117,10 @@ CSS matching works the proper way browsers do it:
 So pattern matching is **structured token parsing + indexed lookup**, not regex
 and not "search the raw text for a string."
 
-> **One honest exception (being removed):** page geometry — the `@page` margins,
-> the spreadsheet row height, and column widths — is still read with a small
-> substring scan (`find_css_rule` in `html.rs`). It only looks for a few fixed
-> selectors and is on the list to fold into the real cssparser path. The actual
-> **style cascade** for content does **not** use it.
+> Page geometry — the `@page` margins/orientation, the spreadsheet row height,
+> and column widths — is also parsed with `cssparser` (a dedicated geometry pass
+> over the DOM's `<style>` CSS), so there is **no substring scanning of CSS or
+> HTML anywhere** in the engine.
 
 ---
 
@@ -136,6 +137,7 @@ crates/
       box_tree.rs  The nested block/inline box tree for non-table documents
       font.rs      Text measurement (real Helvetica widths) + WinAnsi encoding
       subset.rs    Retain-GIDs TrueType glyph subsetter for embedded fonts
+      script.rs    Pre-layout scripting seam (ScriptEngine trait; no-op default)
       layout.rs    Placing boxes on pages, text wrapping, pagination, tables,
                    and recursive flow box-tree layout
       paint.rs     The display list (neutral draw commands)
@@ -262,6 +264,11 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   composite with a ToUnicode CMap, so any Unicode renders and text stays
   selectable. Glyph **subsetting** (retain-GIDs) embeds only the used glyphs
   (e.g. a CJK doc dropped from 33 MB to 0.65 MB).
+- **JavaScript (opt-in, first pass)** — with the `js` build feature, a bounded
+  pre-layout stage (Boa) runs inline `<script>`s against a minimal `document`
+  API (`getElementById`, `textContent`, `get/setAttribute`, `console.log`) and
+  mutates the DOM before layout. Enable per render via
+  `Engine::render_html_with_scripts` or the CLI `--js` flag.
 
 **Not yet (the honest list)**
 
@@ -270,11 +277,10 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Inline images and a true text baseline model. Tables keep their own
   specialized layout. (Over-long words now break to stay on the page; honoring
   `overflow-wrap`/`word-break` for explicit/earlier breaks is a follow-up.)
-- **JavaScript** (planned as a controlled pre-layout stage).
+- Broader **JavaScript**: `innerHTML`/`createElement`, DOM traversal, events,
+  timers, and heap/wall-time limit enforcement (the loop-iteration limit is in).
 - Subsetting covers `glyf`-based TrueType; CFF/OpenType-CFF fonts embed in full.
 - **Images, SVG, flexbox, grid, absolute positioning.**
-- **JavaScript** (planned as a controlled pre-layout stage, later).
-- Folding page-geometry parsing into cssparser (the substring scan above).
 
 The guiding rule (from PLAN.md): build real, spec-based behavior step by step,
 and don't claim support for something until it's actually implemented and tested.
@@ -298,7 +304,8 @@ Foundation first, so features attach to something solid. Done ✓ / next ▶:
 ✓ CSS box model on blocks (margins/padding, margin collapse, borders/backgrounds)
 ✓ CID/Unicode font embedding (Type0/Identity-H + ToUnicode; any-language text)
 ✓ Font subsetting (retain-GIDs glyf/loca rebuild; embed only used glyphs)
-▶ JavaScript (pre-layout stage)
+✓ JavaScript pre-layout stage — first pass (Boa behind the `js` feature)
+▶ Broader JS DOM API (innerHTML/createElement) + heap/time limits
 · CFF/OpenType-CFF subsetting; per-side borders; inline images
 ```
 

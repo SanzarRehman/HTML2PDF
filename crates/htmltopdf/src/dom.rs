@@ -27,7 +27,9 @@ use html5ever::{LocalName, Namespace, QualName};
 pub type NodeId = usize;
 
 /// The whole document as a flat arena. Node `0` is always the document root.
-#[derive(Debug, Clone)]
+/// `Default` is an empty arena, used only as a transient placeholder while the
+/// scripting stage owns the real DOM.
+#[derive(Debug, Clone, Default)]
 pub struct Dom {
     pub nodes: Vec<Node>,
 }
@@ -70,6 +72,68 @@ impl Dom {
 
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id]
+    }
+}
+
+/// Minimal DOM mutation surface used by the pre-layout scripting stage (ADR
+/// 0006). These are the primitives a `ScriptEngine`'s DOM bindings call; they are
+/// deliberately small and index-based to match the arena model.
+#[allow(dead_code)]
+impl Dom {
+    /// The first element whose `id` attribute equals `value` (document order).
+    pub fn element_by_id(&self, value: &str) -> Option<NodeId> {
+        self.nodes.iter().position(|node| {
+            matches!(node.data, NodeData::Element { .. }) && node.attr("id") == Some(value)
+        })
+    }
+
+    /// The concatenated text of a node's subtree (like DOM `textContent`).
+    pub fn text_content(&self, id: NodeId) -> String {
+        let mut out = String::new();
+        self.collect_text_content(id, &mut out);
+        out
+    }
+
+    fn collect_text_content(&self, id: NodeId, out: &mut String) {
+        match &self.nodes[id].data {
+            NodeData::Text(text) => out.push_str(text),
+            _ => {
+                for index in 0..self.nodes[id].children.len() {
+                    let child = self.nodes[id].children[index];
+                    self.collect_text_content(child, out);
+                }
+            }
+        }
+    }
+
+    /// Set a node's `textContent`: for a text node, replace its string; for an
+    /// element, replace its children with a single text node. Returns the number
+    /// of nodes added (0 or 1), for resource accounting. Old children are left
+    /// orphaned in the arena (unreachable from the root), which is harmless.
+    pub fn set_text_content(&mut self, id: NodeId, text: &str) -> usize {
+        if let NodeData::Text(existing) = &mut self.nodes[id].data {
+            *existing = text.to_string();
+            return 0;
+        }
+        let text_id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: Some(id),
+            children: Vec::new(),
+            data: NodeData::Text(text.to_string()),
+        });
+        self.nodes[id].children = vec![text_id];
+        1
+    }
+
+    /// Set (or add) an attribute on an element node; no-op for non-elements.
+    pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        if let NodeData::Element { attrs, .. } = &mut self.nodes[id].data {
+            if let Some(entry) = attrs.iter_mut().find(|(key, _)| key == name) {
+                entry.1 = value.to_string();
+            } else {
+                attrs.push((name.to_string(), value.to_string()));
+            }
+        }
     }
 }
 

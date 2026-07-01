@@ -57,9 +57,17 @@ Works today:
   formats that cannot be subset yet.
 - CLI, Rust library API, and lightweight HTTP API.
 
+Opt-in (behind the `js` build feature):
+
+- A bounded pre-layout **JavaScript** stage (Boa) that runs inline `<script>`s
+  against a minimal `document` API (`getElementById`, `textContent`,
+  `get/setAttribute`, `console.log`) and mutates the DOM before layout. Enable
+  with `--features js` and pass `--js` (CLI) or use
+  `Engine::render_html_with_scripts`.
+
 Not complete yet:
 
-- JavaScript execution.
+- Broader JavaScript: `innerHTML`/`createElement`, DOM traversal, events, timers.
 - Images, SVG, canvas, flexbox, grid, floats, and absolute positioning.
 - Full browser text shaping and baseline handling.
 - Exact non-Latin layout metrics for every script.
@@ -98,10 +106,13 @@ cargo run --release -p htmltopdf-cli -- --font /path/to/font.ttf input.html outp
 ## CLI
 
 ```bash
-htmltopdf [--font <path|family>] <input.html> <output.pdf>
+htmltopdf [--font <path|family>] [--js] <input.html> <output.pdf>
 htmltopdf bench <input.html> <output-dir> [runs]
 htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>
 ```
+
+`--js` runs the bounded pre-layout JavaScript stage and requires a build with the
+`js` feature: `cargo run --release -p htmltopdf-cli --features js -- --js in.html out.pdf`.
 
 Examples:
 
@@ -207,6 +218,7 @@ Important engine modules:
 | `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, ToUnicode maps |
 | `font.rs` | Font loading, metrics, WinAnsi encoding, and system font lookup |
 | `subset.rs` | Retain-GIDs TrueType glyph subsetter for embedded fonts |
+| `script.rs` | Bounded pre-layout JavaScript stage (`ScriptEngine`; Boa behind `js`) |
 
 The display-list boundary is intentional. Layout produces neutral paint
 commands; the PDF backend consumes them. That keeps the engine extensible for
