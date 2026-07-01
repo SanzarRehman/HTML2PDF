@@ -125,6 +125,88 @@ impl Dom {
         1
     }
 
+    /// Replace a node's children with the parsed markup `html` (like DOM
+    /// `innerHTML =`). Structural mutation: the fragment is parsed into a scratch
+    /// DOM and its `<body>` children are grafted into this arena under `id`. Old
+    /// children are orphaned (harmless). Returns the number of nodes added, for
+    /// the script node budget. **Spike (live-DOM JS).**
+    pub fn set_inner_html(&mut self, id: NodeId, html: &str) -> usize {
+        let fragment = Dom::parse(html);
+        let Some(body) = fragment
+            .nodes
+            .iter()
+            .position(|node| node.tag() == Some("body"))
+        else {
+            return 0;
+        };
+        let before = self.nodes.len();
+        let src_children = fragment.nodes[body].children.clone();
+        let mut new_children = Vec::with_capacity(src_children.len());
+        for src_child in src_children {
+            new_children.push(self.graft(&fragment, src_child, id));
+        }
+        self.nodes[id].children = new_children;
+        self.nodes.len() - before
+    }
+
+    /// Deep-copy `src_id` (and its subtree) from another DOM's arena into this
+    /// one under `parent`, returning the new node id. Ids are remapped as nodes
+    /// are appended.
+    fn graft(&mut self, src: &Dom, src_id: NodeId, parent: NodeId) -> NodeId {
+        let new_id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: Some(parent),
+            children: Vec::new(),
+            data: src.nodes[src_id].data.clone(),
+        });
+        let src_children = src.nodes[src_id].children.clone();
+        let mut kids = Vec::with_capacity(src_children.len());
+        for src_child in src_children {
+            kids.push(self.graft(src, src_child, new_id));
+        }
+        self.nodes[new_id].children = kids;
+        new_id
+    }
+
+    /// Serialize a node's children back to HTML (like DOM `innerHTML` getter).
+    /// Minimal (no attribute-value escaping) — enough for the scripting spike.
+    pub fn inner_html(&self, id: NodeId) -> String {
+        let mut out = String::new();
+        for &child in &self.nodes[id].children {
+            self.serialize_node(child, &mut out);
+        }
+        out
+    }
+
+    fn serialize_node(&self, id: NodeId, out: &mut String) {
+        match &self.nodes[id].data {
+            NodeData::Text(text) => out.push_str(text),
+            NodeData::Element { name, attrs } => {
+                out.push('<');
+                out.push_str(name);
+                for (key, value) in attrs {
+                    out.push(' ');
+                    out.push_str(key);
+                    out.push_str("=\"");
+                    out.push_str(value);
+                    out.push('"');
+                }
+                out.push('>');
+                for &child in &self.nodes[id].children {
+                    self.serialize_node(child, out);
+                }
+                out.push_str("</");
+                out.push_str(name);
+                out.push('>');
+            }
+            NodeData::Document => {
+                for &child in &self.nodes[id].children {
+                    self.serialize_node(child, out);
+                }
+            }
+        }
+    }
+
     /// Set (or add) an attribute on an element node; no-op for non-elements.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
         if let NodeData::Element { attrs, .. } = &mut self.nodes[id].data {

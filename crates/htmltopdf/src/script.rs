@@ -271,10 +271,42 @@ mod boa {
             host.clone(),
         );
 
+        // innerHTML getter: serialize the element's children back to markup.
+        let get_html = NativeFunction::from_copy_closure_with_captures(
+            |this, _args, host: &Host, ctx| {
+                let node = node_id_of(this, ctx)?;
+                let html = host.0.borrow().dom.inner_html(node);
+                Ok(js_string!(html).into())
+            },
+            host.clone(),
+        );
+        // innerHTML setter: structural mutation — parse the markup and replace the
+        // element's children. Bounded by the node budget. **Spike (live-DOM JS).**
+        let set_html = NativeFunction::from_copy_closure_with_captures(
+            |this, args, host: &Host, ctx| {
+                let node = node_id_of(this, ctx)?;
+                let html = args
+                    .get_or_undefined(0)
+                    .to_string(ctx)?
+                    .to_std_string_escaped();
+                let mut inner = host.0.borrow_mut();
+                if inner.report.nodes_added >= inner.max_new_nodes {
+                    inner.report.limit_hit = Some(super::ScriptLimit::Nodes);
+                    return Ok(JsValue::undefined());
+                }
+                let added = inner.dom.set_inner_html(node, &html);
+                inner.report.nodes_added += added;
+                Ok(JsValue::undefined())
+            },
+            host.clone(),
+        );
+
         // `.accessor` wants `JsFunction`s; convert before borrowing `context`
         // mutably for the object builder.
         let get_fn = get_text.to_js_function(context.realm());
         let set_fn = set_text.to_js_function(context.realm());
+        let get_html_fn = get_html.to_js_function(context.realm());
+        let set_html_fn = set_html.to_js_function(context.realm());
 
         ObjectInitializer::new(context)
             .property(js_string!("__node"), node as i32, Attribute::empty())
@@ -282,6 +314,12 @@ mod boa {
                 js_string!("textContent"),
                 Some(get_fn),
                 Some(set_fn),
+                Attribute::CONFIGURABLE | Attribute::ENUMERABLE,
+            )
+            .accessor(
+                js_string!("innerHTML"),
+                Some(get_html_fn),
+                Some(set_html_fn),
                 Attribute::CONFIGURABLE | Attribute::ENUMERABLE,
             )
             .function(set_attr, js_string!("setAttribute"), 2)
@@ -449,6 +487,55 @@ mod tests {
 
             let id = dom.element_by_id("x").unwrap();
             assert_eq!(dom.text_content(id), "ok");
+        }
+
+        // --- live-DOM spike: structural mutation via innerHTML ---------------
+
+        #[test]
+        fn inner_html_setter_grafts_new_element_nodes() {
+            let mut dom = Dom::parse(
+                "<div id=\"host\">old</div>\
+                 <script>document.getElementById('host').innerHTML = '<b>bold</b> and <i>more</i>';</script>",
+            );
+            let before = dom.nodes.len();
+            let report = BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
+
+            assert!(report.error.is_none(), "unexpected error: {:?}", report.error);
+            assert!(report.nodes_added > 0, "innerHTML should add nodes");
+            assert!(dom.nodes.len() > before, "arena should grow");
+
+            let host = dom.element_by_id("host").expect("host present");
+            // The host now contains real <b>/<i> element children, not just text.
+            let child_tags: Vec<Option<&str>> = dom.node(host)
+                .children
+                .iter()
+                .map(|&c| dom.node(c).tag())
+                .collect();
+            assert!(child_tags.contains(&Some("b")), "expected a <b> child: {child_tags:?}");
+            assert!(child_tags.contains(&Some("i")), "expected an <i> child");
+            assert_eq!(dom.text_content(host), "bold and more");
+        }
+
+        #[test]
+        fn inner_html_getter_serializes_children() {
+            let mut dom = Dom::parse(
+                "<div id=\"h\"><span>hi</span></div>\
+                 <script>document.getElementById('h').setAttribute('data-html', document.getElementById('h').innerHTML);</script>",
+            );
+            BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
+            let id = dom.element_by_id("h").unwrap();
+            assert_eq!(dom.node(id).attr("data-html"), Some("<span>hi</span>"));
+        }
+
+        #[test]
+        fn inner_html_respects_node_budget() {
+            let mut dom = Dom::parse(
+                "<div id=\"h\">x</div>\
+                 <script>document.getElementById('h').innerHTML = '<b>a</b><b>b</b><b>c</b>';</script>",
+            );
+            let limits = ScriptLimits { max_new_nodes: 0, ..ScriptLimits::default() };
+            let report = BoaScriptEngine.run(&mut dom, &limits);
+            assert_eq!(report.limit_hit, Some(crate::script::ScriptLimit::Nodes));
         }
     }
 }
