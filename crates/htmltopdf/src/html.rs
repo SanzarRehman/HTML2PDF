@@ -58,6 +58,11 @@ pub struct CellStyle {
     pub align: Option<TextAlign>,
     pub vertical_align: Option<VerticalAlign>,
     pub bold: bool,
+    /// `text-decoration: underline` / `line-through`. Not inherited in CSS, but
+    /// the flag is propagated to descendant inline runs so the decoration spans
+    /// them (matching how a browser paints it over inline descendants).
+    pub underline: bool,
+    pub line_through: bool,
     /// Whether the box draws a border. `None` means unset (so a more specific
     /// `border: none` can override a less specific border rule in the cascade).
     pub border: Option<bool>,
@@ -88,6 +93,8 @@ impl Default for CellStyle {
             align: None,
             vertical_align: None,
             bold: false,
+            underline: false,
+            line_through: false,
             border: None,
             overflow: None,
             font_size: None,
@@ -243,6 +250,8 @@ fn build_flow(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Option<crate:
     let root_ctx = FlowCtx {
         font_size: crate::layout::font_size_for(BlockKind::Paragraph),
         bold: false,
+        underline: false,
+        line_through: false,
         color: Color::BLACK,
         align: TextAlign::Left,
     };
@@ -320,6 +329,8 @@ fn resolve_image_box(
 struct FlowCtx {
     font_size: f32,
     bold: bool,
+    underline: bool,
+    line_through: bool,
     color: Color,
     align: TextAlign,
 }
@@ -340,7 +351,12 @@ impl ChildAcc {
             return;
         }
         if let Some(last) = self.pending.last_mut() {
-            if last.font_size == ctx.font_size && last.bold == ctx.bold && last.color == ctx.color {
+            if last.font_size == ctx.font_size
+                && last.bold == ctx.bold
+                && last.underline == ctx.underline
+                && last.line_through == ctx.line_through
+                && last.color == ctx.color
+            {
                 last.text.push_str(text);
                 return;
             }
@@ -349,6 +365,8 @@ impl ChildAcc {
             text: text.to_string(),
             font_size: ctx.font_size,
             bold: ctx.bold,
+            underline: ctx.underline,
+            line_through: ctx.line_through,
             color: ctx.color,
         });
     }
@@ -475,6 +493,8 @@ fn build_block(
     let child_ctx = FlowCtx {
         font_size,
         bold,
+        underline: parent.underline || own.underline,
+        line_through: parent.line_through || own.line_through,
         color,
         align,
     };
@@ -511,6 +531,8 @@ fn inline_ctx(parent: &FlowCtx, computed: &ComputedStyles, id: crate::dom::NodeI
     FlowCtx {
         font_size: own.font_size.unwrap_or(parent.font_size),
         bold: parent.bold || own.bold || matches!(tag, "b" | "strong"),
+        underline: parent.underline || own.underline || matches!(tag, "u" | "ins"),
+        line_through: parent.line_through || own.line_through || matches!(tag, "s" | "strike" | "del"),
         color: own.color.unwrap_or(parent.color),
         align: parent.align,
     }
@@ -1105,6 +1127,9 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         overflow_wrap: own.overflow_wrap.or(parent.overflow_wrap),
         word_break: own.word_break.or(parent.word_break),
         bold: own.bold || parent.bold,
+        // Text decoration propagates to descendant inline content (see field docs).
+        underline: own.underline || parent.underline,
+        line_through: own.line_through || parent.line_through,
         // Non-inheritable: the element's own value only.
         vertical_align: own.vertical_align,
         border: own.border,
@@ -2556,6 +2581,21 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "font-weight" if is_bold_weight(value) => {
             target.cell.bold = true;
         }
+        "text-decoration" | "text-decoration-line" => {
+            // Only the `-line` component is honored; `none` clears both flags.
+            let v = value.to_ascii_lowercase();
+            if v.contains("none") {
+                target.cell.underline = false;
+                target.cell.line_through = false;
+            } else {
+                if v.contains("underline") {
+                    target.cell.underline = true;
+                }
+                if v.contains("line-through") {
+                    target.cell.line_through = true;
+                }
+            }
+        }
         "font-size" => target.cell.font_size = parse_css_length(value),
         "width" => target.cell.width = parse_css_length(value),
         "height" => target.cell.height = parse_css_length(value),
@@ -2814,6 +2854,8 @@ impl CellStyle {
         self.align = other.align.or(self.align);
         self.vertical_align = other.vertical_align.or(self.vertical_align);
         self.bold |= other.bold;
+        self.underline |= other.underline;
+        self.line_through |= other.line_through;
         self.border = other.border.or(self.border);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
@@ -2927,6 +2969,26 @@ mod tests {
         let bolds: Vec<bool> = runs.iter().map(|run| run.bold).collect();
         assert_eq!(runs.iter().find(|r| r.text.contains("world")).unwrap().bold, true);
         assert!(bolds.contains(&false));
+    }
+
+    #[test]
+    fn text_decoration_marks_underline_and_line_through() {
+        let document = parse(
+            "<p>plain <u>under</u> <s>struck</s> \
+             <span style=\"text-decoration: underline line-through\">both</span></p>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let runs = match &blocks[0].children[0] {
+            BoxChild::Line(runs) => runs,
+            _ => panic!("expected an inline line"),
+        };
+        let find = |needle: &str| runs.iter().find(|r| r.text.contains(needle)).unwrap();
+
+        assert!(find("plain").underline == false && find("plain").line_through == false);
+        assert!(find("under").underline && !find("under").line_through);
+        assert!(find("struck").line_through && !find("struck").underline);
+        assert!(find("both").underline && find("both").line_through);
     }
 
     #[test]

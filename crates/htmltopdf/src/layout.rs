@@ -3,7 +3,7 @@ use crate::html::{
     BlockKind, Document, Overflow, OverflowWrap, PageOrientation, TableCell, TextAlign,
     VerticalAlign, WhiteSpace, WordBreak,
 };
-use crate::paint::{ImageCommand, PaintCommand, RectCommand, TextCommand};
+use crate::paint::{ImageCommand, LineCommand, PaintCommand, RectCommand, TextCommand};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageSize {
@@ -165,6 +165,45 @@ impl Page {
             bold,
         }));
         self.lines.push(line);
+    }
+
+    /// Stroke `text-decoration` lines for a text run drawn with its baseline at
+    /// `(x, y)` and horizontal extent `width`. Underlines sit just below the
+    /// baseline; line-through crosses near the x-height midline.
+    pub(crate) fn push_text_decoration(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        font_size: f32,
+        color: Color,
+        underline: bool,
+        line_through: bool,
+    ) {
+        if (!underline && !line_through) || width <= 0.0 {
+            return;
+        }
+        self.commands.push(PaintCommand::SetStrokeColor(color));
+        self.commands
+            .push(PaintCommand::SetLineWidth((font_size * 0.06).max(0.4)));
+        if underline {
+            let uy = y - font_size * 0.12;
+            self.commands.push(PaintCommand::StrokeLine(LineCommand {
+                x1: x,
+                y1: uy,
+                x2: x + width,
+                y2: uy,
+            }));
+        }
+        if line_through {
+            let ly = y + font_size * 0.28;
+            self.commands.push(PaintCommand::StrokeLine(LineCommand {
+                x1: x,
+                y1: ly,
+                x2: x + width,
+                y2: ly,
+            }));
+        }
     }
 
     pub(crate) fn push_rect(&mut self, rect: Rect) {
@@ -540,6 +579,15 @@ fn layout_line_box(
                 piece.color,
                 piece.bold,
             );
+            page.push_text_decoration(
+                px,
+                *y,
+                piece_width,
+                piece.font_size,
+                piece.color,
+                piece.underline,
+                piece.line_through,
+            );
             px += piece_width;
         }
 
@@ -553,6 +601,8 @@ struct LinePiece {
     font_size: f32,
     color: Color,
     bold: bool,
+    underline: bool,
+    line_through: bool,
 }
 
 /// Wrap styled inline runs into visual lines. Whitespace is collapsed across run
@@ -609,11 +659,16 @@ fn wrap_inline_runs(
         if !current.is_empty() {
             // Re-measure the separator at the (possibly new) line's leading run.
             let space_width = estimate_text_width(" ", token.space_font_size, font);
+            let lead = token.pieces.first();
             current.push(LinePiece {
                 text: " ".to_string(),
                 font_size: token.space_font_size,
-                color: token.pieces.first().map(|p| p.color).unwrap_or(Color::BLACK),
-                bold: token.pieces.first().map(|p| p.bold).unwrap_or(false),
+                color: lead.map(|p| p.color).unwrap_or(Color::BLACK),
+                bold: lead.map(|p| p.bold).unwrap_or(false),
+                // Share the following word's decoration so a run of decorated
+                // words gets a continuous underline/strike across the spaces.
+                underline: lead.map(|p| p.underline).unwrap_or(false),
+                line_through: lead.map(|p| p.line_through).unwrap_or(false),
             });
             current_width += space_width;
         }
@@ -659,6 +714,8 @@ fn break_long_token(
                 if last.font_size == piece.font_size
                     && last.color == piece.color
                     && last.bold == piece.bold
+                    && last.underline == piece.underline
+                    && last.line_through == piece.line_through
                 {
                     last.text.push(ch);
                     *current_width += char_width;
@@ -670,6 +727,8 @@ fn break_long_token(
                 font_size: piece.font_size,
                 color: piece.color,
                 bold: piece.bold,
+                underline: piece.underline,
+                line_through: piece.line_through,
             });
             *current_width += char_width;
         }
@@ -722,6 +781,8 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 if last.font_size == run.font_size
                     && last.color == run.color
                     && last.bold == run.bold
+                    && last.underline == run.underline
+                    && last.line_through == run.line_through
                 {
                     last.text.push(ch);
                     continue;
@@ -732,6 +793,8 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 font_size: run.font_size,
                 color: run.color,
                 bold: run.bold,
+                underline: run.underline,
+                line_through: run.line_through,
             });
         }
     }
@@ -884,6 +947,15 @@ fn render_planned_table_row(
                 },
                 text_color,
                 planned.source.style.bold,
+            );
+            page.push_text_decoration(
+                text_x,
+                text_y,
+                text_width,
+                planned.font_size,
+                text_color,
+                planned.source.style.underline,
+                planned.source.style.line_through,
             );
         }
 
@@ -1417,6 +1489,8 @@ mod tests {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
                         bold: false,
+                        underline: false,
+                        line_through: false,
                         color: Color::BLACK,
                     }])],
                 })
@@ -1459,6 +1533,8 @@ mod tests {
                         text: long,
                         font_size: 12.0,
                         bold: false,
+                        underline: false,
+                        line_through: false,
                         color: Color::BLACK,
                     }])],
                 })],
@@ -1505,6 +1581,8 @@ mod tests {
                     text: text.to_string(),
                     font_size: 10.0,
                     bold: false,
+                    underline: false,
+                    line_through: false,
                     color: Color::BLACK,
                 }])],
             })
@@ -1560,6 +1638,8 @@ mod tests {
                         text: "boxed".to_string(),
                         font_size: 11.0,
                         bold: false,
+                        underline: false,
+                        line_through: false,
                         color: Color::BLACK,
                     }])],
                 })],

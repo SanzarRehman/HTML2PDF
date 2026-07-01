@@ -874,10 +874,30 @@ that attach cleanly once the spine exists.
 - [x] Honor cascaded CSS `width`/`height` on `<img>` (from rules and inline
       `style`), taking precedence over the presentational HTML attributes and
       preserving the intrinsic aspect ratio when only one axis is set.
-- [ ] Broaden images further: inline/floated flow, `object-fit`,
-      remote (`http`) URLs, and sub-byte/interlaced PNG.
+- [ ] Broaden images further. **Not yet done** (explicit gaps):
+  - [ ] Inline `<img>` in flow text (it currently breaks onto its own line;
+        no baseline alignment with surrounding text).
+  - [ ] Floated / wrapped images (`float`, text wrapping around an image).
+  - [ ] `object-fit` (`contain`/`cover`/`fill`/`none`) and `object-position` —
+        the box is always stretched to the resolved width/height.
+  - [ ] `max-width`/`min-width`/`max-height`/`min-height` clamping (e.g. the
+        common `img { max-width: 100% }`); only plain `width`/`height` are read.
+  - [ ] Percentage image dimensions (resolved against the containing block).
+  - [ ] Remote (`http`/`https`) image URLs — only local paths and `data:` URIs.
+  - [ ] Sub-byte-depth (1/2/4-bit) and interlaced (Adam7) PNG; 16-bit PNG.
+  - [ ] GIF, WebP, SVG, and BMP decoding.
+  - [ ] `srcset`/responsive selection and `<picture>`.
+  - [ ] Image borders/padding/background and CSS `border-radius` clipping.
+- [x] Add CSS `text-decoration` (`underline`, `line-through`, and `none`) plus
+      the `<u>`/`<ins>`/`<s>`/`<strike>`/`<del>` tags, propagated to inline runs
+      and stroked in flow text and table cells.
+      **Not yet done:** `overline`; decoration `color`/`style`/`thickness`;
+      and `text-decoration: none` cannot *cancel* an ancestor's decoration
+      (the flag propagates like `bold`, so it only ever turns decoration on).
 - [ ] Move toward browser-complete computed values (more properties, shorthands,
-      units); consider `:link` and namespace selectors.
+      units); consider `:link` and namespace selectors. Text not yet supported
+      includes `line-height`, `font-style: italic`, `text-transform`,
+      `letter-spacing`, and `text-indent`.
 - [x] Add bounded dynamic-HTML execution design before implementing JavaScript
       (ADR 0006 + the `script.rs` seam: `ScriptEngine` trait, `ScriptLimits`,
       `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).

@@ -90,6 +90,10 @@ pub struct InlineRun {
     pub text: String,
     pub font_size: f32,
     pub bold: bool,
+    /// `text-decoration: underline` (also `<u>`/`<ins>`), stroked below the baseline.
+    pub underline: bool,
+    /// `text-decoration: line-through` (also `<s>`/`<strike>`/`<del>`).
+    pub line_through: bool,
     pub color: Color,
 }
 
