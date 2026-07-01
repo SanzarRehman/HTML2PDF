@@ -45,9 +45,11 @@ Works today:
 
 - HTML parsing through `html5ever`.
 - CSS parsing and cascade for supported selector/declaration subsets.
-- Tag/class selectors, descendant/child/sibling combinators (` `, `>`, `+`,
-  `~`), `@media print` queries, specificity, source order, inheritance, and
-  `!important`.
+- Type, universal (`*`), id, class, and attribute selectors (`[a]`, `[a=b]`,
+  `~= |= ^= $= *=`); descendant/child/sibling combinators (` `, `>`, `+`, `~`);
+  structural pseudo-classes (`:first-child`, `:nth-child()`, `:*-of-type`,
+  `:empty`, `:root`, `:not()`); `@media print` queries; specificity, source
+  order, inheritance, and `!important`.
 - Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes.
 - Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
   alignment, wrapping, clipping, and repeated table headers.
@@ -69,7 +71,8 @@ Opt-in (behind the `js` build feature):
 
 Not complete yet:
 
-- Pseudo-classes/elements, attribute selectors, and id/universal selectors.
+- Dynamic pseudo-classes (`:hover`, `:focus`, …) and pseudo-elements
+  (`::before`) — dropped, since they do not apply to static print output.
 - Broader JavaScript: `innerHTML`/`createElement`, DOM traversal, events, timers.
 - Images, SVG, canvas, flexbox, grid, floats, and absolute positioning.
 - Full browser text shaping and baseline handling.
@@ -248,7 +251,7 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- Broaden CSS selectors (pseudo-classes, attributes, ids) and properties.
+- Broaden CSS properties and computed-value coverage.
 - Add image support.
 - Add SVG support.
 - Broaden font subsetting and non-Latin text measurement.

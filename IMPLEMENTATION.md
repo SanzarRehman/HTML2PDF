@@ -671,14 +671,37 @@ Child and sibling combinators (2026-07-01):
   path and output stays byte-identical (492,721). Tests: 86 default / 91 with
   `js`, adding child/adjacent-sibling/general-sibling coverage.
 
+Id, universal, attribute, and pseudo-class selectors (2026-07-01):
+
+- `Compound` now carries `tag`, `id`, `classes`, `attrs` (`AttrSelector` with
+  the `= ~= |= ^= $= *=` operators plus presence), `pseudos` (`PseudoClass`),
+  and a `universal` (`*`) flag. `SimpleSelector` holds a `subject: Compound`.
+- Structural pseudo-classes are matched against the DOM: `:first-child`,
+  `:last-child`, `:only-child`, `:nth-child`/`:nth-last-child` (full `An+B`,
+  incl. `odd`/`even`), the four `-of-type` variants, `:empty`, `:root`, and
+  `:not(<compound-list>)`. Dynamic pseudo-classes (`:hover`, …) and pseudo-
+  elements (`::before`) are unsupported and drop the whole selector, so they
+  never over-apply to the static print render.
+- Indexing gained an `id_rules` map and a `universal_rules` bucket for subjects
+  with no tag/id/class (attribute-only, pseudo-only, or `*`). Specificity now
+  counts ids/attributes/pseudo-classes correctly, with `:not()` contributing its
+  most specific argument.
+- Cache correctness: a `needs_precise_match` flag is set when any selector
+  (subject or context) uses an id, attribute, or pseudo-class — things the cheap
+  shared cache key cannot represent (they depend on per-element attributes or
+  sibling position). When set, `element_own` keys the style cache per element
+  (`@{node_id}`), which is exact; otherwise it keeps the shared tag/class/sig
+  key. The `reg-2-9-1` fixture uses none of these, so it stays on the fast path
+  and output is byte-identical (492,721). Tests: 94 default / 99 with `js`.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
   browser render. The fixture proves the low-memory/concurrency direction is
   viable, but the engine still needs nested box-tree layout, font subsetting,
   images, and visual validation before it can replace Chromium for documents
-  like this. Selector coverage still lacks pseudo-classes/elements, attribute
-  selectors, and id/universal selectors.
+  like this. Selector coverage still omits namespaces and `:link`-style link
+  pseudo-classes; computed-value coverage remains a subset of CSS.
 
 ## Roadmap (foundation-first, ordered)
 
@@ -739,8 +762,11 @@ that attach cleanly once the spine exists.
       rule), and `@media print` evaluation (screen-only rules excluded from PDF).
 - [x] Add child (`>`) and sibling (`+`, `~`) combinator matching (exact
       right-to-left tree walk; cache signature stays exact and small).
-- [ ] Add pseudo-classes/elements, attribute selectors, and id/universal
-      selectors; move toward browser-complete computed values.
+- [x] Add id, universal, and attribute selectors and structural pseudo-classes
+      (`:nth-child`, `:*-of-type`, `:empty`, `:root`, `:not`); per-element cache
+      key when these are used, shared key otherwise.
+- [ ] Move toward browser-complete computed values (more properties, shorthands,
+      units); consider `:link` and namespace selectors.
 - [x] Add bounded dynamic-HTML execution design before implementing JavaScript
       (ADR 0006 + the `script.rs` seam: `ScriptEngine` trait, `ScriptLimits`,
       `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).

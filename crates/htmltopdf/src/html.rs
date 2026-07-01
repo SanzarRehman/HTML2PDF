@@ -587,13 +587,13 @@ impl<'i> QualifiedRuleParser<'i> for GeometryParser {
         let decls = parse_geo_declarations(input);
         let mut items = Vec::new();
         for selector in &prelude {
-            match selector.tag.as_deref() {
+            match selector.subject.tag.as_deref() {
                 Some("col") => {
                     if let Some(width) = decls.width {
                         items.push(GeoItem::ColWidth(width));
                     }
                 }
-                Some("tr") if selector.classes.is_empty() => {
+                Some("tr") if selector.subject.classes.is_empty() => {
                     if let Some(height) = decls.height {
                         items.push(GeoItem::RowHeight(height));
                     }
@@ -1046,8 +1046,15 @@ fn element_own(
 
     // Only tree context that appears as selector qualifiers can change the
     // match, so the cache key stays small and shared across most elements.
-    let ancestor_sig = structural_signature(dom, id, stylesheet);
-    let key = format!("{tag}|{class_attr}|{inline_style}|{ancestor_sig}");
+    // Selectors using ids/attributes/pseudo-classes depend on per-element
+    // identity or position the shared key cannot capture, so fall back to a
+    // per-element key when the stylesheet uses any of them.
+    let key = if stylesheet.needs_precise_match {
+        format!("@{id}")
+    } else {
+        let ancestor_sig = structural_signature(dom, id, stylesheet);
+        format!("{tag}|{class_attr}|{inline_style}|{ancestor_sig}")
+    };
     if let Some(result) = cache.get(&key) {
         return *result;
     }
@@ -1128,6 +1135,10 @@ struct Stylesheet {
     rules: Vec<StyleRule>,
     tag_rules: HashMap<String, Vec<usize>>,
     class_rules: HashMap<String, Vec<usize>>,
+    id_rules: HashMap<String, Vec<usize>>,
+    /// Rules whose subject has no tag/id/class to index by (attribute-only,
+    /// pseudo-only, or universal). Always considered as candidates.
+    universal_rules: Vec<usize>,
     /// Tags/classes that appear as context (non-subject) requirements in some
     /// selector. Used to keep the style cache key small (only these tokens, on
     /// the relevant relatives, can change a match).
@@ -1139,6 +1150,11 @@ struct Stylesheet {
     /// Whether any selector uses `+`/`~`. When true, preceding siblings can
     /// affect a match and must be reflected in the cache key.
     has_sibling_combinator: bool,
+    /// Whether any selector (subject or context) uses an id, attribute, or
+    /// pseudo-class. These depend on element identity/position that the cheap
+    /// shared cache key cannot represent, so the style cache falls back to a
+    /// per-element key when this is set.
+    needs_precise_match: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1149,11 +1165,77 @@ struct StyleRule {
     order: usize,
 }
 
-/// One compound selector: an optional type tag plus class names.
+/// One compound selector: an optional type tag, an optional id, class names,
+/// attribute selectors, and pseudo-classes. `universal` records an explicit `*`
+/// so a compound with no other constraints is still a valid subject.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Compound {
     tag: Option<String>,
+    id: Option<String>,
     classes: Vec<String>,
+    attrs: Vec<AttrSelector>,
+    pseudos: Vec<PseudoClass>,
+    universal: bool,
+}
+
+impl Compound {
+    /// Whether this compound constrains anything (so it is a real selector, not
+    /// an empty artifact of parsing).
+    fn is_empty(&self) -> bool {
+        self.tag.is_none()
+            && self.id.is_none()
+            && self.classes.is_empty()
+            && self.attrs.is_empty()
+            && self.pseudos.is_empty()
+            && !self.universal
+    }
+}
+
+/// An attribute selector such as `[type]`, `[type=text]`, or `[class~=x]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttrSelector {
+    name: String,
+    op: AttrOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttrOp {
+    /// `[name]`
+    Exists,
+    /// `[name=value]`
+    Equals(String),
+    /// `[name~=value]` — a whitespace-separated word equals `value`.
+    Includes(String),
+    /// `[name|=value]` — equals `value` or begins with `value-`.
+    DashMatch(String),
+    /// `[name^=value]`
+    Prefix(String),
+    /// `[name$=value]`
+    Suffix(String),
+    /// `[name*=value]`
+    Substring(String),
+}
+
+/// A supported pseudo-class. Structural pseudo-classes match against the DOM;
+/// dynamic/interactive ones (`:hover`, `:focus`, …) are unsupported and cause the
+/// whole selector to be dropped, since they never apply to a static print render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PseudoClass {
+    FirstChild,
+    LastChild,
+    OnlyChild,
+    /// `:nth-child(an+b)` — stores `(a, b)`.
+    NthChild(i32, i32),
+    NthLastChild(i32, i32),
+    FirstOfType,
+    LastOfType,
+    OnlyOfType,
+    NthOfType(i32, i32),
+    NthLastOfType(i32, i32),
+    Empty,
+    Root,
+    /// `:not(a, b, …)` — matches when none of the argument compounds match.
+    Not(Vec<Compound>),
 }
 
 /// A CSS combinator linking a compound to the compound on its right.
@@ -1176,8 +1258,7 @@ enum Combinator {
 /// exact rather than approximated as descendant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimpleSelector {
-    tag: Option<String>,
-    classes: Vec<String>,
+    subject: Compound,
     context: Vec<(Combinator, Compound)>,
 }
 
@@ -1204,22 +1285,46 @@ impl Stylesheet {
     fn build_indexes(&mut self) {
         self.tag_rules.clear();
         self.class_rules.clear();
+        self.id_rules.clear();
+        self.universal_rules.clear();
         self.ancestor_tag_qualifiers.clear();
         self.ancestor_class_qualifiers.clear();
         self.has_structural_combinator = false;
         self.has_sibling_combinator = false;
+        self.needs_precise_match = false;
 
         for (index, rule) in self.rules.iter().enumerate() {
-            // Index by the subject (rightmost) compound only.
-            if let Some(tag) = &rule.selector.tag {
-                self.tag_rules.entry(tag.clone()).or_default().push(index);
+            // Index by the subject (rightmost) compound. A subject with a tag,
+            // id, or class is indexed by those; anything else (attribute-only,
+            // pseudo-only, or universal) falls into the always-considered bucket.
+            let subject = &rule.selector.subject;
+            if compound_needs_precise(subject)
+                || rule
+                    .selector
+                    .context
+                    .iter()
+                    .any(|(_, compound)| compound_needs_precise(compound))
+            {
+                self.needs_precise_match = true;
             }
-
-            for class in &rule.selector.classes {
+            let mut indexed = false;
+            if let Some(tag) = &subject.tag {
+                self.tag_rules.entry(tag.clone()).or_default().push(index);
+                indexed = true;
+            }
+            if let Some(id) = &subject.id {
+                self.id_rules.entry(id.clone()).or_default().push(index);
+                indexed = true;
+            }
+            for class in &subject.classes {
                 self.class_rules
                     .entry(class.clone())
                     .or_default()
                     .push(index);
+                indexed = true;
+            }
+            if !indexed {
+                self.universal_rules.push(index);
             }
 
             for (combinator, compound) in &rule.selector.context {
@@ -1248,7 +1353,7 @@ impl Stylesheet {
         tag: &str,
         classes: &[&str],
     ) -> StyleDeclarations {
-        let mut candidate_indexes: Vec<usize> = Vec::new();
+        let mut candidate_indexes: Vec<usize> = self.universal_rules.clone();
 
         if let Some(indexes) = self.tag_rules.get(tag) {
             candidate_indexes.extend(indexes.iter().copied());
@@ -1257,6 +1362,14 @@ impl Stylesheet {
         for class in classes {
             if let Some(indexes) = self.class_rules.get(*class) {
                 candidate_indexes.extend(indexes.iter().copied());
+            }
+        }
+
+        if !self.id_rules.is_empty() {
+            if let Some(element_id) = dom.node(id).attr("id") {
+                if let Some(indexes) = self.id_rules.get(element_id) {
+                    candidate_indexes.extend(indexes.iter().copied());
+                }
             }
         }
 
@@ -1270,7 +1383,7 @@ impl Stylesheet {
         let mut matched = candidate_indexes
             .into_iter()
             .map(|index| &self.rules[index])
-            .filter(|rule| rule.selector.matches(dom, id, tag, classes))
+            .filter(|rule| rule.selector.matches(dom, id))
             .collect::<Vec<_>>();
 
         matched.sort_by_key(|rule| (rule.specificity, rule.order));
@@ -1290,14 +1403,8 @@ impl SimpleSelector {
     /// moves a cursor to the relevant relative (parent, ancestor, or preceding
     /// sibling) and requires a match there. Because the ancestor chain is linear,
     /// a single leftward cursor is exact for every combinator, including chains.
-    fn matches(
-        &self,
-        dom: &crate::dom::Dom,
-        id: crate::dom::NodeId,
-        tag: &str,
-        classes: &[&str],
-    ) -> bool {
-        if !compound_matches(&self.tag, &self.classes, tag, classes) {
+    fn matches(&self, dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
+        if !compound_matches_node(dom, id, &self.subject) {
             return false;
         }
 
@@ -1354,35 +1461,46 @@ impl SimpleSelector {
     }
 
     fn specificity(&self) -> Specificity {
-        let mut classes = self.classes.len();
-        let mut elements = usize::from(self.tag.is_some());
+        let mut spec = compound_specificity(&self.subject);
         for (_, compound) in &self.context {
-            classes += compound.classes.len();
-            elements += usize::from(compound.tag.is_some());
+            let part = compound_specificity(compound);
+            spec.ids += part.ids;
+            spec.classes += part.classes;
+            spec.elements += part.elements;
         }
-        Specificity {
-            ids: 0,
-            classes,
-            elements,
-        }
+        spec
     }
 }
 
-/// Whether a compound (`tag`/`classes`) matches an element's `tag`/`classes`.
-fn compound_matches(
-    sel_tag: &Option<String>,
-    sel_classes: &[String],
-    tag: &str,
-    classes: &[&str],
-) -> bool {
-    if let Some(selector_tag) = sel_tag {
-        if selector_tag != tag {
-            return false;
+/// CSS specificity of one compound: ids count as `id`; classes, attribute
+/// selectors, and pseudo-classes as `class`; a type tag as `element`. `:not()`
+/// contributes the specificity of its most specific argument (the `:not` itself
+/// counts for nothing), per the cascade spec.
+fn compound_specificity(compound: &Compound) -> Specificity {
+    let mut spec = Specificity {
+        ids: usize::from(compound.id.is_some()),
+        classes: compound.classes.len() + compound.attrs.len(),
+        elements: usize::from(compound.tag.is_some()),
+    };
+    for pseudo in &compound.pseudos {
+        if let PseudoClass::Not(compounds) = pseudo {
+            if let Some(max) = compounds.iter().map(compound_specificity).max() {
+                spec.ids += max.ids;
+                spec.classes += max.classes;
+                spec.elements += max.elements;
+            }
+        } else {
+            spec.classes += 1;
         }
     }
-    sel_classes
-        .iter()
-        .all(|class| classes.iter().any(|candidate| candidate == class))
+    spec
+}
+
+/// Whether a compound depends on element identity/position beyond tag/class —
+/// i.e. it uses an id, attribute selector, or pseudo-class. Such selectors need
+/// the per-element cache key.
+fn compound_needs_precise(compound: &Compound) -> bool {
+    compound.id.is_some() || !compound.attrs.is_empty() || !compound.pseudos.is_empty()
 }
 
 /// Whether `compound` matches the element node `id` (non-elements never match).
@@ -1395,8 +1513,157 @@ fn compound_matches_node(
     let Some(tag) = node.tag() else {
         return false;
     };
+    if let Some(selector_tag) = &compound.tag {
+        if selector_tag != tag {
+            return false;
+        }
+    }
+    if let Some(selector_id) = &compound.id {
+        if node.attr("id") != Some(selector_id.as_str()) {
+            return false;
+        }
+    }
     let classes = node.classes().collect::<Vec<_>>();
-    compound_matches(&compound.tag, &compound.classes, tag, &classes)
+    if !compound
+        .classes
+        .iter()
+        .all(|class| classes.iter().any(|candidate| candidate == class))
+    {
+        return false;
+    }
+    if !compound.attrs.iter().all(|attr| attr_matches(node, attr)) {
+        return false;
+    }
+    compound
+        .pseudos
+        .iter()
+        .all(|pseudo| pseudo_matches(dom, id, pseudo))
+}
+
+/// Whether an attribute selector matches an element node. Attribute names are
+/// compared case-insensitively (HTML lowercases them at parse time); an empty
+/// operand never matches for the substring-style operators, per the spec.
+fn attr_matches(node: &crate::dom::Node, attr: &AttrSelector) -> bool {
+    let Some(value) = node.attr(&attr.name) else {
+        return false;
+    };
+    match &attr.op {
+        AttrOp::Exists => true,
+        AttrOp::Equals(want) => value == want,
+        AttrOp::Includes(want) => !want.is_empty() && value.split_whitespace().any(|w| w == want),
+        AttrOp::DashMatch(want) => value == want || value.starts_with(&format!("{want}-")),
+        AttrOp::Prefix(want) => !want.is_empty() && value.starts_with(want.as_str()),
+        AttrOp::Suffix(want) => !want.is_empty() && value.ends_with(want.as_str()),
+        AttrOp::Substring(want) => !want.is_empty() && value.contains(want.as_str()),
+    }
+}
+
+/// Whether a structural pseudo-class matches the element node `id`.
+fn pseudo_matches(dom: &crate::dom::Dom, id: crate::dom::NodeId, pseudo: &PseudoClass) -> bool {
+    match pseudo {
+        PseudoClass::FirstChild => element_position(dom, id, None) == 1,
+        PseudoClass::LastChild => element_position_from_end(dom, id, None) == 1,
+        PseudoClass::OnlyChild => element_sibling_count(dom, id, None) == 1,
+        PseudoClass::NthChild(a, b) => nth_matches(element_position(dom, id, None), *a, *b),
+        PseudoClass::NthLastChild(a, b) => {
+            nth_matches(element_position_from_end(dom, id, None), *a, *b)
+        }
+        PseudoClass::FirstOfType => element_position(dom, id, dom.node(id).tag()) == 1,
+        PseudoClass::LastOfType => element_position_from_end(dom, id, dom.node(id).tag()) == 1,
+        PseudoClass::OnlyOfType => element_sibling_count(dom, id, dom.node(id).tag()) == 1,
+        PseudoClass::NthOfType(a, b) => {
+            nth_matches(element_position(dom, id, dom.node(id).tag()), *a, *b)
+        }
+        PseudoClass::NthLastOfType(a, b) => {
+            nth_matches(element_position_from_end(dom, id, dom.node(id).tag()), *a, *b)
+        }
+        PseudoClass::Empty => is_empty_element(dom, id),
+        PseudoClass::Root => element_parent(dom, id).is_none(),
+        PseudoClass::Not(compounds) => {
+            compounds.iter().all(|c| !compound_matches_node(dom, id, c))
+        }
+    }
+}
+
+/// The 1-based position of `id` among its element siblings, optionally restricted
+/// to a single tag name (for `-of-type` pseudo-classes).
+fn element_position(dom: &crate::dom::Dom, id: crate::dom::NodeId, of_type: Option<&str>) -> usize {
+    element_siblings(dom, id, of_type)
+        .iter()
+        .position(|&sibling| sibling == id)
+        .map_or(0, |index| index + 1)
+}
+
+/// The 1-based position of `id` counted from the last element sibling.
+fn element_position_from_end(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    of_type: Option<&str>,
+) -> usize {
+    let siblings = element_siblings(dom, id, of_type);
+    siblings
+        .iter()
+        .rev()
+        .position(|&sibling| sibling == id)
+        .map_or(0, |index| index + 1)
+}
+
+fn element_sibling_count(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    of_type: Option<&str>,
+) -> usize {
+    element_siblings(dom, id, of_type).len()
+}
+
+/// The element siblings of `id` (including `id`), in document order. Restricted
+/// to `of_type` when given. If `id` has no element parent it is its own sole
+/// sibling, so `:first-child`/`:root`-style checks behave sensibly.
+fn element_siblings(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    of_type: Option<&str>,
+) -> Vec<crate::dom::NodeId> {
+    let Some(parent) = element_parent(dom, id) else {
+        return vec![id];
+    };
+    dom.node(parent)
+        .children
+        .iter()
+        .copied()
+        .filter(|&child| match dom.node(child).tag() {
+            Some(tag) => of_type.is_none_or(|want| want == tag),
+            None => false,
+        })
+        .collect()
+}
+
+/// An element is `:empty` when it has no element children and no non-whitespace
+/// text (comments are ignored).
+fn is_empty_element(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
+    dom.node(id).children.iter().all(|&child| {
+        let node = dom.node(child);
+        match &node.data {
+            crate::dom::NodeData::Element { .. } => false,
+            crate::dom::NodeData::Text(text) => text.trim().is_empty(),
+            _ => true,
+        }
+    })
+}
+
+/// Whether `position` (1-based) satisfies the `an+b` pattern. `position == 0`
+/// means "not in the set" (e.g. a wrong-of-type element) and never matches.
+fn nth_matches(position: usize, a: i32, b: i32) -> bool {
+    if position == 0 {
+        return false;
+    }
+    let position = position as i32;
+    if a == 0 {
+        return position == b;
+    }
+    // position = a*n + b for some integer n >= 0.
+    let offset = position - b;
+    offset % a == 0 && offset / a >= 0
 }
 
 /// The nearest ancestor of `id` that is an element node.
@@ -1801,19 +2068,31 @@ fn consume_remaining(input: &mut Parser<'_, '_>) {
 }
 
 /// Parse a comma-separated selector list from `cssparser` tokens into the
-/// engine's `SimpleSelector` model (rightmost compound: an optional type tag
-/// plus class names). Tokenizing rather than string-splitting means comments
-/// inside selectors are skipped and `,`/combinators inside blocks (e.g.
+/// engine's `SimpleSelector` model. Tokenizing rather than string-splitting means
+/// comments inside selectors are skipped and `,`/combinators inside blocks (e.g.
 /// `:not(...)`, attribute selectors) do not split the list incorrectly.
 ///
-/// Selectors using ids, the universal selector, or anything unsupported in the
-/// rightmost compound are dropped, matching the prior parser. Pseudo-classes and
-/// attribute selectors end the compound but keep the tag/classes parsed so far.
+/// Supported: type, universal (`*`), id (`#x`), class, attribute (`[a=b]` and the
+/// `~= |= ^= $= *=` operators), the four combinators, and structural
+/// pseudo-classes (`:first-child`, `:nth-child()`, `:*-of-type`, `:empty`,
+/// `:root`, `:not()`). Dynamic pseudo-classes (`:hover`, …), pseudo-elements
+/// (`::before`), and anything else unsupported drop the whole selector so it
+/// never applies to the static print render (rather than over-matching).
 fn parse_selector_list<'i>(input: &mut Parser<'i, '_>) -> Vec<SimpleSelector> {
     let mut selectors = Vec::new();
     let mut current = CompoundBuilder::default();
 
     while let Ok(token) = input.next_including_whitespace().map(|token| token.clone()) {
+        // A pending `.` or `:` must be followed by an identifier / function.
+        if current.expect_class && !matches!(token, Token::Ident(_)) {
+            current.reject();
+        }
+        if current.colon_count > 0
+            && !matches!(token, Token::Ident(_) | Token::Function(_))
+        {
+            current.reject();
+        }
+
         match token {
             Token::Comma => {
                 current.finish_into(&mut selectors);
@@ -1828,36 +2107,73 @@ fn parse_selector_list<'i>(input: &mut Parser<'i, '_>) -> Vec<SimpleSelector> {
             Token::Delim('>') => current.pending = Some(Combinator::Child),
             Token::Delim('+') => current.pending = Some(Combinator::NextSibling),
             Token::Delim('~') => current.pending = Some(Combinator::SubsequentSibling),
-            // Blocks (attribute selectors, functional pseudo-classes): start a
-            // fresh compound if one is pending, end it, and consume the block.
-            Token::Function(_)
-            | Token::ParenthesisBlock
-            | Token::SquareBracketBlock
-            | Token::CurlyBracketBlock => {
-                current.begin_compound();
-                current.stop();
-                let _ = input.parse_nested_block(|nested| -> Result<(), ParseError<'_, ()>> {
-                    consume_remaining(nested);
-                    Ok(())
-                });
-            }
-            _ if current.stopped => {}
             Token::Delim('.') => {
                 current.begin_compound();
                 current.expect_class = true;
             }
             Token::Ident(name) => {
                 current.begin_compound();
-                current.push_ident(&name);
+                if current.expect_class {
+                    // Class names are case-sensitive; type names are lowercased.
+                    current.current.classes.push(name.to_string());
+                    current.expect_class = false;
+                } else if current.colon_count > 0 {
+                    current.finish_pseudo_ident(&name);
+                } else {
+                    current.push_type(&name);
+                }
             }
             Token::Colon => {
                 current.begin_compound();
-                current.stop();
+                current.colon_count = current.colon_count.saturating_add(1);
             }
-            // Ids and the universal selector are unsupported: drop the selector.
-            Token::IDHash(_) | Token::Hash(_) | Token::Delim('*') => {
+            Token::IDHash(name) | Token::Hash(name) => {
                 current.begin_compound();
+                current.set_id(&name);
+            }
+            Token::Delim('*') => {
+                current.begin_compound();
+                current.set_universal();
+            }
+            // `[attr]` attribute selector.
+            Token::SquareBracketBlock => {
+                current.begin_compound();
+                let parsed = input.parse_nested_block(
+                    |nested| -> Result<Option<AttrSelector>, ParseError<'_, ()>> {
+                        let attr = parse_attribute_selector(nested);
+                        consume_remaining(nested);
+                        Ok(attr)
+                    },
+                );
+                match parsed {
+                    Ok(Some(attr)) => current.current.attrs.push(attr),
+                    _ => current.reject(),
+                }
+            }
+            // A function is only valid as a functional pseudo-class (`:not(...)`,
+            // `:nth-child(...)`), i.e. immediately after a single colon.
+            Token::Function(name) => {
+                let single_colon = current.colon_count == 1;
+                let raw = input
+                    .parse_nested_block(|nested| -> Result<String, ParseError<'_, ()>> {
+                        let start = nested.position();
+                        consume_remaining(nested);
+                        Ok(nested.slice_from(start).to_string())
+                    })
+                    .unwrap_or_default();
+                current.colon_count = 0;
+                match functional_pseudo(&name, &raw) {
+                    Some(pseudo) if single_colon => current.current.pseudos.push(pseudo),
+                    _ => current.reject(),
+                }
+            }
+            // Parenthesis/curly blocks are not valid selector syntax here.
+            Token::ParenthesisBlock | Token::CurlyBracketBlock => {
                 current.reject();
+                let _ = input.parse_nested_block(|nested| -> Result<(), ParseError<'_, ()>> {
+                    consume_remaining(nested);
+                    Ok(())
+                });
             }
             _ => current.reject(),
         }
@@ -1867,13 +2183,127 @@ fn parse_selector_list<'i>(input: &mut Parser<'i, '_>) -> Vec<SimpleSelector> {
     selectors
 }
 
+/// Parse the inside of an attribute selector `[ ... ]`. Returns `None` on any
+/// malformed input so the caller can drop the selector.
+fn parse_attribute_selector(input: &mut Parser<'_, '_>) -> Option<AttrSelector> {
+    let name = match input.next() {
+        Ok(Token::Ident(n)) => n.as_ref().to_ascii_lowercase(),
+        _ => return None,
+    };
+    let op_kind = match input.next() {
+        // `[name]` — presence only.
+        Err(_) => return Some(AttrSelector { name, op: AttrOp::Exists }),
+        Ok(Token::Delim('=')) => 0u8,
+        Ok(Token::IncludeMatch) => 1,
+        Ok(Token::DashMatch) => 2,
+        Ok(Token::PrefixMatch) => 3,
+        Ok(Token::SuffixMatch) => 4,
+        Ok(Token::SubstringMatch) => 5,
+        Ok(_) => return None,
+    };
+    let value = match input.next() {
+        Ok(Token::Ident(v)) => v.as_ref().to_string(),
+        Ok(Token::QuotedString(v)) => v.as_ref().to_string(),
+        _ => return None,
+    };
+    let op = match op_kind {
+        0 => AttrOp::Equals(value),
+        1 => AttrOp::Includes(value),
+        2 => AttrOp::DashMatch(value),
+        3 => AttrOp::Prefix(value),
+        4 => AttrOp::Suffix(value),
+        _ => AttrOp::Substring(value),
+    };
+    Some(AttrSelector { name, op })
+}
+
+/// Map a simple (non-functional) pseudo-class name to a supported variant.
+fn simple_pseudo(name: &str) -> Option<PseudoClass> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "first-child" => PseudoClass::FirstChild,
+        "last-child" => PseudoClass::LastChild,
+        "only-child" => PseudoClass::OnlyChild,
+        "first-of-type" => PseudoClass::FirstOfType,
+        "last-of-type" => PseudoClass::LastOfType,
+        "only-of-type" => PseudoClass::OnlyOfType,
+        "empty" => PseudoClass::Empty,
+        "root" => PseudoClass::Root,
+        _ => return None,
+    })
+}
+
+/// Map a functional pseudo-class (`name(raw)`) to a supported variant.
+fn functional_pseudo(name: &str, raw: &str) -> Option<PseudoClass> {
+    match name.to_ascii_lowercase().as_str() {
+        "nth-child" => parse_an_plus_b(raw).map(|(a, b)| PseudoClass::NthChild(a, b)),
+        "nth-last-child" => parse_an_plus_b(raw).map(|(a, b)| PseudoClass::NthLastChild(a, b)),
+        "nth-of-type" => parse_an_plus_b(raw).map(|(a, b)| PseudoClass::NthOfType(a, b)),
+        "nth-last-of-type" => {
+            parse_an_plus_b(raw).map(|(a, b)| PseudoClass::NthLastOfType(a, b))
+        }
+        "not" => parse_not_argument(raw).map(PseudoClass::Not),
+        _ => None,
+    }
+}
+
+/// Parse an `<An+B>` micro-syntax (`odd`, `even`, `3`, `2n`, `2n+1`, `-n+3`, …)
+/// into `(a, b)`.
+fn parse_an_plus_b(raw: &str) -> Option<(i32, i32)> {
+    let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    let compact = compact.to_ascii_lowercase();
+    match compact.as_str() {
+        "" => return None,
+        "odd" => return Some((2, 1)),
+        "even" => return Some((2, 0)),
+        _ => {}
+    }
+    if let Some(n_pos) = compact.find('n') {
+        let a_part = &compact[..n_pos];
+        let b_part = &compact[n_pos + 1..];
+        let a = match a_part {
+            "" | "+" => 1,
+            "-" => -1,
+            other => other.parse::<i32>().ok()?,
+        };
+        let b = if b_part.is_empty() {
+            0
+        } else {
+            b_part.parse::<i32>().ok()?
+        };
+        Some((a, b))
+    } else {
+        Some((0, compact.parse::<i32>().ok()?))
+    }
+}
+
+/// Parse a `:not(...)` argument as a list of compound selectors. Combinators
+/// inside `:not()` are unsupported (returns `None` to drop the outer selector).
+fn parse_not_argument(raw: &str) -> Option<Vec<Compound>> {
+    let mut input = ParserInput::new(raw);
+    let mut parser = Parser::new(&mut input);
+    let selectors = parse_selector_list(&mut parser);
+    if selectors.is_empty() {
+        return None;
+    }
+    let mut compounds = Vec::new();
+    for selector in selectors {
+        if !selector.context.is_empty() {
+            return None;
+        }
+        compounds.push(selector.subject);
+    }
+    Some(compounds)
+}
+
 #[derive(Default)]
 struct CompoundBuilder {
-    tag: Option<String>,
-    classes: Vec<String>,
+    /// The compound currently being accumulated (the eventual subject).
+    current: Compound,
     rejected: bool,
-    stopped: bool,
     expect_class: bool,
+    /// Consecutive leading colons on the pending pseudo (`0` none, `1` for `:`,
+    /// `2` for `::` = a pseudo-element, which is unsupported).
+    colon_count: u8,
     /// The combinator seen since the current compound, if any, linking it to the
     /// compound that follows.
     pending: Option<Combinator>,
@@ -1897,52 +2327,71 @@ impl CompoundBuilder {
     /// a fresh compound for what follows (the new rightmost).
     fn begin_compound(&mut self) {
         if let Some(combinator) = self.pending.take() {
-            if self.tag.is_some() || !self.classes.is_empty() {
-                self.context.push((
-                    combinator,
-                    Compound {
-                        tag: self.tag.take(),
-                        classes: std::mem::take(&mut self.classes),
-                    },
-                ));
+            if !self.current.is_empty() {
+                self.context
+                    .push((combinator, std::mem::take(&mut self.current)));
             }
-            self.tag = None;
-            self.classes = Vec::new();
-            self.stopped = false;
+            self.current = Compound::default();
             self.expect_class = false;
+            self.colon_count = 0;
         }
-    }
-
-    fn stop(&mut self) {
-        self.stopped = true;
-        self.expect_class = false;
     }
 
     fn reject(&mut self) {
         self.rejected = true;
     }
 
-    fn push_ident(&mut self, name: &str) {
-        if self.expect_class {
-            // Class names are case-sensitive; only type names are lowercased.
-            self.classes.push(name.to_string());
-            self.expect_class = false;
-        } else if self.tag.is_none() && self.classes.is_empty() {
-            self.tag = Some(name.to_ascii_lowercase());
+    /// A bare identifier in type position sets the tag; anywhere else it is
+    /// malformed (a type selector must lead its compound).
+    fn push_type(&mut self, name: &str) {
+        if self.current.is_empty() {
+            self.current.tag = Some(name.to_ascii_lowercase());
         } else {
             self.reject();
         }
     }
 
+    /// A `#id`. Two ids in one compound is malformed.
+    fn set_id(&mut self, id: &str) {
+        if self.current.id.is_some() {
+            self.reject();
+        } else {
+            self.current.id = Some(id.to_string());
+        }
+    }
+
+    /// A `*` universal selector (valid only in type position).
+    fn set_universal(&mut self) {
+        if self.current.is_empty() {
+            self.current.universal = true;
+        } else {
+            self.reject();
+        }
+    }
+
+    /// A simple pseudo-class identifier following `:` (rejects `::` pseudo-
+    /// elements and unsupported/dynamic pseudo-classes).
+    fn finish_pseudo_ident(&mut self, name: &str) {
+        let single_colon = self.colon_count == 1;
+        self.colon_count = 0;
+        match simple_pseudo(name) {
+            Some(pseudo) if single_colon => self.current.pseudos.push(pseudo),
+            _ => self.reject(),
+        }
+    }
+
     fn finish_into(mut self, out: &mut Vec<SimpleSelector>) {
-        if self.rejected || (self.tag.is_none() && self.classes.is_empty()) {
+        if self.rejected
+            || self.expect_class
+            || self.colon_count > 0
+            || self.current.is_empty()
+        {
             return;
         }
         // Stored farthest-first while parsing; matching walks nearest-first.
         self.context.reverse();
         out.push(SimpleSelector {
-            tag: self.tag,
-            classes: self.classes,
+            subject: self.current,
             context: self.context,
         });
     }
@@ -2641,6 +3090,119 @@ mod tests {
         assert_ne!(document.blocks[0].cells[1].style.border, Some(true)); // the mark itself
         assert_eq!(document.blocks[0].cells[2].style.border, Some(true));
         assert_eq!(document.blocks[0].cells[3].style.border, Some(true));
+    }
+
+    #[test]
+    fn id_selector_matches_and_outranks_class() {
+        // `#hot` (id) beats `td.cell` (class + type) despite coming first.
+        let document = parse(
+            r#"<style>#hot { color: #ff0000; } td.cell { color: #0000ff; }</style>
+               <table><tr><td class="cell" id="hot">x</td><td class="cell">y</td></tr></table>"#,
+        );
+        assert_eq!(
+            document.blocks[0].cells[0].style.color,
+            Some(crate::color::Color::from_rgb_u8(255, 0, 0))
+        );
+        assert_eq!(
+            document.blocks[0].cells[1].style.color,
+            Some(crate::color::Color::from_rgb_u8(0, 0, 255))
+        );
+    }
+
+    #[test]
+    fn universal_selector_matches_any_element() {
+        let document = parse(
+            r#"<style>* { border: 1px solid black; }</style>
+               <table><tr><td>x</td></tr></table>"#,
+        );
+        assert_eq!(document.blocks[0].cells[0].style.border, Some(true));
+    }
+
+    #[test]
+    fn attribute_selectors_match_presence_value_and_word() {
+        // presence `[data-flag]`
+        let presence = parse(
+            r#"<style>td[data-flag] { border: 1px solid black; }</style>
+               <table><tr><td data-flag="1">a</td><td>b</td></tr></table>"#,
+        );
+        assert_eq!(presence.blocks[0].cells[0].style.border, Some(true));
+        assert_ne!(presence.blocks[0].cells[1].style.border, Some(true));
+
+        // exact `[data-k="v"]`
+        let equals = parse(
+            r#"<style>td[data-k="v"] { border: 1px solid black; }</style>
+               <table><tr><td data-k="v">a</td><td data-k="x">b</td></tr></table>"#,
+        );
+        assert_eq!(equals.blocks[0].cells[0].style.border, Some(true));
+        assert_ne!(equals.blocks[0].cells[1].style.border, Some(true));
+
+        // whitespace word `[data-tags~=hot]` and prefix `[data-id^=row-]`
+        let word = parse(
+            r#"<style>td[data-tags~="hot"] { border: 1px solid black; }
+               td[data-id^="row-"] { border: 1px solid black; }</style>
+               <table><tr><td data-tags="cold hot dry">a</td>
+               <td data-tags="cold">b</td><td data-id="row-3">c</td></tr></table>"#,
+        );
+        assert_eq!(word.blocks[0].cells[0].style.border, Some(true));
+        assert_ne!(word.blocks[0].cells[1].style.border, Some(true));
+        assert_eq!(word.blocks[0].cells[2].style.border, Some(true));
+    }
+
+    #[test]
+    fn nth_child_selects_by_an_plus_b() {
+        // `td:nth-child(odd)` → 1st and 3rd cells (1-based among siblings).
+        let document = parse(
+            r#"<style>td:nth-child(odd) { border: 1px solid black; }</style>
+               <table><tr><td>a</td><td>b</td><td>c</td><td>d</td></tr></table>"#,
+        );
+        assert_eq!(document.blocks[0].cells[0].style.border, Some(true));
+        assert_ne!(document.blocks[0].cells[1].style.border, Some(true));
+        assert_eq!(document.blocks[0].cells[2].style.border, Some(true));
+        assert_ne!(document.blocks[0].cells[3].style.border, Some(true));
+    }
+
+    #[test]
+    fn first_and_last_of_type_count_within_a_tag() {
+        // A row of th, td, td: `td:first-of-type` is the first td (2nd cell).
+        let document = parse(
+            r#"<style>td:first-of-type { border: 1px solid black; }</style>
+               <table><tr><th>h</th><td>a</td><td>b</td></tr></table>"#,
+        );
+        assert_ne!(document.blocks[0].cells[0].style.border, Some(true)); // th
+        assert_eq!(document.blocks[0].cells[1].style.border, Some(true)); // first td
+        assert_ne!(document.blocks[0].cells[2].style.border, Some(true));
+    }
+
+    #[test]
+    fn not_pseudo_excludes_matching_cells() {
+        let document = parse(
+            r#"<style>td:not(.skip) { border: 1px solid black; }</style>
+               <table><tr><td>a</td><td class="skip">b</td></tr></table>"#,
+        );
+        assert_eq!(document.blocks[0].cells[0].style.border, Some(true));
+        assert_ne!(document.blocks[0].cells[1].style.border, Some(true));
+    }
+
+    #[test]
+    fn empty_pseudo_matches_cells_without_content() {
+        let document = parse(
+            r#"<style>td:empty { border: 1px solid black; }</style>
+               <table><tr><td></td><td>text</td></tr></table>"#,
+        );
+        assert_eq!(document.blocks[0].cells[0].style.border, Some(true));
+        assert_ne!(document.blocks[0].cells[1].style.border, Some(true));
+    }
+
+    #[test]
+    fn dynamic_pseudo_and_pseudo_element_selectors_are_dropped() {
+        // `:hover` and `::before` never apply to the print render, so the rule is
+        // dropped rather than applied to every `td`.
+        let document = parse(
+            r#"<style>td:hover { border: 1px solid black; }
+               td::before { border: 1px solid black; }</style>
+               <table><tr><td>a</td></tr></table>"#,
+        );
+        assert_ne!(document.blocks[0].cells[0].style.border, Some(true));
     }
 
     #[test]
