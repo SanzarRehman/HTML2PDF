@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 28.8pt; }
+  body { font-size: 10pt; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #999; padding: 4pt 6pt; }
+  thead th { background-color: #333; color: #ffffff; }
+  tbody tr:nth-child(even) td { background-color: #f2f2f2; }
+  td.num { text-align: right; }
+  td.mid { vertical-align: middle; }
+</style>
+</head>
+<body>
+  <h1>Tables</h1>
+  <table>
+    <thead>
+      <tr><th>Region</th><th>Product</th><th>Units</th><th>Revenue</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>North</td><td>Widgets</td><td class="num">1,200</td><td class="num">$24,000</td></tr>
+      <tr><td>North</td><td>Gadgets</td><td class="num">980</td><td class="num">$19,600</td></tr>
+      <tr><td>South</td><td>Widgets</td><td class="num">1,540</td><td class="num">$30,800</td></tr>
+      <tr><td>South</td><td>Gadgets</td><td class="num">1,110</td><td class="num">$22,200</td></tr>
+    </tbody>
+    <tfoot>
+      <tr><td colspan="3">Total</td><td class="num">$96,600</td></tr>
+    </tfoot>
+  </table>
+</body>
+</html>

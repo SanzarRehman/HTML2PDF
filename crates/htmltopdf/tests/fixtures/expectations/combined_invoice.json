@@ -1,0 +1,32 @@
+{
+  "fixture": "invoice",
+  "layer": "combined",
+  "description": "Realistic invoice: heading, meta lines, and a styled line-item table with a totals row.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "f",
+      "re",
+      "S",
+      "w"
+    ],
+    "must_contain_text": [
+      "Invoice",
+      "Acme",
+      "Description",
+      "Consulting",
+      "7,920",
+      "business"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "A large 'Invoice #2026-0042' heading with muted date and bill-to lines above the table.",
+    "A blue table header; three line items; a bold 'Total due $7,920' row.",
+    "A 'Thank you for your business.' line below the table, clear of its bottom edge."
+  ]
+}

@@ -2,7 +2,8 @@
 
 A friendly map of what this project is, how it's built, and what each piece does.
 For the deep version see [PLAN.md](PLAN.md) (the grand vision),
-[IMPLEMENTATION.md](IMPLEMENTATION.md) (the checklist + benchmarks), and
+[IMPLEMENTATION.md](IMPLEMENTATION.md) (the checklist + benchmarks),
+[docs/COVERAGE.md](docs/COVERAGE.md) (what HTML/CSS is supported vs not), and
 [docs/adr/](docs/adr/) (decision records).
 
 ---

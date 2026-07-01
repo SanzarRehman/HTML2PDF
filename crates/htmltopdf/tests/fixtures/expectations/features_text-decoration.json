@@ -1,0 +1,27 @@
+{
+  "fixture": "text-decoration",
+  "layer": "features",
+  "description": "text-decoration underline/line-through plus u/ins/s/strike/del tags.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "S",
+      "w"
+    ],
+    "must_contain_text": [
+      "Decoration",
+      "underlined",
+      "struck"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "'underlined' has a line below the baseline; 'struck' has a line through it.",
+    "'both at once' shows an underline AND a strike simultaneously.",
+    "The fully-underlined paragraph keeps a continuous underline across spaces and wrapped lines."
+  ]
+}

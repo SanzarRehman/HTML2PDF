@@ -454,6 +454,7 @@ dependencies = [
  "html5ever",
  "markup5ever_rcdom",
  "owned_ttf_parser",
+ "serde_json",
  "ttf-parser",
 ]
 

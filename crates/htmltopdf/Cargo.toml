@@ -27,3 +27,7 @@ boa_gc = { version = "0.20", optional = true }
 # Reference DOM used only to verify the custom arena TreeSink builds the same
 # tree (see dom.rs `matches_rcdom_reference_tree`). Not in the release binary.
 markup5ever_rcdom = "0.39"
+# Parity harness only (tests/parity_tests.rs): read expectation JSON and inflate
+# FlateDecode content streams to assert on rendered text. Dev-only.
+serde_json = "1"
+flate2 = "1"

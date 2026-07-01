@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 28.8pt; }
+  body { font-size: 12pt; }
+  img.scaled { width: 96pt; height: 48pt; }
+  img.wideonly { width: 120pt; }
+</style>
+</head>
+<body>
+  <h1>Images</h1>
+  <p>Intrinsic size (8x8 blue square):</p>
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=">
+  <p>CSS width + height (stretched):</p>
+  <img class="scaled" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=">
+  <p>CSS width only, aspect ratio preserved (16x8 source):</p>
+  <img class="wideonly" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAICAIAAAB/FOjAAAAAE0lEQVR4nGP40CNCEmIY1UALDQCYf8gBXc9C6QAAAABJRU5ErkJggg==">
+</body>
+</html>

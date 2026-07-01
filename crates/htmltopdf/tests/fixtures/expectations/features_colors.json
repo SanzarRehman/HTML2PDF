@@ -1,0 +1,26 @@
+{
+  "fixture": "colors",
+  "layer": "features",
+  "description": "Named/hex/rgb()/hsl() text colors and background-color fills.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "rg",
+      "f",
+      "re"
+    ],
+    "must_contain_text": [
+      "Colors",
+      "background"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Four paragraphs each in a distinct color (crimson, green, blue, purple).",
+    "Three filled background blocks (yellow, light blue, light green) behind their text."
+  ]
+}

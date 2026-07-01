@@ -1,0 +1,24 @@
+{
+  "fixture": "page-breaks",
+  "layer": "edge-cases",
+  "description": "Many sections and paragraphs that overflow onto multiple pages.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj"
+    ],
+    "must_contain_text": [
+      "Breaks",
+      "Section",
+      "Paragraph"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 2
+  },
+  "visual_assertions": [
+    "Content flows onto at least two pages.",
+    "No text is clipped at the page boundary; paragraphs continue on the next page."
+  ]
+}

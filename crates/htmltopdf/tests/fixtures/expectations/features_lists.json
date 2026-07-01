@@ -1,0 +1,25 @@
+{
+  "fixture": "lists",
+  "layer": "features",
+  "description": "Unordered, ordered, and nested lists with markers.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj"
+    ],
+    "must_contain_text": [
+      "Unordered",
+      "First",
+      "Parent"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Bullet markers on the unordered list; 1./2./3. numbers on the ordered list.",
+    "A long list item wraps to a second line, aligned under its text (not the marker).",
+    "The nested list is indented under its parent item."
+  ]
+}

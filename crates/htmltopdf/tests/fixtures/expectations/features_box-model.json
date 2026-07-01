@@ -1,0 +1,29 @@
+{
+  "fixture": "box-model",
+  "layer": "features",
+  "description": "margin, padding, border, background, and left-margin indentation.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "f",
+      "re",
+      "S",
+      "w"
+    ],
+    "must_contain_text": [
+      "Model",
+      "bordered",
+      "indented"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "A bordered card with visible padding and a light gray background.",
+    "A tighter box with a darker, thinner border.",
+    "An indented block shifted right; a blockquote indented further."
+  ]
+}

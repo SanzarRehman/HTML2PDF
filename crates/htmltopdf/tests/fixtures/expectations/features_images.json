@@ -1,0 +1,25 @@
+{
+  "fixture": "images",
+  "layer": "features",
+  "description": "data-URI PNGs: intrinsic size, CSS width+height stretch, and width-only aspect preservation.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "Do",
+      "cm"
+    ],
+    "must_contain_text": [
+      "Images"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "A small blue square at its intrinsic size.",
+    "A wider stretched blue rectangle (96x48pt).",
+    "An orange rectangle scaled to 120pt wide keeping its 2:1 ratio."
+  ]
+}

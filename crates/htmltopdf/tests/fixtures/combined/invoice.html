@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 28.8pt; }
+  body { font-size: 11pt; color: #1a1a1a; }
+  h1 { font-size: 22pt; }
+  .muted { color: #666; }
+  .right { text-align: right; }
+  table { border-collapse: collapse; margin-top: 12pt; }
+  th, td { border: 1px solid #ccc; padding: 5pt 8pt; }
+  thead th { background-color: #2563eb; color: #ffffff; }
+  tfoot td { background-color: #f5f5f5; }
+  .total { text-align: right; }
+</style>
+</head>
+<body>
+  <h1>Invoice #2026-0042</h1>
+  <p class="muted">Issued 2026-07-01 &mdash; Due 2026-07-31</p>
+  <p><b>Bill to:</b> Acme Corporation, 100 Market Street, Springfield.</p>
+  <table>
+    <thead>
+      <tr><th>Description</th><th>Qty</th><th>Unit</th><th>Amount</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Consulting services</td><td class="right">40</td><td class="right">$150</td><td class="right">$6,000</td></tr>
+      <tr><td>Design work</td><td class="right">12</td><td class="right">$120</td><td class="right">$1,440</td></tr>
+      <tr><td>Hosting (annual)</td><td class="right">1</td><td class="right">$480</td><td class="right">$480</td></tr>
+    </tbody>
+    <tfoot>
+      <tr><td colspan="3" class="total"><b>Total due</b></td><td class="right"><b>$7,920</b></td></tr>
+    </tfoot>
+  </table>
+  <p class="muted">Thank you for your business.</p>
+</body>
+</html>

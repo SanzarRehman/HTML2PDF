@@ -1,0 +1,27 @@
+{
+  "fixture": "long-table",
+  "layer": "edge-cases",
+  "description": "A 60-row table that must paginate and repeat the header across pages.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "f",
+      "re",
+      "S",
+      "w"
+    ],
+    "must_contain_text": [
+      "Category",
+      "number"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 2
+  },
+  "visual_assertions": [
+    "The table spans at least two pages.",
+    "The header row repeats at the top of each page."
+  ]
+}

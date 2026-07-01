@@ -1,0 +1,23 @@
+{
+  "fixture": "unicode",
+  "layer": "edge-cases",
+  "description": "Accented Latin, punctuation, currency, and math symbols via entities.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj"
+    ],
+    "must_contain_text": [
+      "Unicode",
+      "Accented"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Accented words (caf\u00e9, na\u00efve, Z\u00fcrich) render with their diacritics.",
+    "Currency and math symbols (\u00a3, \u20ac, \u00d7, \u2264) appear correctly."
+  ]
+}

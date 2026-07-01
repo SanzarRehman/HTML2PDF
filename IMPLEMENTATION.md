@@ -3,6 +3,10 @@
 This document is the working checklist for the Rust implementation. When a task
 is completed, update its checkbox in this file.
 
+> **What's covered vs not:** see the support matrix in
+> [docs/COVERAGE.md](docs/COVERAGE.md) for a per-element / per-property
+> supported · partial · not-yet table.
+
 ## Product Goal (restated)
 
 A high-concurrency, low-RAM HTML-to-PDF engine with full CSS and JavaScript
@@ -903,6 +907,17 @@ that attach cleanly once the spine exists.
       `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).
 - [ ] Add explicit cell overflow modes: visible, hidden, clip, and ellipsis.
 - [x] Add first-pass word-break and overflow-wrap support.
+- [x] **Render flow content and tables in the same document.** *(Was: a document
+      routed to **either** the flow path **or** the table/`blocks` path, so
+      headings/paragraphs around a `<table>` were silently dropped.)* A `<table>`
+      is now a `BoxChild::Table` in the flow tree, laid out in document order with
+      surrounding headings/paragraphs (with a collapsing vertical margin so text
+      clears its edges). A **bare** table still uses the dedicated spreadsheet
+      `blocks` path (chosen via `FlowRoot::has_nontable_content`), preserving its
+      tuned performance. Guarded by the `features/tables` and `combined/invoice`
+      parity fixtures. **Not yet done:** tables do not honor a left indent from an
+      enclosing block (painted at the page's left margin); nested tables and
+      `<caption>` are unsupported.
 - [ ] Add full CSS Text Level 3 line-breaking behavior.
 - [ ] Add configurable compression levels.
 - [ ] Add PDF path batching behind the display-list backend.
@@ -912,6 +927,33 @@ that attach cleanly once the spine exists.
 - [ ] Add page margins and configurable page sizes.
 - [ ] Add font embedding.
 - [ ] Add local image loading.
-- [ ] Add block, inline, and table layout fixtures.
-- [ ] Add visual PDF snapshot tests.
-- [ ] Add Chromium benchmark harness.
+- [x] Add block, inline, and table layout fixtures (the parity fixture set —
+      see the Parity Harness section below).
+- [ ] Add visual PDF snapshot tests (raster-diff step exists in
+      `scripts/compare-parity.sh`; wire it into CI once ImageMagick is available).
+- [x] Add Chromium (Chromium) parity + benchmark harness (fixtures, semantic
+      expectation JSON, Rust test, and the three parity scripts).
+
+## Parity Harness (Chromium)
+
+Inspired by ironpress's parity dashboard. Layout: `crates/htmltopdf/tests/`.
+
+- `fixtures/{features,combined,edge-cases}/*.html` — HTML fixtures, each with an
+  `@page { margin: 28.8pt }` rule so they land on the same geometry as Chromium's
+  `--print-to-pdf` defaults (Letter, 0.4in).
+- `fixtures/expectations/<layer>_<name>.json` — per-fixture semantic assertions
+  (`must_contain_operators`, `must_contain_text`, size/page bounds) plus
+  human-readable `visual_assertions` (checked by the raster diff, not the Rust test).
+- `tests/parity_tests.rs` — renders every fixture, inflates the FlateDecode
+  content streams, and checks the expectations. Dev-deps `serde_json` + `flate2`.
+  - `cargo test --test parity_tests`
+  - `cargo test --test parity_tests -- --ignored --nocapture report` → size /
+    page / render-time table (~740 pages/sec locally on this fixture set).
+- `scripts/render-fixtures.sh` — htmltopdf → PDFs (`--paper letter`).
+- `scripts/generate-references.sh` — Chromium → 150-DPI reference PNGs
+  (needs Chrome + poppler `pdftoppm`). Output is git-ignored (regenerable).
+- `scripts/compare-parity.sh` — raster-diff ours vs reference with a diff-%
+  threshold (needs ImageMagick `compare`/`convert`/`identify`).
+
+Adding a fixture: drop the `.html` in a layer dir, add an expectation JSON, and
+append the `(layer, name)` pair to `FIXTURES` in `parity_tests.rs`.

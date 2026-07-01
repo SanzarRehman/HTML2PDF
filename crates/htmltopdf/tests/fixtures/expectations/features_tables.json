@@ -1,0 +1,31 @@
+{
+  "fixture": "tables",
+  "layer": "features",
+  "description": "border-collapse table with thead background, zebra rows, right-aligned numeric cells, colspan tfoot.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "f",
+      "re",
+      "S",
+      "w"
+    ],
+    "must_contain_text": [
+      "Tables",
+      "Region",
+      "Widgets",
+      "Total"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "An h1 'Tables' heading appears above the table (flow + table in one document).",
+    "A dark header row with white text across four columns.",
+    "Thin single-line borders between all cells (collapsed).",
+    "Numeric columns right-aligned; the tfoot 'Total' cell spans three columns."
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "fixture": "typography",
+  "layer": "features",
+  "description": "Headings h1-h6, paragraphs, and inline bold/italic/emphasis runs with wrapping.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj"
+    ],
+    "must_contain_text": [
+      "Typography",
+      "bold",
+      "italic",
+      "emphasis"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "An h1 'Typography Sample' at the top, larger than the h2 below it.",
+    "Six heading levels decreasing in size from h1 to h6.",
+    "The words 'bold' and 'strong' render heavier than surrounding text.",
+    "The final paragraph wraps across at least two lines."
+  ]
+}

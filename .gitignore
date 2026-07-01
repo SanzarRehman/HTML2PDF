@@ -19,3 +19,7 @@ reg-2-9 1.html
 
 # Local AI-agent orientation doc (scratch, never committed)
 AI_IMPL_GUIDE.md
+
+# Chromium parity reference rasters (regenerable via scripts/generate-references.sh;
+# machine/Chrome-version specific, so not committed).
+crates/htmltopdf/tests/fixtures/references/
