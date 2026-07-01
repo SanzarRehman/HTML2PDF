@@ -12,7 +12,9 @@
 //! them interleaved as `BoxChild`s, which is how anonymous block boxes behave.
 
 use crate::color::Color;
-use crate::html::{BlockKind, TableCell, TextAlign};
+use crate::html::{
+    AlignItems, BlockKind, FlexDirection, JustifyContent, TableCell, TextAlign,
+};
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
 /// itself contributes no spacing of its own — only its children do.
@@ -91,7 +93,23 @@ pub struct BlockBox {
     pub background: Option<Color>,
     /// Whether to stroke a border around the block's border box.
     pub border: bool,
+    /// `Some` when this block is a `display: flex` container: its block children
+    /// are laid out as flex items instead of stacking vertically.
+    pub flex: Option<FlexContainer>,
+    /// Flex *item* properties, used when this block is a child of a flex
+    /// container (`flex-grow`; `flex-basis` in points, `None` = auto/content).
+    pub flex_grow: f32,
+    pub flex_basis: Option<f32>,
     pub children: Vec<BoxChild>,
+}
+
+/// Flex container parameters resolved from the cascade.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlexContainer {
+    pub direction: FlexDirection,
+    pub justify: JustifyContent,
+    pub align: AlignItems,
+    pub gap: f32,
 }
 
 /// The four CSS box edges, in points.

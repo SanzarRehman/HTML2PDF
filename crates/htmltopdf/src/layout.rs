@@ -416,6 +416,158 @@ fn layout_table_box(
     *carried = TABLE_FLOW_MARGIN;
 }
 
+/// First-pass flexbox (row): lay out a flex container's block children as
+/// horizontal flex items across `inner_width`, sharing one top edge. Item main
+/// sizes come from `flex-basis` (or declared width, or content max-content),
+/// then `flex-grow` distributes free space and a uniform shrink absorbs overflow.
+/// `justify-content` distributes any leftover space; `gap` separates items. Items
+/// are top-aligned (cross-axis alignment beyond the top is not yet applied), and
+/// a flex row is assumed to fit on the current page.
+///
+/// `flex-direction: column` and non-block (inline/text) flex items fall back to
+/// normal vertical block layout.
+fn layout_flex_box(
+    block: &crate::box_tree::BlockBox,
+    flex: &crate::box_tree::FlexContainer,
+    inner_x: f32,
+    inner_width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    options: &RenderOptions,
+) {
+    use crate::box_tree::BoxChild;
+    use crate::html::FlexDirection;
+
+    // Flex items are the block-level children. Anything else (stray inline text)
+    // is ignored in the flex row for this first pass.
+    let items: Vec<&crate::box_tree::BlockBox> = block
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            BoxChild::Block(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+
+    // Column direction (or no real items) falls back to normal stacking.
+    if flex.direction == FlexDirection::Column || items.is_empty() {
+        let mut carried = 0.0;
+        layout_box_children(
+            &block.children,
+            inner_x,
+            inner_width,
+            block.align,
+            pages,
+            y,
+            &mut carried,
+            options,
+        );
+        return;
+    }
+
+    let gap = flex.gap;
+    let total_gap = gap * (items.len() as f32 - 1.0).max(0.0);
+    let avail = (inner_width - total_gap).max(0.0);
+
+    // Base main size per item: flex-basis, else declared width, else content
+    // max-content (clamped to the row's available width).
+    let bases: Vec<f32> = items
+        .iter()
+        .map(|item| {
+            let basis = item
+                .flex_basis
+                .unwrap_or_else(|| measure_max_content(&item.children, &options.font));
+            basis.clamp(0.0, avail)
+        })
+        .collect();
+
+    let total_base: f32 = bases.iter().sum();
+    let total_grow: f32 = items.iter().map(|i| i.flex_grow).sum();
+    let free = avail - total_base;
+
+    let widths: Vec<f32> = if free > 0.0 && total_grow > 0.0 {
+        // Distribute free space by flex-grow.
+        bases
+            .iter()
+            .zip(&items)
+            .map(|(base, item)| base + free * (item.flex_grow / total_grow))
+            .collect()
+    } else if free < 0.0 && total_base > 0.0 {
+        // Overflow: shrink every item proportionally to its base so the row fits.
+        let scale = avail / total_base;
+        bases.iter().map(|base| base * scale).collect()
+    } else {
+        bases.clone()
+    };
+
+    // justify-content distributes any leftover main-axis space.
+    let used: f32 = widths.iter().sum::<f32>() + total_gap;
+    let slack = (inner_width - used).max(0.0);
+    let n = items.len() as f32;
+    let (mut cursor, between) = justify_offsets(flex.justify, slack, gap, n);
+    cursor += inner_x;
+
+    let top = *y;
+    let mut lowest = *y;
+    for (item, width) in items.iter().zip(&widths) {
+        let mut item_y = top;
+        let mut carried = 0.0;
+        // Each item is laid out as a block within its own main-size column.
+        layout_block_box(item, cursor, *width, pages, &mut item_y, &mut carried, options);
+        lowest = lowest.min(item_y);
+        cursor += width + between;
+    }
+
+    *y = lowest;
+}
+
+/// Return `(leading offset, gap between items)` for a `justify-content` value,
+/// given the leftover `slack`, the base `gap`, and item count `n`.
+fn justify_offsets(
+    justify: crate::html::JustifyContent,
+    slack: f32,
+    gap: f32,
+    n: f32,
+) -> (f32, f32) {
+    use crate::html::JustifyContent::*;
+    match justify {
+        FlexStart => (0.0, gap),
+        FlexEnd => (slack, gap),
+        Center => (slack / 2.0, gap),
+        SpaceBetween if n > 1.0 => (0.0, gap + slack / (n - 1.0)),
+        SpaceBetween => (0.0, gap),
+        SpaceAround => (slack / n / 2.0, gap + slack / n),
+        SpaceEvenly => (slack / (n + 1.0), gap + slack / (n + 1.0)),
+    }
+}
+
+/// Approximate the max-content main size of a block's flow children: the widest
+/// natural (unwrapped) line, plus its own horizontal padding. Nested blocks
+/// recurse. Used as the default `flex-basis` when none is declared.
+fn measure_max_content(children: &[crate::box_tree::BoxChild], font: &crate::font::Font) -> f32 {
+    use crate::box_tree::BoxChild;
+    let mut widest = 0.0_f32;
+    for child in children {
+        let w = match child {
+            BoxChild::Line(runs) => runs
+                .iter()
+                .map(|run| estimate_text_width(&run.text, run.font_size, font))
+                .sum(),
+            BoxChild::Block(b) => {
+                measure_max_content(&b.children, font)
+                    + b.padding.left
+                    + b.padding.right
+                    + b.margin.left
+                    + b.margin.right
+            }
+            BoxChild::Image(img) => img.width,
+            BoxChild::Table(_) => 0.0,
+        };
+        widest = widest.max(w);
+    }
+    widest
+}
+
 /// Place a resolved block-level image: scale it to fit the content box if
 /// necessary, page-break if it does not fit the remaining space, then emit an
 /// image paint command with its lower-left corner at the current pen position.
@@ -494,16 +646,23 @@ fn layout_block_box(
     let box_x = x + block.margin.left;
     let box_width = (width - block.margin.left - block.margin.right).max(1.0);
 
-    layout_box_children(
-        &block.children,
-        inner_x,
-        inner_width,
-        block.align,
-        pages,
-        y,
-        carried,
-        options,
-    );
+    if let Some(flex) = &block.flex {
+        // A flex container lays out its block children along the main axis
+        // instead of stacking them. Content above must be flushed first.
+        flush_margin(y, carried);
+        layout_flex_box(block, flex, inner_x, inner_width, pages, y, options);
+    } else {
+        layout_box_children(
+            &block.children,
+            inner_x,
+            inner_width,
+            block.align,
+            pages,
+            y,
+            carried,
+            options,
+        );
+    }
 
     // Bottom padding (or a border/background) likewise contains the last child's
     // margin rather than letting it collapse out of the box.
@@ -1538,7 +1697,25 @@ mod tests {
     use crate::html::{Block, BlockKind, Document};
     use crate::paint::PaintCommand;
 
-    use super::{estimate_text_width, layout_document, table_geometry, PageSize, RenderOptions};
+    use super::{
+        estimate_text_width, justify_offsets, layout_document, table_geometry, PageSize,
+        RenderOptions,
+    };
+
+    #[test]
+    fn justify_offsets_distribute_slack() {
+        use crate::html::JustifyContent::*;
+        // 3 items, 30pt slack, 10pt base gap.
+        assert_eq!(justify_offsets(FlexStart, 30.0, 10.0, 3.0), (0.0, 10.0));
+        assert_eq!(justify_offsets(FlexEnd, 30.0, 10.0, 3.0), (30.0, 10.0));
+        assert_eq!(justify_offsets(Center, 30.0, 10.0, 3.0), (15.0, 10.0));
+        // space-between: no leading, slack spread across the 2 gaps (+15 each).
+        assert_eq!(justify_offsets(SpaceBetween, 30.0, 10.0, 3.0), (0.0, 25.0));
+        // space-around: half-unit lead, full unit between (slack/3 = 10).
+        assert_eq!(justify_offsets(SpaceAround, 30.0, 10.0, 3.0), (5.0, 20.0));
+        // space-evenly: equal lead and between (slack/4 = 7.5).
+        assert_eq!(justify_offsets(SpaceEvenly, 30.0, 10.0, 3.0), (7.5, 17.5));
+    }
 
     #[test]
     fn creates_multiple_pages_for_long_documents() {
@@ -1553,6 +1730,9 @@ mod tests {
                     align: crate::html::TextAlign::Left,
                     background: None,
                     border: false,
+                    flex: None,
+                    flex_grow: 0.0,
+                    flex_basis: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
@@ -1597,6 +1777,9 @@ mod tests {
                     align: crate::html::TextAlign::Left,
                     background: None,
                     border: false,
+                    flex: None,
+                    flex_grow: 0.0,
+                    flex_basis: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: long,
                         font_size: 12.0,
@@ -1645,6 +1828,9 @@ mod tests {
                 align: crate::html::TextAlign::Left,
                 background: None,
                 border: false,
+                flex: None,
+                flex_grow: 0.0,
+                flex_basis: None,
                 children: vec![BoxChild::Line(vec![InlineRun {
                     text: text.to_string(),
                     font_size: 10.0,
@@ -1702,6 +1888,9 @@ mod tests {
                     align: crate::html::TextAlign::Left,
                     background: Some(Color::from_rgb_u8(255, 0, 0)),
                     border: true,
+                    flex: None,
+                    flex_grow: 0.0,
+                    flex_basis: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: "boxed".to_string(),
                         font_size: 11.0,

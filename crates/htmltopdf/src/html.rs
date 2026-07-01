@@ -85,6 +85,17 @@ pub struct CellStyle {
     pub word_break: Option<WordBreak>,
     pub color: Option<Color>,
     pub background_color: Option<Color>,
+    /// `display: flex` — this element establishes a flex container.
+    pub display_flex: bool,
+    pub flex_direction: Option<FlexDirection>,
+    pub justify_content: Option<JustifyContent>,
+    pub align_items: Option<AlignItems>,
+    /// `gap` / `column-gap` (points) between flex items.
+    pub gap: Option<f32>,
+    /// Flex item properties (meaningful when the parent is a flex container).
+    pub flex_grow: Option<f32>,
+    /// `flex-basis` in points; `None` = `auto` (use the item's content size).
+    pub flex_basis: Option<f32>,
 }
 
 impl Default for CellStyle {
@@ -113,6 +124,13 @@ impl Default for CellStyle {
             word_break: None,
             color: None,
             background_color: None,
+            display_flex: false,
+            flex_direction: None,
+            justify_content: None,
+            align_items: None,
+            gap: None,
+            flex_grow: None,
+            flex_basis: None,
         }
     }
 }
@@ -155,6 +173,35 @@ pub enum OverflowWrap {
 pub enum WordBreak {
     Normal,
     BreakAll,
+}
+
+/// Flex container main axis. First-pass flexbox supports `row` (horizontal);
+/// `column` falls back to normal block stacking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
+/// Main-axis distribution of free space in a flex row (`justify-content`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JustifyContent {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// Cross-axis alignment of flex items (`align-items`). First pass places items at
+/// the row's top; `stretch` is treated as `flex-start`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignItems {
+    Stretch,
+    FlexStart,
+    Center,
+    FlexEnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -556,6 +603,12 @@ fn build_block(
     if acc.children.is_empty() {
         return None;
     }
+    let flex = own.display_flex.then(|| crate::box_tree::FlexContainer {
+        direction: own.flex_direction.unwrap_or(FlexDirection::Row),
+        justify: own.justify_content.unwrap_or(JustifyContent::FlexStart),
+        align: own.align_items.unwrap_or(AlignItems::Stretch),
+        gap: own.gap.unwrap_or(0.0),
+    });
     Some(crate::box_tree::BlockBox {
         kind,
         margin,
@@ -563,6 +616,9 @@ fn build_block(
         align,
         background,
         border: own.border.unwrap_or(false),
+        flex,
+        flex_grow: own.flex_grow.unwrap_or(0.0),
+        flex_basis: own.flex_basis,
         children: acc.children,
     })
 }
@@ -1189,6 +1245,14 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         margin_top: own.margin_top,
         margin_bottom: own.margin_bottom,
         background_color: own.background_color,
+        // Flex properties are not inherited.
+        display_flex: own.display_flex,
+        flex_direction: own.flex_direction,
+        justify_content: own.justify_content,
+        align_items: own.align_items,
+        gap: own.gap,
+        flex_grow: own.flex_grow,
+        flex_basis: own.flex_basis,
     }
 }
 
@@ -2586,6 +2650,48 @@ fn normalize_declaration_value(value: &str) -> (String, bool) {
     (value.to_string(), important)
 }
 
+/// Parse the `flex` shorthand: `none` / `auto` / `initial`, or
+/// `<grow> [<shrink>] [<basis>]`. Only grow and basis are recorded (shrink
+/// defaults to 1 in layout). `flex: 1` means grow 1 with a 0 basis.
+fn apply_flex_shorthand(target: &mut DeclarationLayer, value: &str) {
+    let v = value.trim();
+    match v.to_ascii_lowercase().as_str() {
+        "none" => {
+            target.cell.flex_grow = Some(0.0);
+            target.cell.flex_basis = Some(0.0);
+            return;
+        }
+        "auto" => {
+            target.cell.flex_grow = Some(1.0);
+            target.cell.flex_basis = None;
+            return;
+        }
+        "initial" => {
+            target.cell.flex_grow = Some(0.0);
+            target.cell.flex_basis = None;
+            return;
+        }
+        _ => {}
+    }
+    let tokens: Vec<&str> = v.split_whitespace().collect();
+    if let Some(g) = tokens.first().and_then(|t| t.parse::<f32>().ok()) {
+        target.cell.flex_grow = Some(g);
+    }
+    let mut basis_set = false;
+    for token in &tokens {
+        // A length carries a unit (or `%`); a bare number is grow/shrink.
+        if token.chars().any(|c| c.is_ascii_alphabetic() || c == '%') {
+            if let Some(b) = parse_css_length(token) {
+                target.cell.flex_basis = Some(b);
+                basis_set = true;
+            }
+        }
+    }
+    if !basis_set && tokens.len() == 1 && tokens[0].parse::<f32>().is_ok() {
+        target.cell.flex_basis = Some(0.0);
+    }
+}
+
 fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value: &str) {
     match property {
         "display" if value.eq_ignore_ascii_case("none") => {
@@ -2600,6 +2706,49 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "display" if value.eq_ignore_ascii_case("table-footer-group") => {
             target.display = Some(CssDisplay::TableFooterGroup);
         }
+        "display" if value.eq_ignore_ascii_case("flex") || value.eq_ignore_ascii_case("inline-flex") => {
+            target.cell.display_flex = true;
+        }
+        "flex-direction" => {
+            target.cell.flex_direction = match value.to_ascii_lowercase().as_str() {
+                "column" | "column-reverse" => Some(FlexDirection::Column),
+                _ => Some(FlexDirection::Row),
+            };
+        }
+        "justify-content" => {
+            target.cell.justify_content = match value.to_ascii_lowercase().as_str() {
+                "flex-end" | "end" | "right" => Some(JustifyContent::FlexEnd),
+                "center" => Some(JustifyContent::Center),
+                "space-between" => Some(JustifyContent::SpaceBetween),
+                "space-around" => Some(JustifyContent::SpaceAround),
+                "space-evenly" => Some(JustifyContent::SpaceEvenly),
+                _ => Some(JustifyContent::FlexStart),
+            };
+        }
+        "align-items" => {
+            target.cell.align_items = match value.to_ascii_lowercase().as_str() {
+                "flex-start" | "start" => Some(AlignItems::FlexStart),
+                "center" => Some(AlignItems::Center),
+                "flex-end" | "end" => Some(AlignItems::FlexEnd),
+                _ => Some(AlignItems::Stretch),
+            };
+        }
+        "gap" | "column-gap" => {
+            // A single length; `row gap` in a `gap` shorthand is ignored (row
+            // flex uses the column gap).
+            if let Some(g) = value.split_whitespace().next().and_then(parse_css_length) {
+                target.cell.gap = Some(g);
+            }
+        }
+        "flex-grow" => target.cell.flex_grow = value.trim().parse::<f32>().ok(),
+        "flex-basis" => {
+            target.cell.flex_basis = if value.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                parse_css_length(value)
+            };
+        }
+        "flex" => apply_flex_shorthand(target, value),
         "text-align" => {
             // `justify` maps to left until real justification exists; `start`/
             // `end` assume left-to-right text.
@@ -2918,6 +3067,13 @@ impl CellStyle {
         self.word_break = other.word_break.or(self.word_break);
         self.color = other.color.or(self.color);
         self.background_color = other.background_color.or(self.background_color);
+        self.display_flex |= other.display_flex;
+        self.flex_direction = other.flex_direction.or(self.flex_direction);
+        self.justify_content = other.justify_content.or(self.justify_content);
+        self.align_items = other.align_items.or(self.align_items);
+        self.gap = other.gap.or(self.gap);
+        self.flex_grow = other.flex_grow.or(self.flex_grow);
+        self.flex_basis = other.flex_basis.or(self.flex_basis);
     }
 }
 

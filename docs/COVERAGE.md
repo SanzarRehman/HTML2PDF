@@ -67,9 +67,10 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `font-family` | ❌ | Default base-14, or one `--font`; no per-element families. |
 | `font-style: italic` | ❌ | |
 | `letter-spacing`, `text-indent`, `text-transform`, `word-spacing` | ❌ | |
+| `display: flex` (+ `flex`, `flex-grow`, `flex-basis`, `justify-content`, `gap`) | 🟡 | First-pass **row** only: block children as items, grow/basis sizing, justify-content, gap. No wrap, `align-items` (items top-aligned), `column` direction (falls back to stacking), inline items, or cross-page rows. |
 | `float`, `clear` | ❌ | |
 | `position` (relative/absolute/fixed/sticky), `top`/`left`/`z-index` | ❌ | |
-| `flex*`, `grid*`, `columns` | ❌ | |
+| `grid*`, `columns`, `flex-wrap`, `flex-shrink` (explicit), `order` | ❌ | |
 | `transform`, `opacity`, `box-shadow`, `border-radius`, `filter` | ❌ | |
 | `object-fit`, `max-width`/`min-width`/`max-height`/`min-height` | ❌ | |
 | `calc()`, custom properties (`--var`, `var()`) | ❌ | |

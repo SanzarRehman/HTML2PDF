@@ -1,0 +1,30 @@
+{
+  "fixture": "flexbox",
+  "layer": "features",
+  "description": "First-pass flexbox (row): flex-grow equal columns, fixed flex-basis + grow, gap, justify-content.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "re",
+      "f",
+      "rg"
+    ],
+    "must_contain_text": [
+      "Flexbox",
+      "Column",
+      "Fixed",
+      "Grows"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Three equal-width cards (flex:1) sit side by side with a gap between them.",
+    "A fixed 120pt column sits left of a growing column that fills the remaining width.",
+    "The justify-content:flex-end row pushes its two chips to the right edge.",
+    "KNOWN LIMIT: inline (<span>) flex items are not laid out as flex items yet."
+  ]
+}

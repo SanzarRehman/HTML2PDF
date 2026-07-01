@@ -898,6 +898,13 @@ that attach cleanly once the spine exists.
       **Not yet done:** `overline`; decoration `color`/`style`/`thickness`;
       and `text-decoration: none` cannot *cancel* an ancestor's decoration
       (the flag propagates like `bold`, so it only ever turns decoration on).
+- [x] First-pass **flexbox** (`display: flex`): row direction with `flex`/
+      `flex-grow`/`flex-basis`, `justify-content`, and `gap`, over block-level
+      flex items. Column sizing via basis → grow → uniform shrink; items are
+      top-aligned. **Not yet done:** `flex-wrap`, explicit `flex-shrink`/`order`,
+      `align-items` beyond top, `flex-direction: column` (falls back to
+      stacking), inline flex items, and flex rows spanning a page break.
+- [ ] CSS grid layout.
 - [ ] Move toward browser-complete computed values (more properties, shorthands,
       units); consider `:link` and namespace selectors. Text not yet supported
       includes `line-height`, `font-style: italic`, `text-transform`,
