@@ -784,6 +784,10 @@ Row-height scaling + `--paper`; near-1:1 with Chrome (2026-07-01, follow-up):
   `--font Arial`, the fixture is now **near-1:1 with Chrome**: 33 pages vs 32,
   row pitch 10.9pt vs 10.5pt, data font/email width within ~4%, matching bold
   headers, columns, and per-page row counts.
+- **Gridline weight**: cell/box borders were stroked at the PDF default 1.0pt
+  (never setting a line width), so gridlines looked heavier/darker than a
+  browser's. Added a `SetLineWidth` paint command; borders now stroke at a 1px
+  (0.75pt) width scaled by `paint_scale`, matching Chromium's lighter gridlines.
 - **Perf fix (O(n²) → O(n))**: `div + div` in the fixture's CSS set
   `has_sibling_combinator`, which made `structural_signature` scan every
   ancestor's preceding siblings — for each of 22k cells it walked the 1088-row

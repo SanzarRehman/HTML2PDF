@@ -481,6 +481,7 @@ fn paint_decorations(
         }
         if block.border {
             commands.push(PaintCommand::SetStrokeColor(Color::BLACK));
+            commands.push(PaintCommand::SetLineWidth(DEFAULT_BORDER_WIDTH));
             commands.push(PaintCommand::StrokeRect(RectCommand {
                 x,
                 y: bottom,
@@ -833,6 +834,8 @@ fn render_planned_table_row(
         }
 
         if planned.source.style.border == Some(true) {
+            page.commands
+                .push(PaintCommand::SetLineWidth(planned.border_width));
             page.push_rect(Rect {
                 x,
                 y: *y - row_height,
@@ -969,6 +972,7 @@ fn plan_table_cells<'a>(
             padding_top,
             padding_bottom,
             clip_content,
+            border_width: DEFAULT_BORDER_WIDTH * table_geometry.paint_scale,
         });
 
         column_index += colspan;
@@ -996,6 +1000,7 @@ struct PlannedCell<'a> {
     padding_top: f32,
     padding_bottom: f32,
     clip_content: bool,
+    border_width: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1015,6 +1020,10 @@ const WRAP_TOLERANCE: f32 = 0.25;
 /// Default table-cell font size (pt) when the cascade sets none — the browser
 /// default of ~11pt rather than a shrink-to-fit fudge.
 const DEFAULT_CELL_FONT_SIZE: f32 = 11.0;
+
+/// Default border stroke width (pt) — a 1px CSS border at 96 dpi. Kept thin so
+/// gridlines look like a browser's, not a heavy 1pt default.
+const DEFAULT_BORDER_WIDTH: f32 = 0.75;
 /// Default table-cell padding (pt) when the cascade sets none (≈ the 1px UA
 /// default). Real spreadsheet exports set padding explicitly.
 const DEFAULT_CELL_PADDING: f32 = 1.0;

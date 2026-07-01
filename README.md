@@ -20,6 +20,36 @@ HTML -> html5ever -> arena DOM -> cssparser -> cascade
      -> box tree -> layout -> display list -> compressed PDF
 ```
 
+## htmltopdf vs Chromium
+
+Same input (`reg-2-9-1.html`, a real 1.8 MB spreadsheet export with ~22k table
+cells), rendered to PDF page 1 — left is `htmltopdf`, right is headless Chromium
+(`--print-to-pdf`). Rendered with `--font Arial --paper letter` to match
+Chromium's macOS fallback font and default paper.
+
+| htmltopdf | Chromium |
+| --- | --- |
+| ![htmltopdf output](docs/images/reg-2-9-1-htmltopdf-page1.png) | ![Chromium output](docs/images/reg-2-9-1-chrome-page1.png) |
+
+Bold headers, font size, gridline weight, column widths, header wrapping, and
+per-page row counts line up closely (33 pages vs Chromium's 32).
+
+> ### ⚡ Cost of that conversion
+>
+> Full 33-page document, measured with `/usr/bin/time -l` on one machine
+> (Apple Silicon, macOS):
+>
+> | Metric | **htmltopdf** | Chromium (headless) | Advantage |
+> | --- | --- | --- | --- |
+> | **Wall time** | **≈ 0.35 s** | ≈ 1.7 s | **≈ 5× faster — ~80% less** |
+> | **Peak RAM** | **≈ 48 MB** | ≈ 840 MB | **≈ 17× less — ~94% less** |
+> | **Process model** | one thread, no subprocess | full browser + renderer processes | — |
+>
+> The RAM gap is the whole point: Chromium needs a browser (~840 MB) per
+> concurrent conversion, while htmltopdf renders many documents in one small
+> process — so throughput per GB of RAM is dramatically higher on a server.
+> Development measurements on one fixture/machine, not a guarantee.
+
 ## Why htmltopdf?
 
 - **Fast by design**: independent render jobs scale across CPU cores.
@@ -238,36 +268,6 @@ Important engine modules:
 The display-list boundary is intentional. Layout produces neutral paint
 commands; the PDF backend consumes them. That keeps the engine extensible for
 future rendering targets and makes layout independent from raw PDF syntax.
-
-## htmltopdf vs Chrome
-
-Same input (`reg-2-9-1.html`, a real 1.8 MB spreadsheet export with ~22k table
-cells), rendered to PDF page 1 — left is `htmltopdf`, right is headless Chrome
-(`--print-to-pdf`). Rendered with `--font Arial --paper letter` to match
-Chrome's macOS fallback font and default paper.
-
-| htmltopdf | Google Chrome |
-| --- | --- |
-| ![htmltopdf output](docs/images/reg-2-9-1-htmltopdf-page1.png) | ![Chrome output](docs/images/reg-2-9-1-chrome-page1.png) |
-
-Bold headers, font size, column widths, header wrapping, and per-page row counts
-line up closely (33 pages vs Chrome's 32).
-
-### Cost of that conversion
-
-Measured with `/usr/bin/time -l` on the same machine (Apple Silicon, macOS),
-converting the full 33-page document:
-
-| Metric | htmltopdf | Chrome (headless) | Difference |
-| --- | --- | --- | --- |
-| Wall time | **~0.35 s** | ~1.7 s | **~5× faster (≈80% less)** |
-| Peak RAM | **~48 MB** | ~840 MB | **~17× less (≈94% less)** |
-| Process model | one thread, no subprocess | full browser + renderer processes | — |
-
-The RAM gap is the whole point: Chrome needs a browser (~840 MB) per concurrent
-conversion, while htmltopdf renders many documents in one small process — so
-throughput per GB of RAM is dramatically higher on a server. Numbers are
-development measurements on one fixture/machine, not a guarantee.
 
 ## Performance
 

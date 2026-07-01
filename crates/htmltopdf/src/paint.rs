@@ -4,6 +4,8 @@ use crate::color::Color;
 pub enum PaintCommand {
     SetFillColor(Color),
     SetStrokeColor(Color),
+    /// Set the stroke line width (PDF points) for subsequent strokes.
+    SetLineWidth(f32),
     Text(TextCommand),
     StrokeRect(RectCommand),
     FillRect(RectCommand),

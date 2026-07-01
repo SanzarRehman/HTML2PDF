@@ -363,6 +363,9 @@ fn page_content(
                     color.r, color.g, color.b
                 ));
             }
+            PaintCommand::SetLineWidth(width) => {
+                content.push_str(&format!("{width:.3} w\n"));
+            }
             PaintCommand::StrokeRect(rect) => {
                 content.push_str(&format!(
                     "{:.2} {:.2} {:.2} {:.2} re S\n",
