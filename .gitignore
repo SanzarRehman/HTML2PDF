@@ -16,3 +16,6 @@
 # Large working-input HTML dropped in for testing (not the canonical fixture)
 reg-2-9 1 copy.html
 reg-2-9 1.html
+
+# Local AI-agent orientation doc (scratch, never committed)
+AI_IMPL_GUIDE.md

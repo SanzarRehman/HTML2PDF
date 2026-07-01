@@ -63,6 +63,10 @@ pub struct CellStyle {
     pub border: Option<bool>,
     pub overflow: Option<Overflow>,
     pub font_size: Option<f32>,
+    /// CSS `width`/`height` in points. Currently consumed only by `<img>` sizing;
+    /// table column/row geometry uses a separate parse.
+    pub width: Option<f32>,
+    pub height: Option<f32>,
     pub padding_left: Option<f32>,
     pub padding_right: Option<f32>,
     pub padding_top: Option<f32>,
@@ -87,6 +91,8 @@ impl Default for CellStyle {
             border: None,
             overflow: None,
             font_size: None,
+            width: None,
+            height: None,
             padding_left: None,
             padding_right: None,
             padding_top: None,
@@ -292,16 +298,19 @@ fn resolve_image_box(
     };
     let intrinsic_w = decoded.width as f32;
     let intrinsic_h = decoded.height as f32;
-    // Resolve pixel dimensions from the HTML width/height hints, preserving the
-    // intrinsic aspect ratio when only one is given.
-    let (width_px, height_px) = match (image.attr_width, image.attr_height) {
+    // Resolve the box in points. CSS `width`/`height` (already in points) win
+    // over the presentational HTML attributes (CSS pixels), matching browsers.
+    let hint_w = image.css_width.or(image.attr_width.map(|w| w * PX_TO_PT));
+    let hint_h = image.css_height.or(image.attr_height.map(|h| h * PX_TO_PT));
+    // Preserve the intrinsic aspect ratio when only one dimension is given.
+    let (width_pt, height_pt) = match (hint_w, hint_h) {
         (Some(w), Some(h)) => (w, h),
         (Some(w), None) if intrinsic_w > 0.0 => (w, w * intrinsic_h / intrinsic_w),
         (None, Some(h)) if intrinsic_h > 0.0 => (h * intrinsic_w / intrinsic_h, h),
-        _ => (intrinsic_w, intrinsic_h),
+        _ => (intrinsic_w * PX_TO_PT, intrinsic_h * PX_TO_PT),
     };
-    image.width = width_px * PX_TO_PT;
-    image.height = height_px * PX_TO_PT;
+    image.width = width_pt;
+    image.height = height_pt;
     image.image_index = Some(images.len());
     images.push(decoded);
 }
@@ -387,6 +396,7 @@ fn build_node(
                 if let Some(src) = node.attr("src") {
                     if !src.is_empty() {
                         acc.flush_line();
+                        let own = &computed.style[id];
                         acc.children
                             .push(crate::box_tree::BoxChild::Image(crate::box_tree::ImageBox {
                                 src: src.to_string(),
@@ -396,6 +406,8 @@ fn build_node(
                                 attr_height: node
                                     .attr("height")
                                     .and_then(|v| v.trim().parse::<f32>().ok()),
+                                css_width: own.width,
+                                css_height: own.height,
                                 image_index: None,
                                 width: 0.0,
                                 height: 0.0,
@@ -1097,6 +1109,8 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         vertical_align: own.vertical_align,
         border: own.border,
         overflow: own.overflow,
+        width: own.width,
+        height: own.height,
         padding_left: own.padding_left,
         padding_right: own.padding_right,
         padding_top: own.padding_top,
@@ -2543,6 +2557,8 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             target.cell.bold = true;
         }
         "font-size" => target.cell.font_size = parse_css_length(value),
+        "width" => target.cell.width = parse_css_length(value),
+        "height" => target.cell.height = parse_css_length(value),
         "color" => target.cell.color = parse_css_color(value),
         "background-color" => target.cell.background_color = parse_css_color(value),
         "background" => target.cell.background_color = parse_css_background_color(value),
@@ -2801,6 +2817,8 @@ impl CellStyle {
         self.border = other.border.or(self.border);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
+        self.width = other.width.or(self.width);
+        self.height = other.height.or(self.height);
         self.padding_left = other.padding_left.or(self.padding_left);
         self.padding_right = other.padding_right.or(self.padding_right);
         self.padding_top = other.padding_top.or(self.padding_top);

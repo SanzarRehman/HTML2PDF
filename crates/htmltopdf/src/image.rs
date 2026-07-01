@@ -608,6 +608,59 @@ mod tests {
         assert!(text.contains("/ColorSpace /DeviceGray"));
     }
 
+    /// Walk the flow tree and return the first resolved `ImageBox`.
+    fn first_image(document: &crate::html::Document) -> crate::box_tree::ImageBox {
+        use crate::box_tree::BoxChild;
+        fn find(children: &[BoxChild]) -> Option<crate::box_tree::ImageBox> {
+            for child in children {
+                match child {
+                    BoxChild::Image(image) => return Some(image.clone()),
+                    BoxChild::Block(block) => {
+                        if let Some(found) = find(&block.children) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        find(&document.flow.as_ref().expect("flow").children).expect("an image box")
+    }
+
+    #[test]
+    fn css_width_height_override_html_attributes() {
+        // 2x1 opaque image. HTML says 40px; CSS says 60pt (should win), and CSS
+        // also sets an explicit height so the aspect ratio is not preserved.
+        let png = build_png(2, 1, 2, &[255, 0, 0, 0, 255, 0]);
+        let uri = format!("data:image/png;base64,{}", base64_encode(&png));
+        let html = format!(
+            "<img src=\"{uri}\" width=\"40\" height=\"20\" style=\"width:60pt;height:12pt\">"
+        );
+
+        let mut document = crate::html::parse(&html);
+        crate::html::resolve_images(&mut document, None);
+        let image = first_image(&document);
+
+        assert_eq!(image.width, 60.0, "CSS width should win over the attribute");
+        assert_eq!(image.height, 12.0, "CSS height should win over the attribute");
+    }
+
+    #[test]
+    fn css_width_only_preserves_aspect_ratio() {
+        // 2x1 image with only a CSS width: height follows the 2:1 intrinsic ratio.
+        let png = build_png(2, 1, 2, &[255, 0, 0, 0, 255, 0]);
+        let uri = format!("data:image/png;base64,{}", base64_encode(&png));
+        let html = format!("<img src=\"{uri}\" style=\"width:80pt\">");
+
+        let mut document = crate::html::parse(&html);
+        crate::html::resolve_images(&mut document, None);
+        let image = first_image(&document);
+
+        assert_eq!(image.width, 80.0);
+        assert_eq!(image.height, 40.0, "height follows the 2:1 intrinsic ratio");
+    }
+
     #[test]
     fn image_only_document_is_not_empty() {
         let png = build_png(1, 1, 2, &[10, 20, 30]);

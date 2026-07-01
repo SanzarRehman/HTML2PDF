@@ -871,7 +871,10 @@ that attach cleanly once the spine exists.
 - [x] Add block-level `<img>` support: JPEG (`DCTDecode`) and in-house PNG
       decode (via `flate2`, alpha as `/SMask`), from file paths and `data:` URIs,
       embedded as PDF image XObjects.
-- [ ] Broaden images: inline/floated flow, `object-fit`, CSS width/height,
+- [x] Honor cascaded CSS `width`/`height` on `<img>` (from rules and inline
+      `style`), taking precedence over the presentational HTML attributes and
+      preserving the intrinsic aspect ratio when only one axis is set.
+- [ ] Broaden images further: inline/floated flow, `object-fit`,
       remote (`http`) URLs, and sub-byte/interlaced PNG.
 - [ ] Move toward browser-complete computed values (more properties, shorthands,
       units); consider `:link` and namespace selectors.

@@ -34,15 +34,22 @@ pub enum BoxChild {
     Image(ImageBox),
 }
 
-/// A block-level image box. Before image resolution it carries only the source
-/// and any HTML `width`/`height` hints; resolution fills in `image_index` (into
-/// the document's image table) and the laid-out point `width`/`height`. An
-/// unresolved or failed image keeps `image_index == None` and is not painted.
+/// A block-level image box. Before image resolution it carries the source, any
+/// presentational HTML `width`/`height` attributes (CSS pixels), and any CSS
+/// `width`/`height` from the cascade (already resolved to points); resolution
+/// fills in `image_index` (into the document's image table) and the laid-out
+/// point `width`/`height`. CSS dimensions take precedence over the HTML
+/// attributes, matching browser behavior. An unresolved or failed image keeps
+/// `image_index == None` and is not painted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageBox {
     pub src: String,
+    /// Presentational `width`/`height` attributes, in CSS pixels.
     pub attr_width: Option<f32>,
     pub attr_height: Option<f32>,
+    /// Cascaded CSS `width`/`height`, already resolved to points.
+    pub css_width: Option<f32>,
+    pub css_height: Option<f32>,
     pub image_index: Option<usize>,
     pub width: f32,
     pub height: f32,
