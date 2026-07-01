@@ -45,7 +45,9 @@ Works today:
 
 - HTML parsing through `html5ever`.
 - CSS parsing and cascade for supported selector/declaration subsets.
-- Tag/class selectors, specificity, source order, inheritance, and `!important`.
+- Tag/class selectors, descendant/child/sibling combinators (` `, `>`, `+`,
+  `~`), `@media print` queries, specificity, source order, inheritance, and
+  `!important`.
 - Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes.
 - Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
   alignment, wrapping, clipping, and repeated table headers.
@@ -67,6 +69,7 @@ Opt-in (behind the `js` build feature):
 
 Not complete yet:
 
+- Pseudo-classes/elements, attribute selectors, and id/universal selectors.
 - Broader JavaScript: `innerHTML`/`createElement`, DOM traversal, events, timers.
 - Images, SVG, canvas, flexbox, grid, floats, and absolute positioning.
 - Full browser text shaping and baseline handling.
@@ -245,7 +248,7 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- Broaden CSS selectors and properties.
+- Broaden CSS selectors (pseudo-classes, attributes, ids) and properties.
 - Add image support.
 - Add SVG support.
 - Broaden font subsetting and non-Latin text measurement.

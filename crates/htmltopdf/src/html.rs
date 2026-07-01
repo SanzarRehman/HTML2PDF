@@ -878,8 +878,7 @@ fn computed_display_for_node(
     let tag = node.tag().unwrap_or_default();
     let classes = node.classes().collect::<Vec<_>>();
     let inline_style = node.attr("style").unwrap_or_default();
-    let ancestors = AncestorSet::collect(dom, id);
-    let mut declarations = stylesheet.computed_declarations(tag, &classes, &ancestors);
+    let mut declarations = stylesheet.computed_declarations(dom, id, tag, &classes);
 
     if !inline_style.is_empty() {
         declarations.merge_inline(parse_style_declarations(inline_style));
@@ -1045,17 +1044,16 @@ fn element_own(
     let class_attr = node.attr("class").unwrap_or_default();
     let inline_style = node.attr("style").unwrap_or_default();
 
-    // Only ancestors that appear as selector qualifiers can change the match, so
-    // the cache key stays small and shared across most elements.
-    let ancestors = AncestorSet::collect(dom, id);
-    let ancestor_sig = ancestors.signature(stylesheet);
+    // Only tree context that appears as selector qualifiers can change the
+    // match, so the cache key stays small and shared across most elements.
+    let ancestor_sig = structural_signature(dom, id, stylesheet);
     let key = format!("{tag}|{class_attr}|{inline_style}|{ancestor_sig}");
     if let Some(result) = cache.get(&key) {
         return *result;
     }
 
     let classes = class_attr.split_whitespace().collect::<Vec<_>>();
-    let declarations = stylesheet.computed_declarations(tag, &classes, &ancestors);
+    let declarations = stylesheet.computed_declarations(dom, id, tag, &classes);
     let mut style = declarations.resolved().cell;
     let mut display = declarations.resolved().display;
 
@@ -1130,10 +1128,17 @@ struct Stylesheet {
     rules: Vec<StyleRule>,
     tag_rules: HashMap<String, Vec<usize>>,
     class_rules: HashMap<String, Vec<usize>>,
-    /// Tags/classes that appear as ancestor requirements in some selector. Used
-    /// to keep the style cache key small (only these ancestors can change a match).
+    /// Tags/classes that appear as context (non-subject) requirements in some
+    /// selector. Used to keep the style cache key small (only these tokens, on
+    /// the relevant relatives, can change a match).
     ancestor_tag_qualifiers: std::collections::BTreeSet<String>,
     ancestor_class_qualifiers: std::collections::BTreeSet<String>,
+    /// Whether any selector uses `>`/`+`/`~`. When false, only descendant
+    /// combinators exist and a cheap presence-set cache key is exact.
+    has_structural_combinator: bool,
+    /// Whether any selector uses `+`/`~`. When true, preceding siblings can
+    /// affect a match and must be reflected in the cache key.
+    has_sibling_combinator: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1151,15 +1156,29 @@ struct Compound {
     classes: Vec<String>,
 }
 
-/// A selector: the rightmost compound (the matched "subject") plus any ancestor
-/// requirements from descendant combinators. `ancestors` are matched loosely
-/// (presence anywhere in the ancestor chain), which is exact for descendant
-/// combinators and a safe approximation for `>`/`+`/`~`.
+/// A CSS combinator linking a compound to the compound on its right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    /// `A B`: `A` is any ancestor of the subject.
+    Descendant,
+    /// `A > B`: `A` is the immediate parent of the subject.
+    Child,
+    /// `A + B`: `A` is the immediately preceding element sibling.
+    NextSibling,
+    /// `A ~ B`: `A` is any preceding element sibling.
+    SubsequentSibling,
+}
+
+/// A selector: the rightmost compound (the matched "subject") plus the preceding
+/// compounds and the combinator linking each to the compound on its right.
+/// `context` is stored nearest-first, so `context[0]` sits immediately left of
+/// the subject. Matching walks the real tree right-to-left, so `>`/`+`/`~` are
+/// exact rather than approximated as descendant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimpleSelector {
     tag: Option<String>,
     classes: Vec<String>,
-    ancestors: Vec<Compound>,
+    context: Vec<(Combinator, Compound)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1187,6 +1206,8 @@ impl Stylesheet {
         self.class_rules.clear();
         self.ancestor_tag_qualifiers.clear();
         self.ancestor_class_qualifiers.clear();
+        self.has_structural_combinator = false;
+        self.has_sibling_combinator = false;
 
         for (index, rule) in self.rules.iter().enumerate() {
             // Index by the subject (rightmost) compound only.
@@ -1201,11 +1222,19 @@ impl Stylesheet {
                     .push(index);
             }
 
-            for ancestor in &rule.selector.ancestors {
-                if let Some(tag) = &ancestor.tag {
+            for (combinator, compound) in &rule.selector.context {
+                match combinator {
+                    Combinator::Descendant => {}
+                    Combinator::Child => self.has_structural_combinator = true,
+                    Combinator::NextSibling | Combinator::SubsequentSibling => {
+                        self.has_structural_combinator = true;
+                        self.has_sibling_combinator = true;
+                    }
+                }
+                if let Some(tag) = &compound.tag {
                     self.ancestor_tag_qualifiers.insert(tag.clone());
                 }
-                for class in &ancestor.classes {
+                for class in &compound.classes {
                     self.ancestor_class_qualifiers.insert(class.clone());
                 }
             }
@@ -1214,9 +1243,10 @@ impl Stylesheet {
 
     fn computed_declarations(
         &self,
+        dom: &crate::dom::Dom,
+        id: crate::dom::NodeId,
         tag: &str,
         classes: &[&str],
-        ancestors: &AncestorSet,
     ) -> StyleDeclarations {
         let mut candidate_indexes: Vec<usize> = Vec::new();
 
@@ -1240,7 +1270,7 @@ impl Stylesheet {
         let mut matched = candidate_indexes
             .into_iter()
             .map(|index| &self.rules[index])
-            .filter(|rule| rule.selector.matches(tag, classes, ancestors))
+            .filter(|rule| rule.selector.matches(dom, id, tag, classes))
             .collect::<Vec<_>>();
 
         matched.sort_by_key(|rule| (rule.specificity, rule.order));
@@ -1255,29 +1285,80 @@ impl Stylesheet {
 }
 
 impl SimpleSelector {
-    fn matches(&self, tag: &str, classes: &[&str], ancestors: &AncestorSet) -> bool {
+    /// Match the selector against element `id` by walking the tree right-to-left.
+    /// The subject compound must match `id`; then each `(combinator, compound)`
+    /// moves a cursor to the relevant relative (parent, ancestor, or preceding
+    /// sibling) and requires a match there. Because the ancestor chain is linear,
+    /// a single leftward cursor is exact for every combinator, including chains.
+    fn matches(
+        &self,
+        dom: &crate::dom::Dom,
+        id: crate::dom::NodeId,
+        tag: &str,
+        classes: &[&str],
+    ) -> bool {
         if !compound_matches(&self.tag, &self.classes, tag, classes) {
             return false;
         }
-        // Every ancestor requirement must be satisfied somewhere up the tree.
-        self.ancestors.iter().all(|compound| {
-            compound
-                .tag
-                .as_ref()
-                .is_none_or(|t| ancestors.tags.contains(t.as_str()))
-                && compound
-                    .classes
-                    .iter()
-                    .all(|class| ancestors.classes.contains(class.as_str()))
-        })
+
+        let mut cursor = id;
+        for (combinator, compound) in &self.context {
+            match combinator {
+                Combinator::Child => {
+                    let Some(parent) = element_parent(dom, cursor) else {
+                        return false;
+                    };
+                    if !compound_matches_node(dom, parent, compound) {
+                        return false;
+                    }
+                    cursor = parent;
+                }
+                Combinator::Descendant => {
+                    let mut candidate = element_parent(dom, cursor);
+                    loop {
+                        let Some(ancestor) = candidate else {
+                            return false;
+                        };
+                        if compound_matches_node(dom, ancestor, compound) {
+                            cursor = ancestor;
+                            break;
+                        }
+                        candidate = element_parent(dom, ancestor);
+                    }
+                }
+                Combinator::NextSibling => {
+                    let Some(prev) = prev_element_sibling(dom, cursor) else {
+                        return false;
+                    };
+                    if !compound_matches_node(dom, prev, compound) {
+                        return false;
+                    }
+                    cursor = prev;
+                }
+                Combinator::SubsequentSibling => {
+                    let mut candidate = prev_element_sibling(dom, cursor);
+                    loop {
+                        let Some(sibling) = candidate else {
+                            return false;
+                        };
+                        if compound_matches_node(dom, sibling, compound) {
+                            cursor = sibling;
+                            break;
+                        }
+                        candidate = prev_element_sibling(dom, sibling);
+                    }
+                }
+            }
+        }
+        true
     }
 
     fn specificity(&self) -> Specificity {
         let mut classes = self.classes.len();
         let mut elements = usize::from(self.tag.is_some());
-        for ancestor in &self.ancestors {
-            classes += ancestor.classes.len();
-            elements += usize::from(ancestor.tag.is_some());
+        for (_, compound) in &self.context {
+            classes += compound.classes.len();
+            elements += usize::from(compound.tag.is_some());
         }
         Specificity {
             ids: 0,
@@ -1304,49 +1385,124 @@ fn compound_matches(
         .all(|class| classes.iter().any(|candidate| candidate == class))
 }
 
-/// The tags and classes present on an element's ancestor chain, used to test
-/// descendant-combinator requirements.
-#[derive(Debug, Default)]
-struct AncestorSet {
-    tags: std::collections::BTreeSet<String>,
-    classes: std::collections::BTreeSet<String>,
+/// Whether `compound` matches the element node `id` (non-elements never match).
+fn compound_matches_node(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    compound: &Compound,
+) -> bool {
+    let node = dom.node(id);
+    let Some(tag) = node.tag() else {
+        return false;
+    };
+    let classes = node.classes().collect::<Vec<_>>();
+    compound_matches(&compound.tag, &compound.classes, tag, &classes)
 }
 
-impl AncestorSet {
-    /// Collect the tags and classes of every ancestor element of `id`.
-    fn collect(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> AncestorSet {
-        let mut set = AncestorSet::default();
-        let mut current = dom.node(id).parent;
-        while let Some(node_id) = current {
-            let node = dom.node(node_id);
-            if let Some(tag) = node.tag() {
-                set.tags.insert(tag.to_string());
-            }
-            for class in node.classes() {
-                set.classes.insert(class.to_string());
-            }
-            current = node.parent;
+/// The nearest ancestor of `id` that is an element node.
+fn element_parent(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> Option<crate::dom::NodeId> {
+    let mut current = dom.node(id).parent;
+    while let Some(node_id) = current {
+        if dom.node(node_id).tag().is_some() {
+            return Some(node_id);
         }
-        set
+        current = dom.node(node_id).parent;
+    }
+    None
+}
+
+/// The immediately preceding element sibling of `id`, skipping text/comment nodes.
+fn prev_element_sibling(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+) -> Option<crate::dom::NodeId> {
+    let parent = dom.node(id).parent?;
+    let siblings = &dom.node(parent).children;
+    let position = siblings.iter().position(|&child| child == id)?;
+    siblings[..position]
+        .iter()
+        .rev()
+        .copied()
+        .find(|&sibling| dom.node(sibling).tag().is_some())
+}
+
+/// A cache-key signature capturing exactly the tree context that can change a
+/// selector match for element `id`, restricted to tokens that actually appear as
+/// combinator qualifiers in the stylesheet. Two elements with the same subject
+/// identity and the same signature always cascade identically.
+///
+/// - No combinator qualifiers: empty (every element shares one key).
+/// - Descendant only: the unordered set of relevant ancestor tokens. Order and
+///   depth cannot matter, so this maximizes cache sharing.
+/// - Any `>`/`+`/`~`: an ordered, per-level fingerprint (nearest-first) of each
+///   ancestor's relevant tokens, and — when sibling combinators exist — each
+///   level's relevant preceding-sibling tokens. This is exact because a
+///   combinator walk can only ever reach ancestors and their preceding siblings.
+fn structural_signature(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    stylesheet: &Stylesheet,
+) -> String {
+    if stylesheet.ancestor_tag_qualifiers.is_empty()
+        && stylesheet.ancestor_class_qualifiers.is_empty()
+    {
+        return String::new();
     }
 
-    /// A compact, order-stable signature of only the tokens that appear as
-    /// ancestor qualifiers in the stylesheet — enough to key the style cache
-    /// without it varying on irrelevant ancestors.
-    fn signature(&self, stylesheet: &Stylesheet) -> String {
-        let mut tokens: Vec<&str> = Vec::new();
-        for tag in &self.tags {
+    let relevant = |node_id: crate::dom::NodeId| -> Vec<String> {
+        let node = dom.node(node_id);
+        let mut tokens: Vec<String> = Vec::new();
+        if let Some(tag) = node.tag() {
             if stylesheet.ancestor_tag_qualifiers.contains(tag) {
-                tokens.push(tag);
+                tokens.push(tag.to_string());
             }
         }
-        for class in &self.classes {
+        for class in node.classes() {
             if stylesheet.ancestor_class_qualifiers.contains(class) {
-                tokens.push(class);
+                tokens.push(class.to_string());
             }
         }
-        tokens.join(",")
+        tokens.sort();
+        tokens
+    };
+
+    if !stylesheet.has_structural_combinator {
+        // Descendant only: an order-independent set of relevant ancestor tokens.
+        let mut tokens: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut current = element_parent(dom, id);
+        while let Some(node_id) = current {
+            tokens.extend(relevant(node_id));
+            current = element_parent(dom, node_id);
+        }
+        return tokens.into_iter().collect::<Vec<_>>().join(",");
     }
+
+    // Structural combinators: an ordered per-level fingerprint. Sibling context
+    // is only included when a sibling combinator is present.
+    let level_signature = |node_id: crate::dom::NodeId| -> String {
+        let own = relevant(node_id).join(".");
+        if !stylesheet.has_sibling_combinator {
+            return own;
+        }
+        let mut siblings: Vec<String> = Vec::new();
+        let mut prev = prev_element_sibling(dom, node_id);
+        while let Some(sibling_id) = prev {
+            let tokens = relevant(sibling_id);
+            if !tokens.is_empty() {
+                siblings.push(tokens.join("."));
+            }
+            prev = prev_element_sibling(dom, sibling_id);
+        }
+        format!("{own}+{}", siblings.join(","))
+    };
+
+    let mut levels: Vec<String> = vec![level_signature(id)];
+    let mut current = element_parent(dom, id);
+    while let Some(node_id) = current {
+        levels.push(level_signature(node_id));
+        current = element_parent(dom, node_id);
+    }
+    levels.join("/")
 }
 
 impl StyleDeclarations {
@@ -1665,11 +1821,13 @@ fn parse_selector_list<'i>(input: &mut Parser<'i, '_>) -> Vec<SimpleSelector> {
             }
             // Combinators only separate compounds when another compound actually
             // follows. Defer the reset so trailing whitespace before `{` (or
-            // before a comma) does not wipe the rightmost compound.
-            Token::WhiteSpace(_)
-            | Token::Delim('>')
-            | Token::Delim('+')
-            | Token::Delim('~') => current.pending_combinator = true,
+            // before a comma) does not wipe the rightmost compound. An explicit
+            // `>`/`+`/`~` overrides the descendant combinator implied by nearby
+            // whitespace (e.g. `A > B` tokenizes as `A`, WS, `>`, WS, `B`).
+            Token::WhiteSpace(_) => current.set_descendant_pending(),
+            Token::Delim('>') => current.pending = Some(Combinator::Child),
+            Token::Delim('+') => current.pending = Some(Combinator::NextSibling),
+            Token::Delim('~') => current.pending = Some(Combinator::SubsequentSibling),
             // Blocks (attribute selectors, functional pseudo-classes): start a
             // fresh compound if one is pending, end it, and consume the block.
             Token::Function(_)
@@ -1716,28 +1874,42 @@ struct CompoundBuilder {
     rejected: bool,
     stopped: bool,
     expect_class: bool,
-    pending_combinator: bool,
-    /// Completed left-hand compounds (ancestor requirements) seen so far.
-    ancestors: Vec<Compound>,
+    /// The combinator seen since the current compound, if any, linking it to the
+    /// compound that follows.
+    pending: Option<Combinator>,
+    /// Completed left-hand compounds with the combinator linking each to the
+    /// compound on its right. Built farthest-first; reversed at finish.
+    context: Vec<(Combinator, Compound)>,
 }
 
 impl CompoundBuilder {
+    /// Whitespace implies a descendant combinator, but only when no explicit
+    /// combinator is already pending (so the whitespace around `>`/`+`/`~` does
+    /// not downgrade it back to descendant).
+    fn set_descendant_pending(&mut self) {
+        if self.pending.is_none() {
+            self.pending = Some(Combinator::Descendant);
+        }
+    }
+
     /// Apply a deferred combinator: if one is pending, the tokens seen so far
-    /// belonged to an *ancestor* compound. Stash it as an ancestor requirement
-    /// and begin a fresh compound for what follows (the new rightmost).
+    /// belonged to a *context* compound. Stash it with its combinator and begin
+    /// a fresh compound for what follows (the new rightmost).
     fn begin_compound(&mut self) {
-        if self.pending_combinator {
+        if let Some(combinator) = self.pending.take() {
             if self.tag.is_some() || !self.classes.is_empty() {
-                self.ancestors.push(Compound {
-                    tag: self.tag.take(),
-                    classes: std::mem::take(&mut self.classes),
-                });
+                self.context.push((
+                    combinator,
+                    Compound {
+                        tag: self.tag.take(),
+                        classes: std::mem::take(&mut self.classes),
+                    },
+                ));
             }
             self.tag = None;
             self.classes = Vec::new();
             self.stopped = false;
             self.expect_class = false;
-            self.pending_combinator = false;
         }
     }
 
@@ -1762,14 +1934,16 @@ impl CompoundBuilder {
         }
     }
 
-    fn finish_into(self, out: &mut Vec<SimpleSelector>) {
+    fn finish_into(mut self, out: &mut Vec<SimpleSelector>) {
         if self.rejected || (self.tag.is_none() && self.classes.is_empty()) {
             return;
         }
+        // Stored farthest-first while parsing; matching walks nearest-first.
+        self.context.reverse();
         out.push(SimpleSelector {
             tag: self.tag,
             classes: self.classes,
-            ancestors: self.ancestors,
+            context: self.context,
         });
     }
 }
@@ -2425,6 +2599,48 @@ mod tests {
             document.blocks[0].cells[0].style.color,
             Some(crate::color::Color::from_rgb_u8(0, 0, 255))
         );
+    }
+
+    #[test]
+    fn child_combinator_requires_immediate_parent() {
+        // `table > td` must not match: a cell's parent is <tr>, not <table>.
+        let strict = parse(
+            r#"<style>table > td { border: 1px solid black; }</style>
+               <table><tr><td>x</td></tr></table>"#,
+        );
+        assert_ne!(strict.blocks[0].cells[0].style.border, Some(true));
+
+        // `tr > td` matches: the cell's immediate parent is the row.
+        let ok = parse(
+            r#"<style>tr > td { border: 1px solid black; }</style>
+               <table><tr><td>x</td></tr></table>"#,
+        );
+        assert_eq!(ok.blocks[0].cells[0].style.border, Some(true));
+    }
+
+    #[test]
+    fn adjacent_sibling_combinator_matches_only_after_a_sibling() {
+        // `td + td` boxes every cell that directly follows another cell.
+        let document = parse(
+            r#"<style>td + td { border: 1px solid black; }</style>
+               <table><tr><td>a</td><td>b</td><td>c</td></tr></table>"#,
+        );
+        assert_ne!(document.blocks[0].cells[0].style.border, Some(true));
+        assert_eq!(document.blocks[0].cells[1].style.border, Some(true));
+        assert_eq!(document.blocks[0].cells[2].style.border, Some(true));
+    }
+
+    #[test]
+    fn general_sibling_combinator_matches_all_following_siblings() {
+        // `.mark ~ td` boxes cells that come after a `.mark` cell, not before.
+        let document = parse(
+            r#"<style>.mark ~ td { border: 1px solid black; }</style>
+               <table><tr><td>a</td><td class="mark">m</td><td>c</td><td>d</td></tr></table>"#,
+        );
+        assert_ne!(document.blocks[0].cells[0].style.border, Some(true)); // before mark
+        assert_ne!(document.blocks[0].cells[1].style.border, Some(true)); // the mark itself
+        assert_eq!(document.blocks[0].cells[2].style.border, Some(true));
+        assert_eq!(document.blocks[0].cells[3].style.border, Some(true));
     }
 
     #[test]

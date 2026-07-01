@@ -646,13 +646,39 @@ Cascade fidelity: descendant selectors, overridable border, @media print:
   boxed, matching Chrome. Output is intentionally **no longer byte-identical**
   (492,740 → 492,721): this is a fidelity fix, not a refactor.
 
+Child and sibling combinators (2026-07-01):
+
+- Selectors now carry a `context: Vec<(Combinator, Compound)>` (nearest-first)
+  instead of a flat ancestor list. `Combinator` covers `Descendant`, `Child`
+  (`>`), `NextSibling` (`+`), and `SubsequentSibling` (`~`).
+- `SimpleSelector::matches` walks the real tree right-to-left with a single
+  leftward cursor: `Child`/`Descendant` step through element parents,
+  `NextSibling`/`SubsequentSibling` through preceding element siblings. Because
+  the ancestor chain is linear, one cursor is exact for arbitrary combinator
+  chains (e.g. `.a b > c`), not just single combinators — `>`/`+`/`~` are no
+  longer approximated as descendant.
+- The parser tracks the pending combinator kind (`CompoundBuilder.pending`);
+  whitespace implies descendant only when no explicit combinator is pending, so
+  `A > B` (tokenized `A` WS `>` WS `B`) keeps `>`.
+- Cache correctness: `structural_signature` replaces `AncestorSet`. Descendant
+  only (the fixture's case) keeps the cheap unordered ancestor-token set for max
+  sharing; when any `>`/`+`/`~` exists it switches to an ordered per-level
+  fingerprint (plus per-level preceding-sibling tokens when sibling combinators
+  are present), which is exact because a combinator walk can only reach ancestors
+  and their preceding siblings. Restricted to tokens that actually appear as
+  qualifiers, so keys stay tiny.
+- The `reg-2-9-1` fixture uses only descendant selectors, so it hits the fast
+  path and output stays byte-identical (492,721). Tests: 86 default / 91 with
+  `js`, adding child/adjacent-sibling/general-sibling coverage.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
   browser render. The fixture proves the low-memory/concurrency direction is
   viable, but the engine still needs nested box-tree layout, font subsetting,
   images, and visual validation before it can replace Chromium for documents
-  like this.
+  like this. Selector coverage still lacks pseudo-classes/elements, attribute
+  selectors, and id/universal selectors.
 
 ## Roadmap (foundation-first, ordered)
 
@@ -711,8 +737,10 @@ that attach cleanly once the spine exists.
 - [x] Add descendant-combinator matching (ancestor-scoped selectors like
       `.gridlines td`), overridable `border` (so `border: none` beats a broader
       rule), and `@media print` evaluation (screen-only rules excluded from PDF).
-- [ ] Replace remaining first-pass selector cascade with `selectors` (child/
-      sibling combinators, pseudo-classes) and browser-complete computed values.
+- [x] Add child (`>`) and sibling (`+`, `~`) combinator matching (exact
+      right-to-left tree walk; cache signature stays exact and small).
+- [ ] Add pseudo-classes/elements, attribute selectors, and id/universal
+      selectors; move toward browser-complete computed values.
 - [x] Add bounded dynamic-HTML execution design before implementing JavaScript
       (ADR 0006 + the `script.rs` seam: `ScriptEngine` trait, `ScriptLimits`,
       `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).
