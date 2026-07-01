@@ -706,7 +706,7 @@ fn render_planned_table_row(
             }
         }
 
-        if planned.source.style.border {
+        if planned.source.style.border == Some(true) {
             page.push_rect(Rect {
                 x,
                 y: *y - row_height,
@@ -852,7 +852,7 @@ fn plan_table_cells<'a>(
 fn cell_paint_scale(cell: &TableCell, table_geometry: &TableGeometry) -> f32 {
     let spans_all_columns = cell.colspan >= table_geometry.columns.len();
 
-    if spans_all_columns && !cell.style.border {
+    if spans_all_columns && cell.style.border != Some(true) {
         1.0
     } else {
         table_geometry.paint_scale
@@ -1337,7 +1337,7 @@ mod tests {
                         text: "SL".to_string(),
                         colspan: 1,
                         style: crate::html::CellStyle {
-                            border: true,
+                            border: Some(true),
                             bold: true,
                             align: Some(crate::html::TextAlign::Center),
                             ..Default::default()
@@ -1347,7 +1347,7 @@ mod tests {
                         text: "Name".to_string(),
                         colspan: 1,
                         style: crate::html::CellStyle {
-                            border: true,
+                            border: Some(true),
                             bold: true,
                             align: Some(crate::html::TextAlign::Left),
                             ..Default::default()
@@ -1468,7 +1468,7 @@ mod tests {
                     text: "This cell has enough words to wrap into multiple lines".to_string(),
                     colspan: 1,
                     style: crate::html::CellStyle {
-                        border: true,
+                        border: Some(true),
                         bold: false,
                         align: Some(crate::html::TextAlign::Left),
                         ..Default::default()
@@ -1506,7 +1506,7 @@ mod tests {
                     text: "A".to_string(),
                     colspan: 1,
                     style: crate::html::CellStyle {
-                        border: true,
+                        border: Some(true),
                         bold: false,
                         align: Some(crate::html::TextAlign::Left),
                         ..Default::default()
@@ -1539,7 +1539,7 @@ mod tests {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
                     style: crate::html::CellStyle {
-                        border: true,
+                        border: Some(true),
                         font_size: Some(10.0),
                         ..Default::default()
                     },
@@ -1593,7 +1593,7 @@ mod tests {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
                     style: crate::html::CellStyle {
-                        border: true,
+                        border: Some(true),
                         font_size: Some(10.0),
                         overflow_wrap: Some(crate::html::OverflowWrap::Anywhere),
                         ..Default::default()
@@ -1696,7 +1696,7 @@ mod tests {
                     style: crate::html::CellStyle {
                         font_size: Some(12.0),
                         padding_left: Some(4.0),
-                        border: false,
+                        border: None,
                         ..Default::default()
                     },
                 }],
@@ -1730,7 +1730,7 @@ mod tests {
                 text: "SL".to_string(),
                 colspan: 1,
                 style: crate::html::CellStyle {
-                    border: true,
+                    border: Some(true),
                     bold: true,
                     ..Default::default()
                 },
@@ -1739,7 +1739,7 @@ mod tests {
                 text: "Name".to_string(),
                 colspan: 1,
                 style: crate::html::CellStyle {
-                    border: true,
+                    border: Some(true),
                     bold: true,
                     ..Default::default()
                 },
@@ -1762,7 +1762,7 @@ mod tests {
                         text: index.to_string(),
                         colspan: 1,
                         style: crate::html::CellStyle {
-                            border: true,
+                            border: Some(true),
                             ..Default::default()
                         },
                     },
@@ -1770,7 +1770,7 @@ mod tests {
                         text: format!("Student {index}"),
                         colspan: 1,
                         style: crate::html::CellStyle {
-                            border: true,
+                            border: Some(true),
                             ..Default::default()
                         },
                     },

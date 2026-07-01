@@ -625,6 +625,27 @@ Bounded pre-layout JavaScript (first pass, `js` feature):
 - Follow-ups: broader DOM (`innerHTML`, `createElement`, traversal), heap and
   wall-time limit enforcement, and choosing Boa vs QuickJS as the default engine.
 
+Cascade fidelity: descendant selectors, overridable border, @media print:
+
+- **Descendant combinators** are now matched: a selector like `.gridlines td`
+  requires an ancestor with class `gridlines`, instead of collapsing to a bare
+  `td` that matched every cell. `SimpleSelector` carries ancestor `Compound`s;
+  the cascade collects each element's ancestor tags/classes (`AncestorSet`) and
+  matches them (presence-based, exact for descendant combinators). The style
+  cache key gains a small signature of only the ancestor tokens used as selector
+  qualifiers, so it stays effective.
+- **`border` is now a cascaded `Option<bool>`**, so a more specific `border:
+  none` overrides a broader `border` rule (previously a one-way latch).
+- **`@media print` is evaluated**: screen-only `@media screen { … }` rules no
+  longer leak into the PDF (which is a print target); `print`/`all`/unqualified
+  apply.
+- Effect on the `reg-2-9-1` fixture: the borderless title/header block
+  (`td.style4/5/9 { border: none }`, which a browser leaves unboxed but the old
+  bare-`td` gridlines rule boxed) is now correctly unboxed — border strokes drop
+  22166 → 22144, the data grid (`td.style8 { border: 1px !important }`) stays
+  boxed, matching Chrome. Output is intentionally **no longer byte-identical**
+  (492,740 → 492,721): this is a fidelity fix, not a refactor.
+
 Important limitation:
 
 - This is now a fast spreadsheet-table PDF, but still not a fully faithful
@@ -687,7 +708,11 @@ that attach cleanly once the spine exists.
 - [x] Add first-pass `!important` handling for supported declarations.
 - [x] Add first-pass text color and table-cell background color support.
 - [x] Add first-pass table-cell vertical-align support.
-- [ ] Replace first-pass selector cascade with `cssparser`/`selectors` and full computed style.
+- [x] Add descendant-combinator matching (ancestor-scoped selectors like
+      `.gridlines td`), overridable `border` (so `border: none` beats a broader
+      rule), and `@media print` evaluation (screen-only rules excluded from PDF).
+- [ ] Replace remaining first-pass selector cascade with `selectors` (child/
+      sibling combinators, pseudo-classes) and browser-complete computed values.
 - [x] Add bounded dynamic-HTML execution design before implementing JavaScript
       (ADR 0006 + the `script.rs` seam: `ScriptEngine` trait, `ScriptLimits`,
       `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).

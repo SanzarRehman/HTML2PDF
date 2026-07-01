@@ -55,7 +55,9 @@ pub struct CellStyle {
     pub align: Option<TextAlign>,
     pub vertical_align: Option<VerticalAlign>,
     pub bold: bool,
-    pub border: bool,
+    /// Whether the box draws a border. `None` means unset (so a more specific
+    /// `border: none` can override a less specific border rule in the cascade).
+    pub border: Option<bool>,
     pub overflow: Option<Overflow>,
     pub font_size: Option<f32>,
     pub padding_left: Option<f32>,
@@ -79,7 +81,7 @@ impl Default for CellStyle {
             align: None,
             vertical_align: None,
             bold: false,
-            border: false,
+            border: None,
             overflow: None,
             font_size: None,
             padding_left: None,
@@ -404,7 +406,7 @@ fn build_block(
         padding,
         align,
         background,
-        border: own.border,
+        border: own.border.unwrap_or(false),
         children: acc.children,
     })
 }
@@ -613,9 +615,11 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
         name: CowRcStr<'i>,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        let query_start = input.position();
         consume_remaining(input);
         if name.eq_ignore_ascii_case("media") {
-            Ok(AtRuleKind::Media)
+            let query = input.slice_from(query_start);
+            Ok(AtRuleKind::Media(media_applies_to_print(query)))
         } else if name.eq_ignore_ascii_case("page") {
             Ok(AtRuleKind::Page)
         } else {
@@ -630,7 +634,7 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::AtRule, ParseError<'i, ()>> {
         match prelude {
-            AtRuleKind::Media => {
+            AtRuleKind::Media(true) => {
                 let mut inner = GeometryParser;
                 let mut rules = StyleSheetParser::new(input, &mut inner);
                 let mut collected = Vec::new();
@@ -641,6 +645,7 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
                 }
                 Ok(collected)
             }
+            AtRuleKind::Media(false) => Ok(Vec::new()),
             AtRuleKind::Page => {
                 let decls = parse_geo_declarations(input);
                 Ok(vec![GeoItem::Page {
@@ -873,7 +878,8 @@ fn computed_display_for_node(
     let tag = node.tag().unwrap_or_default();
     let classes = node.classes().collect::<Vec<_>>();
     let inline_style = node.attr("style").unwrap_or_default();
-    let mut declarations = stylesheet.computed_declarations(tag, &classes);
+    let ancestors = AncestorSet::collect(dom, id);
+    let mut declarations = stylesheet.computed_declarations(tag, &classes, &ancestors);
 
     if !inline_style.is_empty() {
         declarations.merge_inline(parse_style_declarations(inline_style));
@@ -1039,13 +1045,17 @@ fn element_own(
     let class_attr = node.attr("class").unwrap_or_default();
     let inline_style = node.attr("style").unwrap_or_default();
 
-    let key = format!("{tag}|{class_attr}|{inline_style}");
+    // Only ancestors that appear as selector qualifiers can change the match, so
+    // the cache key stays small and shared across most elements.
+    let ancestors = AncestorSet::collect(dom, id);
+    let ancestor_sig = ancestors.signature(stylesheet);
+    let key = format!("{tag}|{class_attr}|{inline_style}|{ancestor_sig}");
     if let Some(result) = cache.get(&key) {
         return *result;
     }
 
     let classes = class_attr.split_whitespace().collect::<Vec<_>>();
-    let declarations = stylesheet.computed_declarations(tag, &classes);
+    let declarations = stylesheet.computed_declarations(tag, &classes, &ancestors);
     let mut style = declarations.resolved().cell;
     let mut display = declarations.resolved().display;
 
@@ -1120,6 +1130,10 @@ struct Stylesheet {
     rules: Vec<StyleRule>,
     tag_rules: HashMap<String, Vec<usize>>,
     class_rules: HashMap<String, Vec<usize>>,
+    /// Tags/classes that appear as ancestor requirements in some selector. Used
+    /// to keep the style cache key small (only these ancestors can change a match).
+    ancestor_tag_qualifiers: std::collections::BTreeSet<String>,
+    ancestor_class_qualifiers: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1130,10 +1144,22 @@ struct StyleRule {
     order: usize,
 }
 
+/// One compound selector: an optional type tag plus class names.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Compound {
+    tag: Option<String>,
+    classes: Vec<String>,
+}
+
+/// A selector: the rightmost compound (the matched "subject") plus any ancestor
+/// requirements from descendant combinators. `ancestors` are matched loosely
+/// (presence anywhere in the ancestor chain), which is exact for descendant
+/// combinators and a safe approximation for `>`/`+`/`~`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SimpleSelector {
     tag: Option<String>,
     classes: Vec<String>,
+    ancestors: Vec<Compound>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1159,8 +1185,11 @@ impl Stylesheet {
     fn build_indexes(&mut self) {
         self.tag_rules.clear();
         self.class_rules.clear();
+        self.ancestor_tag_qualifiers.clear();
+        self.ancestor_class_qualifiers.clear();
 
         for (index, rule) in self.rules.iter().enumerate() {
+            // Index by the subject (rightmost) compound only.
             if let Some(tag) = &rule.selector.tag {
                 self.tag_rules.entry(tag.clone()).or_default().push(index);
             }
@@ -1171,10 +1200,24 @@ impl Stylesheet {
                     .or_default()
                     .push(index);
             }
+
+            for ancestor in &rule.selector.ancestors {
+                if let Some(tag) = &ancestor.tag {
+                    self.ancestor_tag_qualifiers.insert(tag.clone());
+                }
+                for class in &ancestor.classes {
+                    self.ancestor_class_qualifiers.insert(class.clone());
+                }
+            }
         }
     }
 
-    fn computed_declarations(&self, tag: &str, classes: &[&str]) -> StyleDeclarations {
+    fn computed_declarations(
+        &self,
+        tag: &str,
+        classes: &[&str],
+        ancestors: &AncestorSet,
+    ) -> StyleDeclarations {
         let mut candidate_indexes: Vec<usize> = Vec::new();
 
         if let Some(indexes) = self.tag_rules.get(tag) {
@@ -1197,7 +1240,7 @@ impl Stylesheet {
         let mut matched = candidate_indexes
             .into_iter()
             .map(|index| &self.rules[index])
-            .filter(|rule| rule.selector.matches(tag, classes))
+            .filter(|rule| rule.selector.matches(tag, classes, ancestors))
             .collect::<Vec<_>>();
 
         matched.sort_by_key(|rule| (rule.specificity, rule.order));
@@ -1212,24 +1255,97 @@ impl Stylesheet {
 }
 
 impl SimpleSelector {
-    fn matches(&self, tag: &str, classes: &[&str]) -> bool {
-        if let Some(selector_tag) = &self.tag {
-            if selector_tag != tag {
-                return false;
-            }
+    fn matches(&self, tag: &str, classes: &[&str], ancestors: &AncestorSet) -> bool {
+        if !compound_matches(&self.tag, &self.classes, tag, classes) {
+            return false;
         }
-
-        self.classes
-            .iter()
-            .all(|class| classes.iter().any(|candidate| candidate == class))
+        // Every ancestor requirement must be satisfied somewhere up the tree.
+        self.ancestors.iter().all(|compound| {
+            compound
+                .tag
+                .as_ref()
+                .is_none_or(|t| ancestors.tags.contains(t.as_str()))
+                && compound
+                    .classes
+                    .iter()
+                    .all(|class| ancestors.classes.contains(class.as_str()))
+        })
     }
 
     fn specificity(&self) -> Specificity {
+        let mut classes = self.classes.len();
+        let mut elements = usize::from(self.tag.is_some());
+        for ancestor in &self.ancestors {
+            classes += ancestor.classes.len();
+            elements += usize::from(ancestor.tag.is_some());
+        }
         Specificity {
             ids: 0,
-            classes: self.classes.len(),
-            elements: usize::from(self.tag.is_some()),
+            classes,
+            elements,
         }
+    }
+}
+
+/// Whether a compound (`tag`/`classes`) matches an element's `tag`/`classes`.
+fn compound_matches(
+    sel_tag: &Option<String>,
+    sel_classes: &[String],
+    tag: &str,
+    classes: &[&str],
+) -> bool {
+    if let Some(selector_tag) = sel_tag {
+        if selector_tag != tag {
+            return false;
+        }
+    }
+    sel_classes
+        .iter()
+        .all(|class| classes.iter().any(|candidate| candidate == class))
+}
+
+/// The tags and classes present on an element's ancestor chain, used to test
+/// descendant-combinator requirements.
+#[derive(Debug, Default)]
+struct AncestorSet {
+    tags: std::collections::BTreeSet<String>,
+    classes: std::collections::BTreeSet<String>,
+}
+
+impl AncestorSet {
+    /// Collect the tags and classes of every ancestor element of `id`.
+    fn collect(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> AncestorSet {
+        let mut set = AncestorSet::default();
+        let mut current = dom.node(id).parent;
+        while let Some(node_id) = current {
+            let node = dom.node(node_id);
+            if let Some(tag) = node.tag() {
+                set.tags.insert(tag.to_string());
+            }
+            for class in node.classes() {
+                set.classes.insert(class.to_string());
+            }
+            current = node.parent;
+        }
+        set
+    }
+
+    /// A compact, order-stable signature of only the tokens that appear as
+    /// ancestor qualifiers in the stylesheet — enough to key the style cache
+    /// without it varying on irrelevant ancestors.
+    fn signature(&self, stylesheet: &Stylesheet) -> String {
+        let mut tokens: Vec<&str> = Vec::new();
+        for tag in &self.tags {
+            if stylesheet.ancestor_tag_qualifiers.contains(tag) {
+                tokens.push(tag);
+            }
+        }
+        for class in &self.classes {
+            if stylesheet.ancestor_class_qualifiers.contains(class) {
+                tokens.push(class);
+            }
+        }
+        tokens.join(",")
     }
 }
 
@@ -1332,12 +1448,27 @@ type ParsedRule = (SimpleSelector, StyleDeclarations);
 struct RuleParser;
 
 enum AtRuleKind {
-    /// `@media`: parse the nested block as if its rules were top-level.
-    Media,
+    /// `@media`: parse the nested block as top-level rules if the query applies
+    /// to print output (the PDF target); the boolean is that decision.
+    Media(bool),
     /// `@page`: parsed by the geometry parser for margins and orientation.
     Page,
     /// Any other at-rule: ignored.
     Other,
+}
+
+/// Whether an `@media` query applies to print output (the PDF target). Screen-
+/// only queries are excluded; `print`, `all`, unqualified, and feature queries
+/// apply. A pragmatic first pass, not a full media-query evaluator.
+fn media_applies_to_print(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    if query.contains("print") {
+        true
+    } else if query.contains("screen") {
+        false
+    } else {
+        true
+    }
 }
 
 impl<'i> QualifiedRuleParser<'i> for RuleParser {
@@ -1376,9 +1507,11 @@ impl<'i> AtRuleParser<'i> for RuleParser {
         name: CowRcStr<'i>,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        let query_start = input.position();
         consume_remaining(input);
         if name.eq_ignore_ascii_case("media") {
-            Ok(AtRuleKind::Media)
+            let query = input.slice_from(query_start);
+            Ok(AtRuleKind::Media(media_applies_to_print(query)))
         } else {
             Ok(AtRuleKind::Other)
         }
@@ -1391,7 +1524,8 @@ impl<'i> AtRuleParser<'i> for RuleParser {
         input: &mut Parser<'i, 't>,
     ) -> Result<Self::AtRule, ParseError<'i, ()>> {
         match prelude {
-            AtRuleKind::Media => {
+            // Only descend into `@media` blocks whose query applies to print.
+            AtRuleKind::Media(true) => {
                 let mut inner = RuleParser;
                 let mut rules = StyleSheetParser::new(input, &mut inner);
                 let mut collected = Vec::new();
@@ -1402,9 +1536,9 @@ impl<'i> AtRuleParser<'i> for RuleParser {
                 }
                 Ok(collected)
             }
-            // `@page` carries no content rules for the cascade; geometry is
-            // handled separately by `parse_page_geometry`.
-            AtRuleKind::Page | AtRuleKind::Other => Ok(Vec::new()),
+            // Screen-only `@media`, `@page` (no cascade rules; geometry is handled
+            // by `parse_page_geometry`), and other at-rules contribute nothing.
+            AtRuleKind::Media(false) | AtRuleKind::Page | AtRuleKind::Other => Ok(Vec::new()),
         }
     }
 
@@ -1583,15 +1717,27 @@ struct CompoundBuilder {
     stopped: bool,
     expect_class: bool,
     pending_combinator: bool,
+    /// Completed left-hand compounds (ancestor requirements) seen so far.
+    ancestors: Vec<Compound>,
 }
 
 impl CompoundBuilder {
     /// Apply a deferred combinator: if one is pending, the tokens seen so far
-    /// belonged to an earlier compound and only the rightmost compound matters,
-    /// so discard them and begin fresh.
+    /// belonged to an *ancestor* compound. Stash it as an ancestor requirement
+    /// and begin a fresh compound for what follows (the new rightmost).
     fn begin_compound(&mut self) {
         if self.pending_combinator {
-            *self = CompoundBuilder::default();
+            if self.tag.is_some() || !self.classes.is_empty() {
+                self.ancestors.push(Compound {
+                    tag: self.tag.take(),
+                    classes: std::mem::take(&mut self.classes),
+                });
+            }
+            self.tag = None;
+            self.classes = Vec::new();
+            self.stopped = false;
+            self.expect_class = false;
+            self.pending_combinator = false;
         }
     }
 
@@ -1623,6 +1769,7 @@ impl CompoundBuilder {
         out.push(SimpleSelector {
             tag: self.tag,
             classes: self.classes,
+            ancestors: self.ancestors,
         });
     }
 }
@@ -1734,10 +1881,12 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "word-break" if value.eq_ignore_ascii_case("break-all") => {
             target.cell.word_break = Some(WordBreak::BreakAll);
         }
-        "border" | "border-left" | "border-right" | "border-top" | "border-bottom"
-            if !value.starts_with("none") =>
-        {
-            target.cell.border = true;
+        "border" | "border-left" | "border-right" | "border-top" | "border-bottom" => {
+            // `none`/`0` disable the border; anything else enables it. Recorded as
+            // an explicit value so a more specific rule (e.g. `th.style0 {
+            // border: none }`) can override a broad `th { border }`.
+            let v = value.trim();
+            target.cell.border = Some(!(v.starts_with("none") || v.starts_with('0')));
         }
         _ => {}
     }
@@ -1933,7 +2082,7 @@ impl CellStyle {
         self.align = other.align.or(self.align);
         self.vertical_align = other.vertical_align.or(self.vertical_align);
         self.bold |= other.bold;
-        self.border |= other.border;
+        self.border = other.border.or(self.border);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
         self.padding_left = other.padding_left.or(self.padding_left);
@@ -2234,6 +2383,51 @@ mod tests {
     }
 
     #[test]
+    fn descendant_border_rule_is_scoped_to_its_ancestor() {
+        // `.gridlines td` must NOT box a cell whose table isn't under `.gridlines`;
+        // the cell's own `border: none` (more specific) wins.
+        let outside = parse(
+            r#"<style>.gridlines td { border: 1px solid black; }
+               td.title { border: none; }</style>
+               <table><tr><td class="title">x</td></tr></table>"#,
+        );
+        assert_ne!(outside.blocks[0].cells[0].style.border, Some(true));
+
+        // Under a `.gridlines` ancestor, the same rule DOES apply.
+        let inside = parse(
+            r#"<style>.gridlines td { border: 1px solid black; }</style>
+               <div class="gridlines"><table><tr><td>x</td></tr></table></div>"#,
+        );
+        assert_eq!(inside.blocks[0].cells[0].style.border, Some(true));
+    }
+
+    #[test]
+    fn border_none_overrides_a_broader_border_rule() {
+        let document = parse(
+            r#"<style>th { border: 1px solid black; }
+               th.plain { border: none; }</style>
+               <table><tr><th class="plain">x</th></tr></table>"#,
+        );
+        assert_eq!(document.blocks[0].cells[0].style.border, Some(false));
+    }
+
+    #[test]
+    fn screen_only_media_rules_are_ignored_for_print() {
+        let document = parse(
+            r#"<style>
+               @media screen { td.c { color: #ff0000; } }
+               @media print  { td.c { color: #0000ff; } }
+               </style>
+               <table><tr><td class="c">x</td></tr></table>"#,
+        );
+        // The print rule applies; the screen-only rule does not.
+        assert_eq!(
+            document.blocks[0].cells[0].style.color,
+            Some(crate::color::Color::from_rgb_u8(0, 0, 255))
+        );
+    }
+
+    #[test]
     fn hides_display_none_rows_and_cells() {
         let document = parse(
             r#"
@@ -2359,7 +2553,7 @@ mod tests {
 
         assert_eq!(style.align, Some(super::TextAlign::Center));
         assert!(style.bold);
-        assert!(style.border);
+        assert_eq!(style.border, Some(true));
         assert_eq!(style.font_size, Some(12.0));
         assert_eq!(style.padding_left, Some(3.75));
         assert_eq!(style.padding_right, Some(3.75));
@@ -2664,7 +2858,7 @@ mod tests {
         );
         let style = document.blocks[0].cells[0].style;
 
-        assert!(!style.border);
+        assert_ne!(style.border, Some(true));
         assert_eq!(style.background_color, None);
     }
 

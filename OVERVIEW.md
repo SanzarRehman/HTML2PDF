@@ -111,8 +111,10 @@ CSS matching works the proper way browsers do it:
   **declarations** (property + value).
 - To style an element we **index rules by tag and class** and check matches by
   comparing strings — e.g. selector `td.amount` matches an element whose tag is
-  `td` and whose class list contains `amount`. This respects specificity,
-  source order, and `!important`, like a real cascade.
+  `td` and whose class list contains `amount`. **Descendant combinators** are
+  scoped too: `.gridlines td` only matches a `td` with a `gridlines` ancestor.
+  This respects specificity, source order, `!important`, and `@media print`
+  (screen-only rules are excluded from the PDF), like a real cascade.
 
 So pattern matching is **structured token parsing + indexed lookup**, not regex
 and not "search the raw text for a string."
@@ -240,8 +242,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 **Works now**
 
 - Real HTML parsing (handles messy real-world markup).
-- Real CSS parsing + cascade: selectors (tag/class), specificity, source order,
-  `!important`, comments/strings, `@media`, multiple `<style>` blocks.
+- Real CSS parsing + cascade: selectors (tag/class + **descendant combinators**),
+  specificity, source order, `!important`, **`@media print` evaluation**,
+  comments/strings, multiple `<style>` blocks.
 - Inheritance (color, font-size, text-align, etc. flow from parents).
 - `display: none` (tables and flow content).
 - Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
