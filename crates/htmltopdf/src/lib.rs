@@ -13,7 +13,7 @@ mod subset;
 use std::fmt;
 
 pub use font::FontSource;
-pub use layout::{PageSize, RenderOptions};
+pub use layout::{PageSize, Paper, RenderOptions};
 pub use script::{NoopScriptEngine, ScriptEngine, ScriptLimits, ScriptReport};
 #[cfg(feature = "js")]
 pub use script::BoaScriptEngine;

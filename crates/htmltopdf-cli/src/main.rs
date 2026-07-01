@@ -32,6 +32,7 @@ fn run() -> Result<(), String> {
     let mut positionals: Vec<std::ffi::OsString> = Vec::new();
     let mut font: Option<String> = None;
     let mut scripting = false;
+    let mut paper: Option<String> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         if arg == "--font" {
@@ -39,6 +40,11 @@ fn run() -> Result<(), String> {
                 .next()
                 .ok_or_else(|| "--font requires a font file path or family name".to_string())?;
             font = Some(value.to_string_lossy().into_owned());
+        } else if arg == "--paper" {
+            let value = iter
+                .next()
+                .ok_or_else(|| "--paper requires a value (a4 or letter)".to_string())?;
+            paper = Some(value.to_string_lossy().to_ascii_lowercase());
         } else if arg == "--js" {
             scripting = true;
         } else {
@@ -49,7 +55,7 @@ fn run() -> Result<(), String> {
     if positionals.len() != 2 {
         return Err(
             concat!(
-                "usage: htmltopdf [--font <path|family>] [--js] <input.html> <output.pdf>\n",
+                "usage: htmltopdf [--font <path|family>] [--paper a4|letter] [--js] <input.html> <output.pdf>\n",
                 "       htmltopdf bench <input.html> <output-dir> [runs]\n",
                 "       htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>"
             )
@@ -63,6 +69,11 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to read {}: {error}", input_path.display()))?;
 
     let mut options = build_options(font.as_deref())?;
+    match paper.as_deref() {
+        Some("letter") => options = options.with_paper(htmltopdf::Paper::Letter),
+        Some("a4") | None => {}
+        Some(other) => return Err(format!("unknown --paper value '{other}' (use a4 or letter)")),
+    }
     // Resolve relative <img src> paths against the input file's directory.
     if let Some(parent) = input_path.parent() {
         if !parent.as_os_str().is_empty() {

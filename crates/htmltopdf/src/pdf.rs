@@ -345,10 +345,13 @@ fn page_content(
     char_to_gid: Option<&std::collections::BTreeMap<char, u16>>,
 ) -> String {
     let mut content = String::new();
+    // Track the current fill color so faux-bold text can stroke in the same color.
+    let mut fill = (0.0f32, 0.0f32, 0.0f32);
 
     for command in &page.commands {
         match command {
             PaintCommand::SetFillColor(color) => {
+                fill = (color.r, color.g, color.b);
                 content.push_str(&format!(
                     "{:.4} {:.4} {:.4} rg\n",
                     color.r, color.g, color.b
@@ -402,6 +405,12 @@ fn page_content(
             PaintCommand::Text(text) => {
                 content.push_str("BT\n");
                 content.push_str(&format!("/F1 {:.2} Tf\n", text.font_size));
+                if text.bold {
+                    // Faux-bold: fill + stroke the glyphs in the same color with a
+                    // thin outline, since only a regular font face is embedded.
+                    content.push_str(&format!("{:.4} {:.4} {:.4} RG\n", fill.0, fill.1, fill.2));
+                    content.push_str(&format!("{:.3} w 2 Tr\n", text.font_size * 0.03));
+                }
                 content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
                 match char_to_gid {
                     // Embedded Type0/Identity-H font: write glyph ids as a
@@ -418,6 +427,9 @@ fn page_content(
                     None => {
                         content.push_str(&format!("({}) Tj\n", escape_text(&text.text)));
                     }
+                }
+                if text.bold {
+                    content.push_str("0 Tr\n"); // restore normal fill render mode
                 }
                 content.push_str("ET\n");
             }
@@ -624,7 +636,7 @@ mod tests {
                 font_size: 12.0,
                 leading: 16.0,
             },
-            Color::BLACK,
+            Color::BLACK, false,
         );
 
         let pdf = write_pdf(&[page], &[], &options).expect("render");
@@ -647,7 +659,7 @@ mod tests {
                 font_size: 12.0,
                 leading: 16.0,
             },
-            Color::BLACK,
+            Color::BLACK, false,
         );
 
         assert_eq!(escape_text("A (test) \\ value"), "A \\(test\\) \\\\ value");
@@ -684,6 +696,7 @@ mod tests {
                 x: 12.0,
                 y: 45.0,
                 font_size: 10.0,
+                bold: false,
             }));
         page.commands.push(PaintCommand::PopClip);
 

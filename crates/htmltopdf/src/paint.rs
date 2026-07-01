@@ -30,6 +30,8 @@ pub struct TextCommand {
     pub x: f32,
     pub y: f32,
     pub font_size: f32,
+    /// Render with faux-bold (fill+stroke) when no bold font face is embedded.
+    pub bold: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

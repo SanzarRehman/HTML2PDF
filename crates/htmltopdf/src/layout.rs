@@ -21,6 +21,40 @@ impl PageSize {
         width: 842.0,
         height: 595.0,
     };
+
+    pub const LETTER: Self = Self {
+        width: 612.0,
+        height: 792.0,
+    };
+
+    pub const LETTER_LANDSCAPE: Self = Self {
+        width: 792.0,
+        height: 612.0,
+    };
+}
+
+/// The base paper size to render on (before applying the document's orientation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Paper {
+    #[default]
+    A4,
+    Letter,
+}
+
+impl Paper {
+    fn portrait(self) -> PageSize {
+        match self {
+            Paper::A4 => PageSize::A4,
+            Paper::Letter => PageSize::LETTER,
+        }
+    }
+
+    fn landscape(self) -> PageSize {
+        match self {
+            Paper::A4 => PageSize::A4_LANDSCAPE,
+            Paper::Letter => PageSize::LETTER_LANDSCAPE,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +72,8 @@ pub struct RenderOptions {
     /// Base directory for resolving relative `<img src>` file paths. `None`
     /// disables file-path images (`data:` URIs still work).
     pub base_dir: Option<std::path::PathBuf>,
+    /// Base paper size; the document's orientation picks portrait/landscape.
+    pub paper: Paper,
 }
 
 impl Default for RenderOptions {
@@ -49,9 +85,13 @@ impl Default for RenderOptions {
             margin_right: 48.0,
             margin_bottom: 48.0,
             margin_left: 48.0,
-            table_row_height: 18.0,
+            // No fixed row-height floor: rows are sized from their content
+            // (line box + padding), like a browser. A CSS-declared row height
+            // (e.g. Excel exports) overrides this via `with_document_hints`.
+            table_row_height: 0.0,
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
             base_dir: None,
+            paper: Paper::A4,
         }
     }
 }
@@ -70,12 +110,21 @@ impl RenderOptions {
         self
     }
 
+    /// Choose the base paper size (A4 or Letter).
+    pub fn with_paper(mut self, paper: Paper) -> Self {
+        self.paper = paper;
+        self.page_size = paper.portrait();
+        self
+    }
+
     pub fn with_document_hints(&self, document: &Document) -> Self {
         let mut options = self.clone();
 
-        if document.page_style.orientation == PageOrientation::Landscape {
-            options.page_size = PageSize::A4_LANDSCAPE;
-        }
+        options.page_size = if document.page_style.orientation == PageOrientation::Landscape {
+            options.paper.landscape()
+        } else {
+            options.paper.portrait()
+        };
 
         options.margin_top = document.page_style.margin_top.unwrap_or(options.margin);
         options.margin_right = document.page_style.margin_right.unwrap_or(options.margin);
@@ -106,13 +155,14 @@ impl Page {
         }
     }
 
-    pub(crate) fn push_colored_line(&mut self, line: Line, color: Color) {
+    pub(crate) fn push_colored_line(&mut self, line: Line, color: Color, bold: bool) {
         self.commands.push(PaintCommand::SetFillColor(color));
         self.commands.push(PaintCommand::Text(TextCommand {
             text: line.text.clone(),
             x: line.x,
             y: line.y,
             font_size: line.font_size,
+            bold,
         }));
         self.lines.push(line);
     }
@@ -190,7 +240,7 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
     let mut pages = vec![Page::new()];
     let mut y = options.page_size.height - options.margin_top;
     let content_width = options.page_size.width - options.margin_left - options.margin_right;
-    let table_geometry = table_geometry(document, content_width);
+    let table_geometry = table_geometry(document, content_width, &options.font);
     let mut repeated_table_header: Option<Vec<TableCell>> = None;
 
     for block in &document.blocks {
@@ -487,6 +537,7 @@ fn layout_line_box(
                     leading,
                 },
                 piece.color,
+                piece.bold,
             );
             px += piece_width;
         }
@@ -500,6 +551,7 @@ struct LinePiece {
     text: String,
     font_size: f32,
     color: Color,
+    bold: bool,
 }
 
 /// Wrap styled inline runs into visual lines. Whitespace is collapsed across run
@@ -527,8 +579,11 @@ fn wrap_inline_runs(
             .sum();
 
         // A token wider than the line can never fit by wrapping; start it on a
-        // fresh line and break it across lines character by character.
-        if token_width > max_width {
+        // fresh line and break it across lines character by character. The small
+        // tolerance avoids a spurious break when a word measures exactly the line
+        // width (e.g. a column auto-sized to its own content) but a float ULP
+        // tips the comparison.
+        if token_width > max_width + WRAP_TOLERANCE {
             if !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
                 current_width = 0.0;
@@ -543,7 +598,9 @@ fn wrap_inline_runs(
             estimate_text_width(" ", token.space_font_size, font)
         };
 
-        if !current.is_empty() && current_width + space_width + token_width > max_width {
+        if !current.is_empty()
+            && current_width + space_width + token_width > max_width + WRAP_TOLERANCE
+        {
             lines.push(std::mem::take(&mut current));
             current_width = 0.0;
         }
@@ -555,6 +612,7 @@ fn wrap_inline_runs(
                 text: " ".to_string(),
                 font_size: token.space_font_size,
                 color: token.pieces.first().map(|p| p.color).unwrap_or(Color::BLACK),
+                bold: token.pieces.first().map(|p| p.bold).unwrap_or(false),
             });
             current_width += space_width;
         }
@@ -597,7 +655,10 @@ fn break_long_token(
             }
 
             if let Some(last) = current.last_mut() {
-                if last.font_size == piece.font_size && last.color == piece.color {
+                if last.font_size == piece.font_size
+                    && last.color == piece.color
+                    && last.bold == piece.bold
+                {
                     last.text.push(ch);
                     *current_width += char_width;
                     continue;
@@ -607,6 +668,7 @@ fn break_long_token(
                 text: ch.to_string(),
                 font_size: piece.font_size,
                 color: piece.color,
+                bold: piece.bold,
             });
             *current_width += char_width;
         }
@@ -656,7 +718,10 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
             // Extend the current word, merging into the last piece if the style
             // matches so adjacent same-style characters stay in one piece.
             if let Some(last) = word.last_mut() {
-                if last.font_size == run.font_size && last.color == run.color {
+                if last.font_size == run.font_size
+                    && last.color == run.color
+                    && last.bold == run.bold
+                {
                     last.text.push(ch);
                     continue;
                 }
@@ -665,6 +730,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 text: ch.to_string(),
                 font_size: run.font_size,
                 color: run.color,
+                bold: run.bold,
             });
         }
     }
@@ -703,7 +769,7 @@ fn layout_table_row(
     let row_height = planned_cells
         .iter()
         .map(|cell| cell.height)
-        .fold(options.table_row_height, f32::max);
+        .fold(options.table_row_height * table_geometry.paint_scale, f32::max);
 
     if !has_space(*y, options, row_height) {
         push_page(pages, y, options);
@@ -728,7 +794,7 @@ fn render_repeated_table_header(
     let row_height = planned_cells
         .iter()
         .map(|cell| cell.height)
-        .fold(options.table_row_height, f32::max);
+        .fold(options.table_row_height * table_geometry.paint_scale, f32::max);
 
     if !has_space(*y, options, row_height) {
         push_page(pages, y, options);
@@ -814,6 +880,7 @@ fn render_planned_table_row(
                     leading: planned.leading,
                 },
                 text_color,
+                planned.source.style.bold,
             );
         }
 
@@ -858,17 +925,15 @@ fn plan_table_cells<'a>(
     for cell in cells {
         let colspan = cell.colspan.max(1);
         let width = cell_width(&table_geometry.columns, column_index, colspan);
-        let paint_scale = cell_paint_scale(cell, table_geometry);
-        let font_size = cell
-            .style
-            .font_size
-            .unwrap_or(if cell.style.bold { 8.5 } else { 7.0 })
-            * paint_scale;
+        // Font/padding scale down only in the last-resort branch of
+        // `table_geometry` (min-content still overflows); normally this is 1.0.
+        let paint_scale = table_geometry.paint_scale;
+        let font_size = cell_font_size(cell) * paint_scale;
         let leading = font_size * 1.18;
-        let padding_left = cell.style.padding_left.unwrap_or(2.0) * paint_scale;
-        let padding_right = cell.style.padding_right.unwrap_or(2.0) * paint_scale;
-        let padding_top = cell.style.padding_top.unwrap_or(3.0) * paint_scale;
-        let padding_bottom = cell.style.padding_bottom.unwrap_or(4.0) * paint_scale;
+        let padding_left = cell.style.padding_left.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+        let padding_right = cell.style.padding_right.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+        let padding_top = cell.style.padding_top.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+        let padding_bottom = cell.style.padding_bottom.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
         let white_space = cell.style.white_space.unwrap_or(WhiteSpace::Normal);
         let break_long_tokens = should_break_long_tokens(cell);
         let lines = wrap_cell_text(
@@ -885,8 +950,11 @@ fn plan_table_cells<'a>(
             font,
         );
         let line_count = lines.len().max(1);
-        let height =
-            ((line_count as f32 * leading) + padding_top + padding_bottom).max(base_row_height);
+        // A CSS-declared row height is a floor, but it shrinks with the table's
+        // shrink-to-fit scale (as a browser's print scaling does) so rows don't
+        // stay tall while the text is scaled down.
+        let height = ((line_count as f32 * leading) + padding_top + padding_bottom)
+            .max(base_row_height * table_geometry.paint_scale);
         let clip_content = cell.style.overflow.unwrap_or(Overflow::Hidden) == Overflow::Hidden;
 
         planned.push(PlannedCell {
@@ -907,16 +975,6 @@ fn plan_table_cells<'a>(
     }
 
     planned
-}
-
-fn cell_paint_scale(cell: &TableCell, table_geometry: &TableGeometry) -> f32 {
-    let spans_all_columns = cell.colspan >= table_geometry.columns.len();
-
-    if spans_all_columns && cell.style.border != Some(true) {
-        1.0
-    } else {
-        table_geometry.paint_scale
-    }
 }
 
 fn is_table_row_kind(kind: BlockKind) -> bool {
@@ -943,42 +1001,180 @@ struct PlannedCell<'a> {
 #[derive(Debug, Clone, PartialEq)]
 struct TableGeometry {
     columns: Vec<f32>,
+    /// Uniform font/padding scale applied when the table is wider than the page
+    /// even at min-content (shrink-to-fit, like a browser's print path); `1.0`
+    /// otherwise.
     paint_scale: f32,
 }
 
-fn table_geometry(document: &Document, content_width: f32) -> TableGeometry {
-    let mut columns = document.table_columns.clone();
-    let has_declared_columns = !columns.is_empty();
+/// Slack (pt) allowed before wrapping, so text that measures exactly the line
+/// width (an auto-sized column fitting its own content) is not broken by a
+/// floating-point rounding error.
+const WRAP_TOLERANCE: f32 = 0.25;
 
-    if columns.is_empty() {
-        let max_cells = document
-            .blocks
-            .iter()
-            .filter(|block| is_table_row_kind(block.kind))
-            .map(|block| block.cells.iter().map(|cell| cell.colspan).sum::<usize>())
-            .max()
-            .unwrap_or(1);
-        columns = vec![content_width / max_cells as f32; max_cells];
+/// Default table-cell font size (pt) when the cascade sets none — the browser
+/// default of ~11pt rather than a shrink-to-fit fudge.
+const DEFAULT_CELL_FONT_SIZE: f32 = 11.0;
+/// Default table-cell padding (pt) when the cascade sets none (≈ the 1px UA
+/// default). Real spreadsheet exports set padding explicitly.
+const DEFAULT_CELL_PADDING: f32 = 1.0;
+
+fn cell_font_size(cell: &TableCell) -> f32 {
+    cell.style.font_size.unwrap_or(DEFAULT_CELL_FONT_SIZE)
+}
+
+fn cell_padding_x(cell: &TableCell) -> f32 {
+    cell.style.padding_left.unwrap_or(DEFAULT_CELL_PADDING)
+        + cell.style.padding_right.unwrap_or(DEFAULT_CELL_PADDING)
+}
+
+/// The min-content width of `text`: the widest run that cannot be broken. Normally
+/// that is the widest whitespace-separated word, but when the cell allows breaking
+/// inside words (`overflow-wrap`/`word-break`) it drops to the widest single
+/// character, so the column can be narrow and the text wraps rather than forcing a
+/// font downscale.
+fn min_content_width(text: &str, font_size: f32, font: &crate::font::Font, breakable: bool) -> f32 {
+    if breakable {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .map(|ch| estimate_text_width(&ch.to_string(), font_size, font))
+            .fold(0.0, f32::max)
+    } else {
+        text.split_whitespace()
+            .map(|word| estimate_text_width(word, font_size, font))
+            .fold(0.0, f32::max)
+    }
+}
+
+/// Compute table column widths the way a browser's automatic table layout does,
+/// rather than force-fitting oversized declared widths by shrinking the font.
+///
+/// Each column gets a min-content width (its widest word) and a max-content width
+/// (its widest cell on one line), both including padding. Declared `<col>` widths
+/// are honored only when they collectively fit; otherwise columns are sized to
+/// content. The chosen widths are then distributed into the available width:
+/// content fits → use it as-is at full font size; too wide but min-content fits →
+/// shrink wide columns toward their min-content (text wraps, font stays); even
+/// min-content overflows → only then scale the font down (`paint_scale`).
+fn table_geometry(document: &Document, content_width: f32, font: &crate::font::Font) -> TableGeometry {
+    let column_count = document
+        .blocks
+        .iter()
+        .filter(|block| is_table_row_kind(block.kind))
+        .map(|block| block.cells.iter().map(|cell| cell.colspan.max(1)).sum::<usize>())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let mut min_content = vec![0.0f32; column_count];
+    let mut max_content = vec![0.0f32; column_count];
+    // Cells spanning multiple columns constrain the spanned columns' totals.
+    let mut spans: Vec<(usize, usize, f32, f32)> = Vec::new();
+
+    for block in document.blocks.iter().filter(|b| is_table_row_kind(b.kind)) {
+        let mut col = 0;
+        for cell in &block.cells {
+            if col >= column_count {
+                break;
+            }
+            let span = cell.colspan.max(1);
+            let end = (col + span).min(column_count);
+            let font_size = cell_font_size(cell);
+            let padding = cell_padding_x(cell);
+            let max_w = estimate_text_width(&cell.text, font_size, font) + padding;
+            let min_w =
+                min_content_width(&cell.text, font_size, font, should_break_long_tokens(cell))
+                    + padding;
+            if end - col == 1 {
+                max_content[col] = max_content[col].max(max_w);
+                min_content[col] = min_content[col].max(min_w);
+            } else {
+                spans.push((col, end - col, min_w, max_w));
+            }
+            col = end;
+        }
     }
 
-    let total = columns.iter().sum::<f32>();
-    if total <= 0.0 {
+    // Grow spanned columns so each spanning cell's content fits across them.
+    let grow = |widths: &mut [f32], start: usize, span: usize, need: f32| {
+        let current: f32 = widths[start..start + span].iter().sum();
+        if current < need {
+            let add = (need - current) / span as f32;
+            widths[start..start + span].iter_mut().for_each(|w| *w += add);
+        }
+    };
+    for (start, span, min_w, max_w) in spans {
+        grow(&mut min_content, start, span, min_w);
+        grow(&mut max_content, start, span, max_w);
+    }
+    for col in 0..column_count {
+        max_content[col] = max_content[col].max(min_content[col]);
+    }
+
+    // Prefer declared widths only when they fit and respect every column's
+    // min-content; otherwise size to content (matching a browser's auto layout).
+    let declared = &document.table_columns;
+    let declared_total: f32 = declared.iter().sum();
+    let use_declared = declared.len() == column_count
+        && declared_total > 0.0
+        && declared_total <= content_width
+        && declared
+            .iter()
+            .zip(&min_content)
+            .all(|(d, m)| *d + 0.5 >= *m);
+    let upper: Vec<f32> = if use_declared {
+        declared.clone()
+    } else {
+        max_content.clone()
+    };
+
+    let total_upper: f32 = upper.iter().sum();
+    let total_min: f32 = min_content.iter().sum();
+
+    if total_upper <= 0.0 {
+        // No measurable content: fall back to equal division.
+        let even = content_width / column_count as f32;
         return TableGeometry {
-            columns,
+            columns: vec![even; column_count],
             paint_scale: 1.0,
         };
     }
 
-    let column_scale = content_width / total;
-    let paint_scale = if has_declared_columns {
-        column_scale.min(1.0)
+    if total_upper <= content_width {
+        // Everything fits at its natural width; keep the font at its CSS size.
+        TableGeometry {
+            columns: upper,
+            paint_scale: 1.0,
+        }
+    } else if total_min <= content_width {
+        // Too wide, but shrinking multi-word columns toward their longest word
+        // makes it fit. Text wraps between words; font stays at its CSS size.
+        let flex = total_upper - total_min;
+        let t = if flex > 0.0 {
+            ((content_width - total_min) / flex).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let columns = upper
+            .iter()
+            .zip(&min_content)
+            .map(|(u, m)| m + (u - m) * t)
+            .collect();
+        TableGeometry {
+            columns,
+            paint_scale: 1.0,
+        }
     } else {
-        1.0
-    };
-
-    TableGeometry {
-        columns: columns.iter().map(|width| width * column_scale).collect(),
-        paint_scale,
+        // Wider than the page even with every column at its longest word: scale
+        // columns and font down uniformly to fit (shrink-to-fit), the way a
+        // browser's print path fits an over-wide table onto the page. The scale
+        // is available/min-content, so text stays as large as possible while
+        // every column keeps its content on one line.
+        let scale = content_width / total_min;
+        TableGeometry {
+            columns: min_content.iter().map(|m| m * scale).collect(),
+            paint_scale: scale,
+        }
     }
 }
 
@@ -1021,7 +1217,7 @@ fn wrap_text_with_mode(
 
         let word_width = estimate_text_width(word, font_size, font);
 
-        if break_long_tokens && word_width > max_width {
+        if break_long_tokens && word_width > max_width + WRAP_TOLERANCE {
             if !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
                 current_width = 0.0;
@@ -1031,7 +1227,9 @@ fn wrap_text_with_mode(
             continue;
         }
 
-        if !current.is_empty() && current_width + space_width + word_width > max_width {
+        if !current.is_empty()
+            && current_width + space_width + word_width > max_width + WRAP_TOLERANCE
+        {
             lines.push(std::mem::take(&mut current));
             current_width = 0.0;
         }
@@ -1526,14 +1724,20 @@ mod tests {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             flow: None,
-            table_columns: vec![20.0, 200.0],
+            table_columns: Vec::new(),
             images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
                 text: String::new(),
+                // Long enough that its single-line width exceeds the page, so
+                // auto layout must shrink the column and wrap it (min-content of
+                // each individual word still fits).
                 cells: vec![crate::html::TableCell {
-                    text: "This cell has enough words to wrap into multiple lines".to_string(),
+                    text: "This single table cell contains far more words than could \
+                           possibly fit on one line within the available page width so \
+                           the automatic table layout has to wrap it across several lines"
+                        .to_string(),
                     colspan: 1,
                     style: crate::html::CellStyle {
                         border: Some(true),
@@ -1594,12 +1798,15 @@ mod tests {
     }
 
     #[test]
-    fn clips_long_table_tokens_without_forced_breaking() {
+    fn shrinks_to_fit_a_table_wider_than_the_page() {
+        // A long unbreakable token cannot fit even at min-content, so the whole
+        // table (columns + font) is scaled down to fit — shrink-to-fit, matching
+        // a browser's print path, rather than clipping the data.
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             flow: None,
-            table_columns: vec![60.0],
+            table_columns: Vec::new(),
             images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -1626,27 +1833,24 @@ mod tests {
             margin_right: 10.0,
             margin_bottom: 10.0,
             margin_left: 10.0,
-            table_row_height: 18.0,
+            table_row_height: 0.0,
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
             base_dir: None,
+            paper: crate::layout::Paper::A4,
         };
 
         let pages = layout_document(&document, &options);
-        let text_area_width = pages[0].rects[0].width - 4.0;
 
+        // Scaled down onto a single line (font < CSS size) fitting the column box.
         assert_eq!(pages[0].lines.len(), 1);
+        assert!(pages[0].lines[0].font_size < 10.0);
         assert!(
-            estimate_text_width(&pages[0].lines[0].text, pages[0].lines[0].font_size, &crate::font::Font::helvetica())
-                > text_area_width
+            estimate_text_width(
+                &pages[0].lines[0].text,
+                pages[0].lines[0].font_size,
+                &crate::font::Font::helvetica()
+            ) <= pages[0].rects[0].width + 0.5
         );
-        assert!(pages[0]
-            .commands
-            .iter()
-            .any(|command| matches!(command, PaintCommand::PushClipRect(_))));
-        assert!(pages[0]
-            .commands
-            .iter()
-            .any(|command| matches!(command, PaintCommand::PopClip)));
     }
 
     #[test]
@@ -1686,6 +1890,7 @@ mod tests {
             table_row_height: 18.0,
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
             base_dir: None,
+            paper: crate::layout::Paper::A4,
         };
 
         let pages = layout_document(&document, &options);
@@ -1707,29 +1912,38 @@ mod tests {
     }
 
     #[test]
-    fn scales_table_paint_when_declared_columns_are_wider_than_page() {
+    fn scales_font_only_when_min_content_overflows_the_page() {
+        // A single unbreakable word wider than the page: even min-content cannot
+        // fit, so the table (columns + font) is scaled down uniformly to fit
+        // (shrink-to-fit). Content that fits is not scaled (other tests).
+        let long_word = "W".repeat(60);
         let document = Document {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             flow: None,
-            table_columns: vec![100.0, 300.0],
+            table_columns: Vec::new(),
             images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
                 text: String::new(),
                 cells: vec![crate::html::TableCell {
-                    text: "Wide".to_string(),
+                    text: long_word.clone(),
                     colspan: 1,
                     style: crate::html::CellStyle {
                         font_size: Some(10.0),
-                        padding_left: Some(4.0),
                         ..Default::default()
                     },
                 }],
             }],
         };
-        let geometry = table_geometry(&document, 200.0);
+        let font = crate::font::Font::helvetica();
+        let content_width = 200.0;
+        let geometry = table_geometry(&document, content_width, &font);
+
+        assert!(geometry.paint_scale < 1.0);
+        assert!((geometry.columns.iter().sum::<f32>() - content_width).abs() < 0.5);
+
         let pages = layout_document(
             &document,
             &RenderOptions {
@@ -1742,16 +1956,55 @@ mod tests {
                 margin_right: 10.0,
                 margin_bottom: 10.0,
                 margin_left: 10.0,
-                table_row_height: 18.0,
-                font: std::sync::Arc::new(crate::font::Font::helvetica()),
+                table_row_height: 0.0,
+                font: std::sync::Arc::new(font),
                 base_dir: None,
+                paper: crate::layout::Paper::A4,
             },
         );
+        // The painted font is the CSS size times the shrink-to-fit scale.
+        assert!((pages[0].lines[0].font_size - 10.0 * geometry.paint_scale).abs() < 0.01);
+    }
 
-        assert_eq!(geometry.columns, vec![50.0, 150.0]);
-        assert_eq!(geometry.paint_scale, 0.5);
-        assert_eq!(pages[0].lines[0].font_size, 5.0);
-        assert_eq!(pages[0].lines[0].x, 12.0);
+    #[test]
+    fn keeps_font_size_when_content_fits_the_page() {
+        // Declared columns far wider than the page, but sparse content: auto
+        // layout sizes columns to content and keeps the font at its CSS size,
+        // rather than force-fitting the declared widths and shrinking text.
+        let document = Document {
+            page_style: crate::html::PageStyle::default(),
+            table_style: crate::html::TableStyle::default(),
+            flow: None,
+            table_columns: vec![400.0, 400.0],
+            images: Vec::new(),
+            blocks: vec![Block {
+                kind: BlockKind::TableRow,
+                style: Default::default(),
+                text: String::new(),
+                cells: vec![
+                    crate::html::TableCell {
+                        text: "A".to_string(),
+                        colspan: 1,
+                        style: crate::html::CellStyle {
+                            font_size: Some(11.0),
+                            ..Default::default()
+                        },
+                    },
+                    crate::html::TableCell {
+                        text: "B".to_string(),
+                        colspan: 1,
+                        style: crate::html::CellStyle {
+                            font_size: Some(11.0),
+                            ..Default::default()
+                        },
+                    },
+                ],
+            }],
+        };
+        let font = crate::font::Font::helvetica();
+        let geometry = table_geometry(&document, 500.0, &font);
+        assert_eq!(geometry.paint_scale, 1.0);
+        assert!(geometry.columns.iter().sum::<f32>() < 500.0);
     }
 
     #[test]
@@ -1793,6 +2046,7 @@ mod tests {
                 table_row_height: 18.0,
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
                 base_dir: None,
+                paper: crate::layout::Paper::A4,
             },
         );
 
@@ -1878,6 +2132,7 @@ mod tests {
                 table_row_height: 18.0,
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
                 base_dir: None,
+                paper: crate::layout::Paper::A4,
             },
         );
 

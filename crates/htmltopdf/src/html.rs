@@ -1407,13 +1407,21 @@ impl Stylesheet {
                 self.universal_rules.push(index);
             }
 
-            for (combinator, compound) in &rule.selector.context {
+            for (position, (combinator, compound)) in rule.selector.context.iter().enumerate() {
                 match combinator {
                     Combinator::Descendant => {}
                     Combinator::Child => self.has_structural_combinator = true,
                     Combinator::NextSibling | Combinator::SubsequentSibling => {
                         self.has_structural_combinator = true;
-                        self.has_sibling_combinator = true;
+                        // A subject-adjacent sibling (`a + b`) is captured cheaply
+                        // by the subject's preceding-sibling signature. A sibling
+                        // deeper in the chain (`.x + .y .z`) would require scanning
+                        // an ancestor's siblings, so fall back to a per-element key.
+                        if position == 0 {
+                            self.has_sibling_combinator = true;
+                        } else {
+                            self.needs_precise_match = true;
+                        }
                     }
                 }
                 if let Some(tag) = &compound.tag {
@@ -1782,9 +1790,12 @@ fn prev_element_sibling(
 /// - Descendant only: the unordered set of relevant ancestor tokens. Order and
 ///   depth cannot matter, so this maximizes cache sharing.
 /// - Any `>`/`+`/`~`: an ordered, per-level fingerprint (nearest-first) of each
-///   ancestor's relevant tokens, and — when sibling combinators exist — each
-///   level's relevant preceding-sibling tokens. This is exact because a
-///   combinator walk can only ever reach ancestors and their preceding siblings.
+///   ancestor's relevant tokens, plus — when sibling combinators exist — the
+///   subject's relevant preceding-sibling tokens. Ancestor-level sibling context
+///   (`.x + .y .z`, a sibling combinator that is not adjacent to the subject) is
+///   handled by falling back to a per-element cache key (`needs_precise_match`),
+///   so this stays O(depth + subject siblings) rather than scanning every
+///   ancestor's siblings (which is O(n²) on a big table body).
 fn structural_signature(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
@@ -1824,15 +1835,17 @@ fn structural_signature(
         return tokens.into_iter().collect::<Vec<_>>().join(",");
     }
 
-    // Structural combinators: an ordered per-level fingerprint. Sibling context
-    // is only included when a sibling combinator is present.
-    let level_signature = |node_id: crate::dom::NodeId| -> String {
-        let own = relevant(node_id).join(".");
-        if !stylesheet.has_sibling_combinator {
-            return own;
-        }
+    // Structural combinators: an ordered per-level fingerprint of ancestors'
+    // own tokens (for `>`/descendant). The subject also records its relevant
+    // preceding-sibling tokens (for a subject-adjacent `+`/`~`); ancestor-level
+    // sibling combinators are covered by `needs_precise_match` instead, so we
+    // never scan an ancestor's siblings here.
+    let mut levels: Vec<String> = Vec::new();
+
+    let mut subject = relevant(id).join(".");
+    if stylesheet.has_sibling_combinator {
         let mut siblings: Vec<String> = Vec::new();
-        let mut prev = prev_element_sibling(dom, node_id);
+        let mut prev = prev_element_sibling(dom, id);
         while let Some(sibling_id) = prev {
             let tokens = relevant(sibling_id);
             if !tokens.is_empty() {
@@ -1840,13 +1853,13 @@ fn structural_signature(
             }
             prev = prev_element_sibling(dom, sibling_id);
         }
-        format!("{own}+{}", siblings.join(","))
-    };
+        subject = format!("{subject}+{}", siblings.join(","));
+    }
+    levels.push(subject);
 
-    let mut levels: Vec<String> = vec![level_signature(id)];
     let mut current = element_parent(dom, id);
     while let Some(node_id) = current {
-        levels.push(level_signature(node_id));
+        levels.push(relevant(node_id).join("."));
         current = element_parent(dom, node_id);
     }
     levels.join("/")

@@ -258,10 +258,15 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Inheritance (color, font-size, text-align, etc. flow from parents).
 - `display: none` (tables and flow content).
 - Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
-- `font-weight` (bold / numeric ≥ 600), `text-align` (left/center/right/justify/
+- `font-weight` (bold / numeric ≥ 600) — rendered as faux-bold (fill+stroke),
+  since one regular face is embedded; `text-align` (left/center/right/justify/
   start/end), headings `h1`–`h6`.
 - Tables: rows, cells, colspans, `<thead>/<tbody>/<tfoot>`, repeated headers,
-  per-cell styles, borders, backgrounds, alignment, text wrapping/clipping.
+  per-cell styles, borders, backgrounds, alignment, text wrapping/clipping, and
+  **browser-style automatic column layout** (min/max-content widths; declared
+  widths honored when they fit; over-wide tables shrink-to-fit like print output
+  instead of clipping). Cell text renders at its real CSS size, and row height is
+  content-driven (verified against Chrome's `--print-to-pdf`).
 - Flow content: a **nested block/inline box tree** — nested blocks, list and
   blockquote indentation, list markers (`•` / `1.`), and per-run inline
   `color`/`font-size`/bold within a paragraph, all wrapped and aligned.

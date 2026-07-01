@@ -724,15 +724,83 @@ Block-level `<img>` images — JPEG + PNG (2026-07-01):
   (492,721). Tests: 103 default / 108 with `js` (base64, JPEG header, PNG
   RGB/RGBA/Up-filter decode, and a full data-URI render).
 
+Table fidelity: content-based column layout + real font sizes (2026-07-01):
+
+- Verified against Chrome (`--headless --print-to-pdf`) on `reg-2-9-1.html`.
+  Root cause of the poor match: the old `table_geometry` scaled the declared
+  column widths (summing to ~1879pt) down to the page and scaled the *font* by
+  the same factor (~0.40) — so 10–11pt cell text rendered at ~4.4pt, with a fixed
+  18pt row-height floor inflating spacing.
+- Replaced it with a browser-style **automatic table layout**: each column gets a
+  min-content (widest word, or widest char when `overflow-wrap`/`word-break`
+  allow it) and a max-content (widest single line) width, including padding, with
+  colspan cells distributed across the columns they span. Declared `<col>` widths
+  are honored only when they collectively fit and respect min-content; otherwise
+  columns are sized to content. Distribution: content fits → natural widths at the
+  **full CSS font size**; too wide but min-content fits → shrink wide columns
+  toward their longest word (wrap, font unchanged); wider than the page even at
+  min-content → uniform **shrink-to-fit** (columns + font), matching a browser's
+  print scaling rather than clipping data.
+- Row height is now content-driven (`line-height ≈ font*1.18 + padding`) with no
+  fixed floor; a CSS-declared row height still acts as a minimum. Cell font-size
+  default is 11pt (was a 7/8.5pt fudge) and padding default ~1px, so the cascade's
+  real `font-size`/`padding` drive layout. Added a small wrap tolerance so text
+  that measures exactly the column width is not broken by a float rounding error.
+- Result vs Chrome on the fixture: data text ~7.8pt (Chrome ~7.8pt; was ~4.4pt);
+  a table that fits renders at full 11pt with row pitch 15.98pt (Chrome 16.5pt);
+  page count 46 (Chrome 32 — the residual gap is Chrome shrinking ~10% more and
+  Letter-vs-A4 geometry). Matching the intended **Calibri** needs the font
+  embedded (`--font Carlito`, the metric-compatible free clone, or `--font Arial`
+  to match Chrome's macOS fallback); the built-in Helvetica is close but wider.
+
+Font size, shrink-to-fit, and faux-bold (2026-07-01, follow-up):
+
+- Confirmed via Chrome's content stream that Chrome renders this fixture with a
+  page-level **shrink-to-fit** (data text ≈ 7pt on Letter landscape, not the
+  literal 10pt) because the 16-column table is far wider than the page. Our
+  `table_geometry` shrink-to-fit branch (font+columns scaled by
+  `available/min-content`) matches this; on A4 landscape the text is ~11% larger
+  than Chrome's Letter output purely because the page is wider (806 vs 734pt
+  content) — the same methodology, fit to a wider page.
+- **Faux-bold**: `font-weight:bold` (and `<th>`/bold cells) now render visibly
+  bold. `TextCommand`/`LinePiece` carry a `bold` flag (threaded from the cascade
+  and inline runs); the PDF writer draws bold glyphs with text render mode 2
+  (fill+stroke) at ~3% line width in the fill color — no second font face needed.
+  Header rows, the title, and label rows in the fixture now match Chrome's bold.
+- To match Chrome's actual output use `--font` (Chrome falls back to **Arial** on
+  macOS since Calibri is absent): `--font /System/Library/Fonts/Supplemental/Arial.ttf`
+  reproduces Chrome's glyph widths; `--font Carlito` gives the intended Calibri.
+
+Row-height scaling + `--paper`; near-1:1 with Chrome (2026-07-01, follow-up):
+
+- A CSS-declared table row height (the fixture's 20px = 15pt) was applied as a
+  fixed floor that was **not** scaled by the table's shrink-to-fit factor, so
+  rows stayed 15pt tall while the font/columns shrank to ~0.73 — inflating row
+  height ~1.4x and the page count. Fixed: the row-height floor is multiplied by
+  `paint_scale` (browser print scaling shrinks rows too). Fixture page count
+  dropped 46 → 37 on A4.
+- Added `PageSize::LETTER`/`LETTER_LANDSCAPE`, a `Paper` enum, and a CLI
+  `--paper a4|letter` flag (Chrome's default paper is Letter). On Letter with
+  `--font Arial`, the fixture is now **near-1:1 with Chrome**: 33 pages vs 32,
+  row pitch 10.9pt vs 10.5pt, data font/email width within ~4%, matching bold
+  headers, columns, and per-page row counts.
+- **Perf fix (O(n²) → O(n))**: `div + div` in the fixture's CSS set
+  `has_sibling_combinator`, which made `structural_signature` scan every
+  ancestor's preceding siblings — for each of 22k cells it walked the 1088-row
+  `<tbody>`, so the cascade took ~4.3s. The signature now scans only the
+  *subject's* own preceding siblings; ancestor-level sibling combinators
+  (`.x + .y .z`, rare) fall back to the per-element cache key. Full-fixture
+  render dropped **4.3s → 0.35s** (~48 MB RSS), vs Chrome's ~1.7s / ~840 MB —
+  see the README comparison table.
+
 Important limitation:
 
-- This is now a fast spreadsheet-table PDF with basic images, but still not a
-  fully faithful browser render. The fixture proves the low-memory/concurrency
-  direction is viable, but the engine still needs richer layout (inline/floated
-  images, flex/grid), broader CSS values, and visual validation before it can
-  replace Chromium. Selector coverage omits namespaces and `:link`-style
-  pseudo-classes; images are block-level only (no inline flow, `object-fit`, CSS
-  sizing, or remote `http` URLs yet).
+- This is now a fast spreadsheet-table PDF with basic images, close to Chrome for
+  this class of document, but still not a fully faithful general browser render.
+  It still needs richer layout (inline/floated images, flex/grid), broader CSS
+  values, a real bold font face (faux-bold is an approximation), and general
+  visual validation before it can replace Chromium. Selector coverage omits
+  namespaces and `:link`-style pseudo-classes; images are block-level only.
 
 ## Roadmap (foundation-first, ordered)
 

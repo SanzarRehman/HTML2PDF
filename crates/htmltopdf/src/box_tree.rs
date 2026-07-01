@@ -76,8 +76,8 @@ pub struct Edges {
 
 /// A contiguous run of inline text sharing one computed style. Text is stored
 /// verbatim (including its whitespace); the layout collapses runs of whitespace
-/// when it wraps. `bold` is carried for fidelity but has no glyph effect yet,
-/// because only a single (non-bold) font face is embedded today.
+/// when it wraps. `bold` renders as faux-bold (fill+stroke) in the PDF, since a
+/// single (regular) font face is embedded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InlineRun {
     pub text: String,
