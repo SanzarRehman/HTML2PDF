@@ -30,6 +30,22 @@ pub enum BoxChild {
     /// collapses whitespace across runs and wraps them into visual lines. A hard
     /// break (`<br>`) splits content into separate `Line` children.
     Line(Vec<InlineRun>),
+    /// A block-level `<img>`. Resolved after parsing by `html::resolve_images`.
+    Image(ImageBox),
+}
+
+/// A block-level image box. Before image resolution it carries only the source
+/// and any HTML `width`/`height` hints; resolution fills in `image_index` (into
+/// the document's image table) and the laid-out point `width`/`height`. An
+/// unresolved or failed image keeps `image_index == None` and is not painted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageBox {
+    pub src: String,
+    pub attr_width: Option<f32>,
+    pub attr_height: Option<f32>,
+    pub image_index: Option<usize>,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// A block-level box. `kind` drives the default font size (and the default
@@ -82,5 +98,9 @@ fn children_have_text(children: &[BoxChild]) -> bool {
     children.iter().any(|child| match child {
         BoxChild::Block(block) => children_have_text(&block.children),
         BoxChild::Line(runs) => runs.iter().any(|run| !run.text.trim().is_empty()),
+        // An image is visible content in its own right. This is evaluated both
+        // before image resolution (to keep an image-only document's flow tree)
+        // and after, so it counts regardless of whether `image_index` is set yet.
+        BoxChild::Image(_) => true,
     })
 }

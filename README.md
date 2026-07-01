@@ -33,6 +33,9 @@ HTML -> html5ever -> arena DOM -> cssparser -> cascade
 - **Selectable compressed PDFs**: generated text stays searchable/selectable.
 - **Unicode font support**: optional TrueType/OpenType embedding with Type0 /
   Identity-H PDFs, ToUnicode maps, and TrueType glyph subsetting when possible.
+- **Raster images**: `<img>` JPEG and PNG (including alpha) from file paths and
+  `data:` URIs, embedded as PDF image XObjects — JPEG passes through untouched
+  via `DCTDecode` and PNG is decoded in-house, so no image-codec dependency.
 - **Small dependency surface**: no async runtime, no browser, no web framework.
 
 ## Project Status
@@ -55,6 +58,9 @@ Works today:
   alignment, wrapping, clipping, and repeated table headers.
 - CSS colors, font sizes, bold text, text alignment, margins, padding (with
   vertical margin collapse), block backgrounds, and basic borders.
+- Block-level `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded
+  in-house, alpha as a soft mask), from file paths and `data:` URIs, with
+  `width`/`height` sizing and aspect-ratio preservation.
 - Pagination, page margins, landscape pages, compressed PDF streams.
 - Built-in Helvetica metrics and optional embedded TrueType/OpenType fonts.
 - Font subsetting for `glyf`-based TrueType fonts, with full-font fallback for
@@ -74,7 +80,8 @@ Not complete yet:
 - Dynamic pseudo-classes (`:hover`, `:focus`, …) and pseudo-elements
   (`::before`) — dropped, since they do not apply to static print output.
 - Broader JavaScript: `innerHTML`/`createElement`, DOM traversal, events, timers.
-- Images, SVG, canvas, flexbox, grid, floats, and absolute positioning.
+- Inline/floated images, `object-fit`, CSS-sized images, and remote (`http`)
+  image URLs; SVG, canvas, flexbox, grid, floats, and absolute positioning.
 - Full browser text shaping and baseline handling.
 - Exact non-Latin layout metrics for every script.
 - Complete CSS selector/property coverage.
@@ -221,7 +228,8 @@ Important engine modules:
 | `box_tree.rs` | Nested flow box tree |
 | `layout.rs` | Pagination, text wrapping, tables, and page layout |
 | `paint.rs` | Backend-neutral display-list commands |
-| `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, ToUnicode maps |
+| `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, image XObjects |
+| `image.rs` | `<img>` loading: `data:` URIs, JPEG headers, in-house PNG decoding |
 | `font.rs` | Font loading, metrics, WinAnsi encoding, and system font lookup |
 | `subset.rs` | Retain-GIDs TrueType glyph subsetter for embedded fonts |
 | `script.rs` | Bounded pre-layout JavaScript stage (`ScriptEngine`; Boa behind `js`) |
@@ -252,7 +260,7 @@ speed and memory stay visible as fidelity improves.
 ## Roadmap
 
 - Broaden CSS properties and computed-value coverage.
-- Add image support.
+- Broaden image support (inline/floated images, CSS sizing, remote URLs).
 - Add SVG support.
 - Broaden font subsetting and non-Latin text measurement.
 - Add visual comparison tests against browser output.

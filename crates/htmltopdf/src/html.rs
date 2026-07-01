@@ -17,6 +17,9 @@ pub struct Document {
     pub page_style: PageStyle,
     pub table_style: TableStyle,
     pub table_columns: Vec<f32>,
+    /// The document's image table, indexed by `ImageBox::image_index`. Empty
+    /// until [`resolve_images`] runs.
+    pub images: Vec<crate::image::DecodedImage>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +223,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
         page_style,
         table_style,
         table_columns,
+        images: Vec::new(),
     }
 }
 
@@ -244,6 +248,62 @@ fn build_flow(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Option<crate:
         children: acc.children,
     };
     root.has_text().then_some(root)
+}
+
+/// Load and measure every `<img>` in the flow tree, filling in each
+/// `ImageBox`'s `image_index` and laid-out point size and populating
+/// `document.images`. File-path sources resolve relative to `base_dir`
+/// (`data:` URIs need none). Images that fail to load are left unresolved and
+/// simply not painted. A no-op for table documents (which carry no flow tree).
+pub fn resolve_images(document: &mut Document, base_dir: Option<&std::path::Path>) {
+    let Some(flow) = document.flow.as_mut() else {
+        return;
+    };
+    let mut images = std::mem::take(&mut document.images);
+    resolve_images_in(&mut flow.children, base_dir, &mut images);
+    document.images = images;
+}
+
+fn resolve_images_in(
+    children: &mut [crate::box_tree::BoxChild],
+    base_dir: Option<&std::path::Path>,
+    images: &mut Vec<crate::image::DecodedImage>,
+) {
+    use crate::box_tree::BoxChild;
+    for child in children {
+        match child {
+            BoxChild::Block(block) => resolve_images_in(&mut block.children, base_dir, images),
+            BoxChild::Image(image) => resolve_image_box(image, base_dir, images),
+            BoxChild::Line(_) => {}
+        }
+    }
+}
+
+/// CSS pixels to PDF points at the reference 96 dpi (1px = 0.75pt).
+const PX_TO_PT: f32 = 72.0 / 96.0;
+
+fn resolve_image_box(
+    image: &mut crate::box_tree::ImageBox,
+    base_dir: Option<&std::path::Path>,
+    images: &mut Vec<crate::image::DecodedImage>,
+) {
+    let Some(decoded) = crate::image::load_image(&image.src, base_dir) else {
+        return;
+    };
+    let intrinsic_w = decoded.width as f32;
+    let intrinsic_h = decoded.height as f32;
+    // Resolve pixel dimensions from the HTML width/height hints, preserving the
+    // intrinsic aspect ratio when only one is given.
+    let (width_px, height_px) = match (image.attr_width, image.attr_height) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) if intrinsic_w > 0.0 => (w, w * intrinsic_h / intrinsic_w),
+        (None, Some(h)) if intrinsic_h > 0.0 => (h * intrinsic_w / intrinsic_h, h),
+        _ => (intrinsic_w, intrinsic_h),
+    };
+    image.width = width_px * PX_TO_PT;
+    image.height = height_px * PX_TO_PT;
+    image.image_index = Some(images.len());
+    images.push(decoded);
 }
 
 /// The inline style context threaded down the tree while building flow content.
@@ -322,6 +382,26 @@ fn build_node(
             if tag == "br" {
                 // A line break ends the current line but stays in this block.
                 acc.flush_line();
+            } else if tag == "img" {
+                // A block-level image. Resolved (loaded/measured) after parsing.
+                if let Some(src) = node.attr("src") {
+                    if !src.is_empty() {
+                        acc.flush_line();
+                        acc.children
+                            .push(crate::box_tree::BoxChild::Image(crate::box_tree::ImageBox {
+                                src: src.to_string(),
+                                attr_width: node
+                                    .attr("width")
+                                    .and_then(|v| v.trim().parse::<f32>().ok()),
+                                attr_height: node
+                                    .attr("height")
+                                    .and_then(|v| v.trim().parse::<f32>().ok()),
+                                image_index: None,
+                                width: 0.0,
+                                height: 0.0,
+                            }));
+                    }
+                }
             } else if is_block_tag(tag) {
                 acc.flush_line();
                 if let Some(block) = build_block(dom, id, computed, ctx, tag) {

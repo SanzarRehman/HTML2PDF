@@ -62,7 +62,13 @@ fn run() -> Result<(), String> {
     let html = fs::read_to_string(&input_path)
         .map_err(|error| format!("failed to read {}: {error}", input_path.display()))?;
 
-    let options = build_options(font.as_deref())?;
+    let mut options = build_options(font.as_deref())?;
+    // Resolve relative <img src> paths against the input file's directory.
+    if let Some(parent) = input_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            options = options.with_base_dir(parent);
+        }
+    }
     let pdf = render(&html, options, scripting)
         .map_err(|error| format!("failed to render {}: {error}", input_path.display()))?;
 

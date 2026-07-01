@@ -3,6 +3,7 @@ mod color;
 mod dom;
 mod font;
 mod html;
+mod image;
 mod layout;
 pub mod paint;
 mod pdf;
@@ -67,7 +68,15 @@ impl Engine {
         self.render_document(html::parse_scripted(html, engine, limits), options)
     }
 
-    fn render_document(&self, document: html::Document, options: RenderOptions) -> Result<Vec<u8>> {
+    fn render_document(
+        &self,
+        mut document: html::Document,
+        options: RenderOptions,
+    ) -> Result<Vec<u8>> {
+        // Load and measure `<img>` content before the emptiness check so an
+        // image-only document counts as renderable.
+        html::resolve_images(&mut document, options.base_dir.as_deref());
+
         let has_flow = document.flow.as_ref().is_some_and(|flow| flow.has_text());
         if document.blocks.is_empty() && !has_flow {
             return Err(Error::EmptyDocument);
@@ -75,7 +84,7 @@ impl Engine {
 
         let options = options.with_document_hints(&document);
         let pages = layout::layout_document(&document, &options);
-        pdf::write_pdf(&pages, &options).map_err(Into::into)
+        pdf::write_pdf(&pages, &document.images, &options).map_err(Into::into)
     }
 }
 

@@ -3,6 +3,7 @@ use std::io::Write;
 
 use flate2::{write::ZlibEncoder, Compression};
 
+use crate::image::{DecodedImage, ImageFilter};
 use crate::layout::{Page, RenderOptions};
 use crate::paint::PaintCommand;
 
@@ -23,14 +24,41 @@ impl fmt::Display for PdfError {
 
 impl std::error::Error for PdfError {}
 
-pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, PdfError> {
+pub fn write_pdf(
+    pages: &[Page],
+    images: &[DecodedImage],
+    options: &RenderOptions,
+) -> Result<Vec<u8>, PdfError> {
     let page_count = pages.len();
     let embedded = options.font.embedding();
     // An embedded font is written as a Type0/Identity-H composite, which needs
     // four extra objects after the pages: the descendant CIDFont, the
     // FontDescriptor, the FontFile2 program, and the ToUnicode CMap.
     let base_object_count = 3 + (page_count * 2);
-    let object_count = base_object_count + if embedded.is_some() { 4 } else { 0 };
+    let font_extra = if embedded.is_some() { 4 } else { 0 };
+
+    // Each embedded image is one XObject, plus one more for its soft mask when
+    // it carries alpha. Assign object ids after the font block.
+    let mut next_id = base_object_count + font_extra + 1;
+    let image_plans: Vec<ImagePlan> = images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let smask_id = image.smask.as_ref().map(|_| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            let object_id = next_id;
+            next_id += 1;
+            ImagePlan {
+                name: format!("Im{index}"),
+                object_id,
+                smask_id,
+            }
+        })
+        .collect();
+    let object_count = next_id - 1;
 
     if object_count > u16::MAX as usize {
         return Err(PdfError::TooManyObjects);
@@ -44,6 +72,19 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
     let descriptor_id = base_object_count + 2;
     let fontfile_id = base_object_count + 3;
     let tounicode_id = base_object_count + 4;
+
+    // Every page declares all image XObjects in its resources (unused ones are
+    // harmless), so a `/ImN Do` operator resolves regardless of page.
+    let xobject_resources = if image_plans.is_empty() {
+        String::new()
+    } else {
+        let entries = image_plans
+            .iter()
+            .map(|plan| format!("/{} {} 0 R", plan.name, plan.object_id))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(" /XObject << {entries} >>")
+    };
 
     // For an embedded font, resolve the glyph ids / widths / Unicode mapping for
     // exactly the characters this document uses.
@@ -128,10 +169,13 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
                 concat!(
                     "<< /Type /Page /Parent 2 0 R ",
                     "/MediaBox [0 0 {:.2} {:.2}] ",
-                    "/Resources << /Font << /F1 3 0 R >> >> ",
+                    "/Resources << /Font << /F1 3 0 R >>{} >> ",
                     "/Contents {} 0 R >>"
                 ),
-                options.page_size.width, options.page_size.height, content_id
+                options.page_size.width,
+                options.page_size.height,
+                xobject_resources,
+                content_id
             ),
         );
 
@@ -193,8 +237,47 @@ pub fn write_pdf(pages: &[Page], options: &RenderOptions) -> Result<Vec<u8>, Pdf
         writer.stream_object(tounicode_id, to_unicode_cmap(cid).as_bytes())?;
     }
 
+    // Image XObjects (and their soft masks). JPEG data passes through as
+    // `DCTDecode`; decoded samples are `FlateDecode`-compressed here.
+    for (image, plan) in images.iter().zip(&image_plans) {
+        if let (Some(smask_id), Some(alpha)) = (plan.smask_id, image.smask.as_ref()) {
+            let dict = format!(
+                "/Type /XObject /Subtype /Image /Width {} /Height {} \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+                image.width, image.height
+            );
+            writer.stream_with_dict(smask_id, &dict, &compress_stream(alpha)?);
+        }
+
+        let mut dict = format!(
+            "/Type /XObject /Subtype /Image /Width {} /Height {} \
+             /ColorSpace /{} /BitsPerComponent {} /Filter /{}",
+            image.width,
+            image.height,
+            image.color_space.pdf_name(),
+            image.bits_per_component,
+            image.filter.pdf_name(),
+        );
+        if let Some(smask_id) = plan.smask_id {
+            dict.push_str(&format!(" /SMask {smask_id} 0 R"));
+        }
+
+        let body = match image.filter {
+            ImageFilter::Dct => image.data.clone(),
+            ImageFilter::Flate => compress_stream(&image.data)?,
+        };
+        writer.stream_with_dict(plan.object_id, &dict, &body);
+    }
+
     writer.finish(catalog_id, object_count);
     Ok(writer.into_bytes())
+}
+
+/// Object ids assigned to one embedded image and its optional soft mask.
+struct ImagePlan {
+    name: String,
+    object_id: usize,
+    smask_id: Option<usize>,
 }
 
 /// A deterministic six-uppercase-letter subset tag (the `ABCDEF+` prefix PDF
@@ -305,6 +388,17 @@ fn page_content(
             PaintCommand::PopClip => {
                 content.push_str("Q\n");
             }
+            PaintCommand::Image(image) => {
+                // Image space is the unit square; the CTM scales/positions it so
+                // the image fills the box with lower-left corner (x, y).
+                content.push_str("q\n");
+                content.push_str(&format!(
+                    "{:.2} 0 0 {:.2} {:.2} {:.2} cm\n",
+                    image.width, image.height, image.x, image.y
+                ));
+                content.push_str(&format!("/Im{} Do\n", image.image_index));
+                content.push_str("Q\n");
+            }
             PaintCommand::Text(text) => {
                 content.push_str("BT\n");
                 content.push_str(&format!("/F1 {:.2} Tf\n", text.font_size));
@@ -396,6 +490,18 @@ impl PdfWriter {
         self.bytes.extend_from_slice(&compressed);
         self.bytes.extend_from_slice(b"endstream\nendobj\n");
         Ok(())
+    }
+
+    /// A stream object with a caller-supplied dictionary body (which must not
+    /// include `/Length`, appended here). `body` is written verbatim, so the
+    /// caller controls any filtering.
+    fn stream_with_dict(&mut self, id: usize, dict: &str, body: &[u8]) {
+        self.start_object(id);
+        self.bytes.extend_from_slice(
+            format!("<< {dict} /Length {} >>\nstream\n", body.len()).as_bytes(),
+        );
+        self.bytes.extend_from_slice(body);
+        self.bytes.extend_from_slice(b"\nendstream\nendobj\n");
     }
 
     /// A compressed font program stream. `/Length1` is the uncompressed length,
@@ -521,7 +627,7 @@ mod tests {
             Color::BLACK,
         );
 
-        let pdf = write_pdf(&[page], &options).expect("render");
+        let pdf = write_pdf(&[page], &[], &options).expect("render");
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/Subtype /Type0"));
         assert!(text.contains("/Encoding /Identity-H"));
@@ -546,7 +652,7 @@ mod tests {
 
         assert_eq!(escape_text("A (test) \\ value"), "A \\(test\\) \\\\ value");
 
-        let pdf = write_pdf(&[page], &RenderOptions::default()).expect("pdf should render");
+        let pdf = write_pdf(&[page], &[], &RenderOptions::default()).expect("pdf should render");
         assert!(pdf
             .windows(b"/Filter /FlateDecode".len())
             .any(|window| window == b"/Filter /FlateDecode"));

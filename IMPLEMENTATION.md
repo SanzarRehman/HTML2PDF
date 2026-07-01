@@ -694,14 +694,45 @@ Id, universal, attribute, and pseudo-class selectors (2026-07-01):
   key. The `reg-2-9-1` fixture uses none of these, so it stays on the fast path
   and output is byte-identical (492,721). Tests: 94 default / 99 with `js`.
 
+Block-level `<img>` images — JPEG + PNG (2026-07-01):
+
+- New `image.rs` loads an `<img src>` from a `data:` URI (base64 or literal) or a
+  file path (resolved against `RenderOptions.base_dir`, set by the CLI to the
+  input file's directory), sniffs the format by magic bytes, and produces a
+  `DecodedImage` for PDF embedding.
+- **JPEG** is embedded verbatim through PDF's `DCTDecode` filter — no pixel
+  decoder — after scanning the marker stream for the SOFn frame size and
+  component count (1 → DeviceGray, 3 → DeviceRGB).
+- **PNG** is decoded in-house with zero new dependencies: chunk parsing
+  (IHDR/PLTE/tRNS/IDAT/IEND), `flate2` inflate of the IDAT stream (the same crate
+  already used to compress PDF streams), scanline unfiltering (None/Sub/Up/
+  Average/Paeth), and color-type expansion for grayscale/RGB/palette/gray+alpha/
+  RGBA at 8 or 16 bit depth. Alpha is split into a separate 8-bit soft mask
+  (`/SMask`); palette `tRNS` becomes a per-pixel mask. Interlaced and sub-byte
+  depths are unsupported (the image is skipped).
+- Pipeline wiring: `box_tree::BoxChild::Image(ImageBox)`; `html::build_flow`
+  emits an unresolved `ImageBox` (src + `width`/`height` hints); a post-parse
+  `html::resolve_images` pass loads/measures each and fills `Document.images`;
+  `layout` scales to fit the content box, page-breaks the image as a unit, and
+  emits `PaintCommand::Image`; `pdf` writes image (and soft-mask) XObjects,
+  lists them in every page's `/Resources /XObject`, and paints them with
+  `q w 0 0 h x y cm /ImN Do Q`. Sizing uses `width`/`height` (CSS px → pt at
+  96 dpi) preserving aspect ratio, else the intrinsic size.
+- Verified end-to-end with `pdfimages`: a file-path PNG round-trips to a 3x2 RGB
+  image XObject whose extracted pixels match the source exactly. The
+  `reg-2-9-1` fixture has no images, so its output stays byte-identical
+  (492,721). Tests: 103 default / 108 with `js` (base64, JPEG header, PNG
+  RGB/RGBA/Up-filter decode, and a full data-URI render).
+
 Important limitation:
 
-- This is now a fast spreadsheet-table PDF, but still not a fully faithful
-  browser render. The fixture proves the low-memory/concurrency direction is
-  viable, but the engine still needs nested box-tree layout, font subsetting,
-  images, and visual validation before it can replace Chromium for documents
-  like this. Selector coverage still omits namespaces and `:link`-style link
-  pseudo-classes; computed-value coverage remains a subset of CSS.
+- This is now a fast spreadsheet-table PDF with basic images, but still not a
+  fully faithful browser render. The fixture proves the low-memory/concurrency
+  direction is viable, but the engine still needs richer layout (inline/floated
+  images, flex/grid), broader CSS values, and visual validation before it can
+  replace Chromium. Selector coverage omits namespaces and `:link`-style
+  pseudo-classes; images are block-level only (no inline flow, `object-fit`, CSS
+  sizing, or remote `http` URLs yet).
 
 ## Roadmap (foundation-first, ordered)
 
@@ -765,6 +796,11 @@ that attach cleanly once the spine exists.
 - [x] Add id, universal, and attribute selectors and structural pseudo-classes
       (`:nth-child`, `:*-of-type`, `:empty`, `:root`, `:not`); per-element cache
       key when these are used, shared key otherwise.
+- [x] Add block-level `<img>` support: JPEG (`DCTDecode`) and in-house PNG
+      decode (via `flate2`, alpha as `/SMask`), from file paths and `data:` URIs,
+      embedded as PDF image XObjects.
+- [ ] Broaden images: inline/floated flow, `object-fit`, CSS width/height,
+      remote (`http`) URLs, and sub-byte/interlaced PNG.
 - [ ] Move toward browser-complete computed values (more properties, shorthands,
       units); consider `:link` and namespace selectors.
 - [x] Add bounded dynamic-HTML execution design before implementing JavaScript

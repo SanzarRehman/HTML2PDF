@@ -89,7 +89,7 @@ We keep dependencies tiny on purpose. Here is **everything** we pull in:
 | **cssparser** | Spec-correct CSS tokenizing (also from Servo/Stylo). Handles comments, strings, `url()`, `@media`, `!important`. | `html.rs` |
 | **ttf-parser** | Reads TrueType/OpenType metrics (glyph advances, ascent/descent, bbox) for layout + the PDF font descriptor, when a font is embedded. | `font.rs` |
 | **fontdb** | Resolves a font *family name* (e.g. `Georgia`) to a font file from the system database. | `font.rs` |
-| **flate2** | Zip-compresses the PDF page content streams and embedded font (`/FlateDecode`). | `pdf.rs` |
+| **flate2** | Zip-compresses the PDF page content streams and embedded font (`/FlateDecode`); also inflates PNG `IDAT` for image decoding — one crate, reused. | `pdf.rs`, `image.rs` |
 | **markup5ever_rcdom** | *Test only.* A reference DOM we compare our own DOM against, to prove ours is correct. Not in the shipped binary. | `dom.rs` tests |
 | **boa_engine** | *Optional (`js` feature).* A pure-Rust JavaScript engine for the bounded pre-layout script stage. Absent from default builds. | `script.rs` |
 
@@ -146,6 +146,7 @@ crates/
       box_tree.rs  The nested block/inline box tree for non-table documents
       font.rs      Text measurement (real Helvetica widths) + WinAnsi encoding
       subset.rs    Retain-GIDs TrueType glyph subsetter for embedded fonts
+      image.rs     <img> loading: data URIs, JPEG headers, in-house PNG decode
       script.rs    Pre-layout scripting seam (ScriptEngine trait; no-op default)
       layout.rs    Placing boxes on pages, text wrapping, pagination, tables,
                    and recursive flow box-tree layout
@@ -281,18 +282,24 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   API (`getElementById`, `textContent`, `get/setAttribute`, `console.log`) and
   mutates the DOM before layout. Enable per render via
   `Engine::render_html_with_scripts` or the CLI `--js` flag.
+- **Images** — block-level `<img>` from file paths (resolved against the input's
+  directory) and `data:` URIs. JPEG embeds verbatim via `DCTDecode`; PNG is
+  decoded in-house (chunk parse, `flate2` inflate, unfilter, palette/alpha) with
+  its alpha channel emitted as a PDF soft mask. Sized by `width`/`height` with
+  aspect-ratio preservation, scaled to fit the page, and page-broken as a unit.
 
 **Not yet (the honest list)**
 
 - Per-side **border** width/style/color and rounded corners (borders are a
   uniform 1pt box today), `margin: auto` centering, and `box-sizing`.
-- Inline images and a true text baseline model. Tables keep their own
+- Inline (text-flowed) and floated images, `object-fit`, CSS-sized images, and
+  remote (`http`) image URLs; a true text baseline model. Tables keep their own
   specialized layout. (Over-long words now break to stay on the page; honoring
   `overflow-wrap`/`word-break` for explicit/earlier breaks is a follow-up.)
 - Broader **JavaScript**: `innerHTML`/`createElement`, DOM traversal, events,
   timers, and heap/wall-time limit enforcement (the loop-iteration limit is in).
 - Subsetting covers `glyf`-based TrueType; CFF/OpenType-CFF fonts embed in full.
-- **Images, SVG, flexbox, grid, absolute positioning.**
+- **SVG, flexbox, grid, absolute positioning.**
 
 The guiding rule (from PLAN.md): build real, spec-based behavior step by step,
 and don't claim support for something until it's actually implemented and tested.
@@ -317,8 +324,9 @@ Foundation first, so features attach to something solid. Done ✓ / next ▶:
 ✓ CID/Unicode font embedding (Type0/Identity-H + ToUnicode; any-language text)
 ✓ Font subsetting (retain-GIDs glyf/loca rebuild; embed only used glyphs)
 ✓ JavaScript pre-layout stage — first pass (Boa behind the `js` feature)
+✓ Block-level `<img>` images (JPEG DCTDecode + in-house PNG decode; XObjects)
 ▶ Broader JS DOM API (innerHTML/createElement) + heap/time limits
-· CFF/OpenType-CFF subsetting; per-side borders; inline images
+· CFF/OpenType-CFF subsetting; per-side borders; inline/floated images
 ```
 
 Every step keeps the test suite green and the test spreadsheet rendering

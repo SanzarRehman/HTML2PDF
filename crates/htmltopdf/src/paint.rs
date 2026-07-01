@@ -10,6 +10,18 @@ pub enum PaintCommand {
     StrokeLine(LineCommand),
     PushClipRect(RectCommand),
     PopClip,
+    Image(ImageCommand),
+}
+
+/// Draw image `image_index` (into the document's image table) into the box whose
+/// lower-left corner is `(x, y)`, scaled to `width` x `height` points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageCommand {
+    pub image_index: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

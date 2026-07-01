@@ -3,7 +3,7 @@ use crate::html::{
     BlockKind, Document, Overflow, OverflowWrap, PageOrientation, TableCell, TextAlign,
     VerticalAlign, WhiteSpace, WordBreak,
 };
-use crate::paint::{PaintCommand, RectCommand, TextCommand};
+use crate::paint::{ImageCommand, PaintCommand, RectCommand, TextCommand};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageSize {
@@ -35,6 +35,9 @@ pub struct RenderOptions {
     /// The font used for measurement and (if a TrueType) embedding. Defaults to
     /// the built-in Helvetica (not embedded).
     pub font: std::sync::Arc<crate::font::Font>,
+    /// Base directory for resolving relative `<img src>` file paths. `None`
+    /// disables file-path images (`data:` URIs still work).
+    pub base_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for RenderOptions {
@@ -48,6 +51,7 @@ impl Default for RenderOptions {
             margin_left: 48.0,
             table_row_height: 18.0,
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
+            base_dir: None,
         }
     }
 }
@@ -57,6 +61,13 @@ impl RenderOptions {
     pub fn with_font(mut self, source: &crate::font::FontSource) -> Result<Self, String> {
         self.font = std::sync::Arc::new(crate::font::Font::load(source)?);
         Ok(self)
+    }
+
+    /// Set the base directory used to resolve relative `<img src>` file paths
+    /// (typically the input HTML file's directory).
+    pub fn with_base_dir(mut self, base_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.base_dir = Some(base_dir.into());
+        self
     }
 
     pub fn with_document_hints(&self, document: &Document) -> Self {
@@ -262,8 +273,57 @@ fn layout_box_children(
                 flush_margin(y, carried);
                 layout_line_box(runs, x, width, align, pages, y, options);
             }
+            BoxChild::Image(image) => {
+                flush_margin(y, carried);
+                layout_image_box(image, x, width, pages, y, options);
+            }
         }
     }
+}
+
+/// Place a resolved block-level image: scale it to fit the content box if
+/// necessary, page-break if it does not fit the remaining space, then emit an
+/// image paint command with its lower-left corner at the current pen position.
+fn layout_image_box(
+    image: &crate::box_tree::ImageBox,
+    x: f32,
+    width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    options: &RenderOptions,
+) {
+    let Some(image_index) = image.image_index else {
+        return; // unresolved / failed to load: nothing to paint
+    };
+    if image.width <= 0.0 || image.height <= 0.0 {
+        return;
+    }
+
+    // Scale down to the content width and to a full page's height if oversized,
+    // preserving the aspect ratio.
+    let page_height = options.page_size.height - options.margin_top - options.margin_bottom;
+    let mut scale = 1.0_f32;
+    if image.width > width {
+        scale = scale.min(width / image.width);
+    }
+    if image.height * scale > page_height {
+        scale = scale.min(page_height / image.height);
+    }
+    let draw_width = image.width * scale;
+    let draw_height = image.height * scale;
+
+    // Move to a fresh page if the image does not fit the remaining space.
+    ensure_space(pages, y, options, draw_height);
+
+    let page = pages.last_mut().expect("at least one page");
+    page.commands.push(PaintCommand::Image(ImageCommand {
+        image_index,
+        x,
+        y: *y - draw_height,
+        width: draw_width,
+        height: draw_height,
+    }));
+    *y -= draw_height;
 }
 
 fn layout_block_box(
@@ -1159,6 +1219,7 @@ mod tests {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
+            images: Vec::new(),
             flow: Some(FlowRoot { children }),
             blocks: Vec::new(),
         };
@@ -1178,6 +1239,7 @@ mod tests {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
+            images: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
                     kind: BlockKind::Paragraph,
@@ -1244,6 +1306,7 @@ mod tests {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
+            images: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![para("first"), para("second")],
             }),
@@ -1272,6 +1335,7 @@ mod tests {
             page_style: crate::html::PageStyle::default(),
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
+            images: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
                     kind: BlockKind::Paragraph,
@@ -1328,6 +1392,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![30.0, 70.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1373,6 +1438,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![100.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1408,6 +1474,7 @@ mod tests {
             },
             flow: None,
             table_columns: vec![100.0, 100.0, 100.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1460,6 +1527,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![20.0, 200.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1497,6 +1565,7 @@ mod tests {
                 row_height: Some(15.0),
             },
             table_columns: vec![20.0, 200.0],
+            images: Vec::new(),
             flow: None,
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -1531,6 +1600,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![60.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1558,6 +1628,7 @@ mod tests {
             margin_left: 10.0,
             table_row_height: 18.0,
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
+            base_dir: None,
         };
 
         let pages = layout_document(&document, &options);
@@ -1585,6 +1656,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![60.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1613,6 +1685,7 @@ mod tests {
             margin_left: 10.0,
             table_row_height: 18.0,
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
+            base_dir: None,
         };
 
         let pages = layout_document(&document, &options);
@@ -1640,6 +1713,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![100.0, 300.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1670,6 +1744,7 @@ mod tests {
                 margin_left: 10.0,
                 table_row_height: 18.0,
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
+                base_dir: None,
             },
         );
 
@@ -1686,6 +1761,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![100.0, 300.0],
+            images: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -1716,6 +1792,7 @@ mod tests {
                 margin_left: 10.0,
                 table_row_height: 18.0,
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
+                base_dir: None,
             },
         );
 
@@ -1783,6 +1860,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             flow: None,
             table_columns: vec![20.0, 80.0],
+            images: Vec::new(),
             blocks,
         };
         let pages = layout_document(
@@ -1799,6 +1877,7 @@ mod tests {
                 margin_left: 10.0,
                 table_row_height: 18.0,
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
+                base_dir: None,
             },
         );
 
