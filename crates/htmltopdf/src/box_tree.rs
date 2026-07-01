@@ -12,7 +12,7 @@
 //! them interleaved as `BoxChild`s, which is how anonymous block boxes behave.
 
 use crate::color::Color;
-use crate::html::{BlockKind, TextAlign};
+use crate::html::{BlockKind, TableCell, TextAlign};
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
 /// itself contributes no spacing of its own — only its children do.
@@ -32,6 +32,28 @@ pub enum BoxChild {
     Line(Vec<InlineRun>),
     /// A block-level `<img>`. Resolved after parsing by `html::resolve_images`.
     Image(ImageBox),
+    /// A `<table>` embedded in flow content, laid out in document order alongside
+    /// surrounding headings/paragraphs (rather than the mutually-exclusive
+    /// spreadsheet path). Rows are pre-collected from the `<table>` subtree.
+    Table(TableBox),
+}
+
+/// A table living inside the flow tree. `rows` are the collected `<tr>`s (with
+/// their header/body/footer kind); `columns` are declared `<col>` widths (empty
+/// → fully automatic sizing); `row_height` mirrors the document-level table row
+/// height. Column widths and geometry are resolved at layout time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableBox {
+    pub rows: Vec<TableRow>,
+    pub columns: Vec<f32>,
+    pub row_height: Option<f32>,
+}
+
+/// One row of a [`TableBox`]: its section kind and its cells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRow {
+    pub kind: BlockKind,
+    pub cells: Vec<TableCell>,
 }
 
 /// A block-level image box. Before image resolution it carries the source, any
@@ -98,10 +120,18 @@ pub struct InlineRun {
 }
 
 impl FlowRoot {
-    /// True when the tree carries no visible text at all (e.g. a document that is
-    /// only whitespace or `display:none`). Used to treat such input as empty.
+    /// True when the tree carries no visible content at all (e.g. a document that
+    /// is only whitespace or `display:none`). Used to treat such input as empty.
     pub fn has_text(&self) -> bool {
         children_have_text(&self.children)
+    }
+
+    /// True when the tree has any non-table content (text, images) — i.e. the
+    /// document is *not* a bare table. A pure-table document falls back to the
+    /// dedicated spreadsheet layout path; a mixed one is laid out as flow with the
+    /// table embedded in document order.
+    pub fn has_nontable_content(&self) -> bool {
+        children_have_nontable(&self.children)
     }
 }
 
@@ -113,5 +143,15 @@ fn children_have_text(children: &[BoxChild]) -> bool {
         // before image resolution (to keep an image-only document's flow tree)
         // and after, so it counts regardless of whether `image_index` is set yet.
         BoxChild::Image(_) => true,
+        BoxChild::Table(table) => table.rows.iter().any(|row| !row.cells.is_empty()),
+    })
+}
+
+fn children_have_nontable(children: &[BoxChild]) -> bool {
+    children.iter().any(|child| match child {
+        BoxChild::Block(block) => children_have_nontable(&block.children),
+        BoxChild::Line(runs) => runs.iter().any(|run| !run.text.trim().is_empty()),
+        BoxChild::Image(_) => true,
+        BoxChild::Table(_) => false,
     })
 }

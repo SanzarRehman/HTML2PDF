@@ -221,13 +221,22 @@ fn finish(dom: crate::dom::Dom) -> Document {
     let stylesheet = parse_stylesheet(&css);
     let computed = compute_inherited_styles(&dom, &stylesheet);
 
-    let blocks = tables_from_dom(&dom, &stylesheet, &computed);
-    // Tables and flow content are mutually exclusive paths: only build the flow
-    // box tree when the document has no table rows.
-    let flow = if blocks.is_empty() {
-        build_flow(&dom, &computed)
-    } else {
-        None
+    // Build the flow box tree, with any `<table>` embedded as a `Table` box.
+    let env = FlowEnv {
+        stylesheet: &stylesheet,
+        computed: &computed,
+        table_columns: &table_columns,
+        row_height: table_style.row_height,
+    };
+    let flow = build_flow(&dom, &env);
+
+    // A document with real flow content around its tables is laid out as flow
+    // (headings/paragraphs and tables interleaved in document order). A bare
+    // table falls back to the dedicated spreadsheet path (`blocks`), preserving
+    // its fast, well-tuned layout.
+    let (blocks, flow) = match flow {
+        Some(root) if root.has_nontable_content() => (Vec::new(), Some(root)),
+        _ => (tables_from_dom(&dom, &stylesheet, &computed), None),
     };
 
     Document {
@@ -240,13 +249,23 @@ fn finish(dom: crate::dom::Dom) -> Document {
     }
 }
 
+/// Shared context threaded through the flow builder: the parsed stylesheet and
+/// computed styles (for table-section resolution) plus the document-level table
+/// geometry that embedded `Table` boxes inherit.
+struct FlowEnv<'a> {
+    stylesheet: &'a Stylesheet,
+    computed: &'a ComputedStyles,
+    table_columns: &'a [f32],
+    row_height: Option<f32>,
+}
+
 /// Lower the DOM into the flow box tree (ADR 0002 step 8) for non-table
 /// documents: a nested tree of block boxes whose leaves are runs of styled
 /// inline text. Block-level elements open a child box (carrying their computed
 /// indent/alignment and a resolved font size); inline elements thread their
 /// computed style into the runs they contain; `display: none` subtrees are
 /// skipped. Returns `None` when the document carries no visible text.
-fn build_flow(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Option<crate::box_tree::FlowRoot> {
+fn build_flow(dom: &crate::dom::Dom, env: &FlowEnv) -> Option<crate::box_tree::FlowRoot> {
     let root_ctx = FlowCtx {
         font_size: crate::layout::font_size_for(BlockKind::Paragraph),
         bold: false,
@@ -256,7 +275,7 @@ fn build_flow(dom: &crate::dom::Dom, computed: &ComputedStyles) -> Option<crate:
         align: TextAlign::Left,
     };
     let mut acc = ChildAcc::default();
-    build_node(dom, dom.root(), computed, root_ctx, &mut acc);
+    build_node(dom, dom.root(), env, root_ctx, &mut acc);
     acc.flush_line();
 
     let root = crate::box_tree::FlowRoot {
@@ -289,7 +308,8 @@ fn resolve_images_in(
         match child {
             BoxChild::Block(block) => resolve_images_in(&mut block.children, base_dir, images),
             BoxChild::Image(image) => resolve_image_box(image, base_dir, images),
-            BoxChild::Line(_) => {}
+            // Table cells carry no `<img>` content in the current model.
+            BoxChild::Line(_) | BoxChild::Table(_) => {}
         }
     }
 }
@@ -385,18 +405,19 @@ impl ChildAcc {
 fn build_node(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
-    computed: &ComputedStyles,
+    env: &FlowEnv,
     ctx: FlowCtx,
     acc: &mut ChildAcc,
 ) {
     use crate::dom::NodeData;
 
+    let computed = env.computed;
     let node = dom.node(id);
     match &node.data {
         NodeData::Text(text) => acc.push_text(text, &ctx),
         NodeData::Document => {
             for &child in &node.children {
-                build_node(dom, child, computed, ctx, acc);
+                build_node(dom, child, env, ctx, acc);
             }
         }
         NodeData::Element { name, .. } => {
@@ -409,6 +430,28 @@ fn build_node(
             if tag == "br" {
                 // A line break ends the current line but stays in this block.
                 acc.flush_line();
+            } else if tag == "table" {
+                // Embed the table as a flow child, in document order. Its rows are
+                // collected from this subtree; geometry is resolved at layout.
+                acc.flush_line();
+                let mut rows = Vec::new();
+                collect_table_rows(dom, id, TableSection::Body, env.stylesheet, computed, &mut rows);
+                let rows: Vec<crate::box_tree::TableRow> = rows
+                    .into_iter()
+                    .map(|block| crate::box_tree::TableRow {
+                        kind: block.kind,
+                        cells: block.cells,
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    acc.children.push(crate::box_tree::BoxChild::Table(
+                        crate::box_tree::TableBox {
+                            rows,
+                            columns: env.table_columns.to_vec(),
+                            row_height: env.row_height,
+                        },
+                    ));
+                }
             } else if tag == "img" {
                 // A block-level image. Resolved (loaded/measured) after parsing.
                 if let Some(src) = node.attr("src") {
@@ -434,7 +477,7 @@ fn build_node(
                 }
             } else if is_block_tag(tag) {
                 acc.flush_line();
-                if let Some(block) = build_block(dom, id, computed, ctx, tag) {
+                if let Some(block) = build_block(dom, id, env, ctx, tag) {
                     acc.children.push(crate::box_tree::BoxChild::Block(block));
                 }
             } else {
@@ -442,7 +485,7 @@ fn build_node(
                 // let its children contribute to the enclosing line.
                 let child_ctx = inline_ctx(&ctx, computed, id, tag);
                 for &child in &node.children {
-                    build_node(dom, child, computed, child_ctx, acc);
+                    build_node(dom, child, env, child_ctx, acc);
                 }
             }
         }
@@ -453,10 +496,11 @@ fn build_node(
 fn build_block(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
-    computed: &ComputedStyles,
+    env: &FlowEnv,
     parent: FlowCtx,
     tag: &str,
 ) -> Option<crate::box_tree::BlockBox> {
+    let computed = env.computed;
     let kind = block_kind_for(tag);
     let own = &computed.style[id];
 
@@ -505,7 +549,7 @@ fn build_block(
         acc.push_text(&marker, &child_ctx);
     }
     for &child in &dom.node(id).children {
-        build_node(dom, child, computed, child_ctx, &mut acc);
+        build_node(dom, child, env, child_ctx, &mut acc);
     }
     acc.flush_line();
 

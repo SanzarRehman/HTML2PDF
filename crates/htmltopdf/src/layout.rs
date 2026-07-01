@@ -366,8 +366,54 @@ fn layout_box_children(
                 flush_margin(y, carried);
                 layout_image_box(image, x, width, pages, y, options);
             }
+            BoxChild::Table(table) => {
+                layout_table_box(table, width, pages, y, carried, options);
+            }
         }
     }
+}
+
+/// Lay out a flow-embedded table in document order, sharing the page/`y` cursor
+/// with the surrounding flow content. Geometry is resolved from the table's own
+/// rows and declared columns; header rows repeat across page breaks. Cells are
+/// painted at the left margin (like the spreadsheet path), so this does not yet
+/// honor a left indent from an enclosing block.
+fn layout_table_box(
+    table: &crate::box_tree::TableBox,
+    width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    carried: &mut f32,
+    options: &RenderOptions,
+) {
+    // The table's top margin collapses with the margin carried from above; its
+    // bottom margin is left as the new carried value. Both give surrounding flow
+    // text room to clear the table's edges (a table row has no line leading of
+    // its own, unlike a paragraph).
+    *carried = carried.max(TABLE_FLOW_MARGIN);
+    flush_margin(y, carried);
+
+    let rows: Vec<&[TableCell]> = table.rows.iter().map(|row| row.cells.as_slice()).collect();
+    let geometry = table_geometry_cells(&rows, &table.columns, width, &options.font);
+
+    // The row-height floor comes from the table's own CSS row height.
+    let mut opts = options.clone();
+    opts.table_row_height = table.row_height.unwrap_or(0.0);
+
+    let mut repeated_header: Option<Vec<TableCell>> = None;
+    for row in &table.rows {
+        if repeated_header.is_none() && row.kind == BlockKind::TableHeaderRow {
+            repeated_header = Some(row.cells.clone());
+        }
+        let header = if row.kind == BlockKind::TableHeaderRow {
+            None
+        } else {
+            repeated_header.as_deref()
+        };
+        layout_table_row(&row.cells, &geometry, pages, y, &opts, header);
+    }
+
+    *carried = TABLE_FLOW_MARGIN;
 }
 
 /// Place a resolved block-level image: scale it to fit the content box if
@@ -1100,6 +1146,11 @@ const DEFAULT_BORDER_WIDTH: f32 = 0.75;
 /// default). Real spreadsheet exports set padding explicitly.
 const DEFAULT_CELL_PADDING: f32 = 1.0;
 
+/// Vertical margin (pt) above and below a flow-embedded table, so surrounding
+/// paragraphs clear its edges (table rows carry no line leading of their own).
+/// Collapses with adjacent block margins like any CSS vertical margin.
+const TABLE_FLOW_MARGIN: f32 = 10.0;
+
 fn cell_font_size(cell: &TableCell) -> f32 {
     cell.style.font_size.unwrap_or(DEFAULT_CELL_FONT_SIZE)
 }
@@ -1137,12 +1188,30 @@ fn min_content_width(text: &str, font_size: f32, font: &crate::font::Font, break
 /// content fits → use it as-is at full font size; too wide but min-content fits →
 /// shrink wide columns toward their min-content (text wraps, font stays); even
 /// min-content overflows → only then scale the font down (`paint_scale`).
+/// Document-path wrapper: build the row cell-slices from `document.blocks` and
+/// delegate to [`table_geometry_cells`].
 fn table_geometry(document: &Document, content_width: f32, font: &crate::font::Font) -> TableGeometry {
-    let column_count = document
+    let rows: Vec<&[TableCell]> = document
         .blocks
         .iter()
         .filter(|block| is_table_row_kind(block.kind))
-        .map(|block| block.cells.iter().map(|cell| cell.colspan.max(1)).sum::<usize>())
+        .map(|block| block.cells.as_slice())
+        .collect();
+    table_geometry_cells(&rows, &document.table_columns, content_width, font)
+}
+
+/// Compute table column widths (browser-style automatic table layout) from a set
+/// of rows (each a slice of cells) and any declared column widths. Shared by the
+/// spreadsheet `blocks` path and flow-embedded `Table` boxes.
+fn table_geometry_cells(
+    rows: &[&[TableCell]],
+    declared: &[f32],
+    content_width: f32,
+    font: &crate::font::Font,
+) -> TableGeometry {
+    let column_count = rows
+        .iter()
+        .map(|cells| cells.iter().map(|cell| cell.colspan.max(1)).sum::<usize>())
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1152,9 +1221,9 @@ fn table_geometry(document: &Document, content_width: f32, font: &crate::font::F
     // Cells spanning multiple columns constrain the spanned columns' totals.
     let mut spans: Vec<(usize, usize, f32, f32)> = Vec::new();
 
-    for block in document.blocks.iter().filter(|b| is_table_row_kind(b.kind)) {
+    for cells in rows {
         let mut col = 0;
-        for cell in &block.cells {
+        for cell in cells.iter() {
             if col >= column_count {
                 break;
             }
@@ -1194,7 +1263,6 @@ fn table_geometry(document: &Document, content_width: f32, font: &crate::font::F
 
     // Prefer declared widths only when they fit and respect every column's
     // min-content; otherwise size to content (matching a browser's auto layout).
-    let declared = &document.table_columns;
     let declared_total: f32 = declared.iter().sum();
     let use_declared = declared.len() == column_count
         && declared_total > 0.0
@@ -1204,7 +1272,7 @@ fn table_geometry(document: &Document, content_width: f32, font: &crate::font::F
             .zip(&min_content)
             .all(|(d, m)| *d + 0.5 >= *m);
     let upper: Vec<f32> = if use_declared {
-        declared.clone()
+        declared.to_vec()
     } else {
         max_content.clone()
     };
