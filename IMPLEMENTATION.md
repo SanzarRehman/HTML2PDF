@@ -850,6 +850,27 @@ that attach cleanly once the spine exists.
       the CLI `--js` flag; default builds are unchanged. Broader DOM APIs,
       `innerHTML`/`createElement`, and heap/wall-time enforcement are follow-ups.
 
+### Next up (prioritized)
+
+The current front of the queue (rough value order). Details for each are in the
+feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
+
+- [ ] **Finish flexbox**: `align-items` (center/end/stretch, needs per-item
+      height measurement), `flex-direction: column`, inline flex items (wrap runs
+      into anonymous items), `flex-wrap`, explicit `flex-shrink`/`order`, and flex
+      rows that span a page break. *(First-pass row flex already shipped.)*
+- [ ] **CSS grid** (`display: grid`): track sizing, spans, auto-placement.
+- [ ] **`position` / `float`**: relative/absolute positioning subset and floated
+      boxes with text wrap — needed for real page layouts.
+- [ ] **Text shaping via `rustybuzz` (HarfBuzz)**: kerning, ligatures, and
+      CJK/Arabic/emoji + bidi + font fallback. Biggest *fidelity* lever — replaces
+      the per-character advance estimate that drives every line break and column
+      fit, so it is the best path to true Chromium parity.
+- [ ] **Extend live-DOM JS** (ADR 0008): `document.createElement`/`appendChild`/
+      `removeChild`; and a decision record for/against mid-script layout reads
+      (`getBoundingClientRect`) — the genuinely hard part left after the spike.
+- [ ] **`line-height`** (currently fixed leading `font×1.35` flow / `×1.18` cells).
+
 ### Features (attach after the spine)
 
 - [ ] Add a real CSS parser and computed style model.
@@ -911,7 +932,16 @@ that attach cleanly once the spine exists.
       `letter-spacing`, and `text-indent`.
 - [x] Add bounded dynamic-HTML execution design before implementing JavaScript
       (ADR 0006 + the `script.rs` seam: `ScriptEngine` trait, `ScriptLimits`,
-      `ScriptReport`, default `NoopScriptEngine`; no engine wired in yet).
+      `ScriptReport`, default `NoopScriptEngine`).
+- [x] Wire in the Boa engine behind the `js` feature: inline scripts run before
+      layout against a minimal `document` DOM (`getElementById`, `textContent`,
+      `get/setAttribute`, `console.log`) within `ScriptLimits`. Opt-in via
+      `Engine::render_html_with_scripts` / CLI `--js`.
+- [x] **Live-DOM `innerHTML`** (ADR 0008): structural pre-layout mutation via
+      cross-arena grafting; reflow + re-pagination come for free from the
+      pre-layout model, and peak RAM stays bounded. **Not yet done:**
+      `createElement`/`appendChild`/`removeChild`, and mid-script layout reads
+      (`getBoundingClientRect`), which remain the hard, deferred part.
 - [ ] Add explicit cell overflow modes: visible, hidden, clip, and ellipsis.
 - [x] Add first-pass word-break and overflow-wrap support.
 - [x] **Render flow content and tables in the same document.** *(Was: a document
