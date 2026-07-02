@@ -109,7 +109,10 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 |---|---|---|
 | Inline `<script>`, bounded pre-layout run (Boa) | ✅ | Loop-iteration limit. |
 | `document.getElementById`, `textContent`, `get/setAttribute`, `console.log` | ✅ | |
-| `innerHTML`, `createElement`, events, timers, `fetch`, layout reads | ❌ | |
+| `innerHTML` (get/set) | ✅ | Structural mutation via fragment parse + graft (ADR 0008). Node budget enforced. |
+| `createElement`, `createTextNode`, `appendChild`, `removeChild`, `document.body` | ✅ | Detached-node creation, attach/move/reparent with cycle guard, detach (ADR 0009). Created nodes get normal CSS cascade. |
+| `insertBefore`, `cloneNode`, `querySelector`, `parentNode`/`children` traversal | ❌ | |
+| Events, timers, `fetch`, layout reads (`getBoundingClientRect`) | ❌ | Layout reads rejected by design — see ADR 0009. |
 
 ## PDF output
 

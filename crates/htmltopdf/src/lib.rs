@@ -150,4 +150,28 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF-1.7\n"));
         assert!(pdf.ends_with(b"%%EOF\n"));
     }
+
+    /// A document whose *only* renderable content is script-built must render:
+    /// proves createElement/appendChild feed the layout pipeline end to end.
+    #[cfg(feature = "js")]
+    #[test]
+    fn script_built_content_renders() {
+        use super::{BoaScriptEngine, ScriptLimits};
+        let html = "<script>\
+            var h = document.createElement('h1');\
+            h.textContent = 'Built by script';\
+            document.body.appendChild(h);\
+            </script>";
+
+        let pdf = Engine::new()
+            .render_html_with_scripts(
+                html,
+                RenderOptions::default(),
+                &BoaScriptEngine,
+                &ScriptLimits::default(),
+            )
+            .expect("script-built document should render");
+
+        assert!(pdf.starts_with(b"%PDF-1.7\n"));
+    }
 }

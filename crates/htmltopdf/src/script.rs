@@ -204,14 +204,68 @@ mod boa {
             },
             host.clone(),
         );
+        // document.createElement(tag) / document.createTextNode(text): detached
+        // arena nodes, attached later via appendChild. Each creation draws one
+        // node from the script budget; past the cap they return null.
+        let create_element = NativeFunction::from_copy_closure_with_captures(
+            |_this, args, host: &Host, ctx| {
+                let tag = args
+                    .get_or_undefined(0)
+                    .to_string(ctx)?
+                    .to_std_string_escaped();
+                let node = {
+                    let mut inner = host.0.borrow_mut();
+                    if inner.report.nodes_added >= inner.max_new_nodes {
+                        inner.report.limit_hit = Some(super::ScriptLimit::Nodes);
+                        return Ok(JsValue::null());
+                    }
+                    inner.report.nodes_added += 1;
+                    inner.dom.create_element(&tag)
+                };
+                Ok(make_element(node, host, ctx))
+            },
+            host.clone(),
+        );
+        let create_text = NativeFunction::from_copy_closure_with_captures(
+            |_this, args, host: &Host, ctx| {
+                let text = args
+                    .get_or_undefined(0)
+                    .to_string(ctx)?
+                    .to_std_string_escaped();
+                let node = {
+                    let mut inner = host.0.borrow_mut();
+                    if inner.report.nodes_added >= inner.max_new_nodes {
+                        inner.report.limit_hit = Some(super::ScriptLimit::Nodes);
+                        return Ok(JsValue::null());
+                    }
+                    inner.report.nodes_added += 1;
+                    inner.dom.create_text_node(&text)
+                };
+                Ok(make_element(node, host, ctx))
+            },
+            host.clone(),
+        );
+
+        // document.body: element handle for the <body> node (html5ever always
+        // synthesizes one for a document parse).
+        let body = host.0.borrow().dom.body();
+        let body_value = match body {
+            Some(node) => make_element(node, &host, context),
+            None => JsValue::null(),
+        };
+
         let document = ObjectInitializer::new(context)
             .function(get_by_id, js_string!("getElementById"), 1)
+            .function(create_element, js_string!("createElement"), 1)
+            .function(create_text, js_string!("createTextNode"), 1)
+            .property(js_string!("body"), body_value, Attribute::ENUMERABLE)
             .build();
         let _ = context.register_global_property(js_string!("document"), document, Attribute::all());
     }
 
     /// Build a JS object representing an element: it stashes the node id and
-    /// exposes `textContent` (get/set), `getAttribute`, and `setAttribute`.
+    /// exposes `textContent`/`innerHTML` (get/set), `getAttribute`/`setAttribute`,
+    /// and `appendChild`/`removeChild`.
     fn make_element(node: NodeId, host: &Host, context: &mut Context) -> JsValue {
         let get_text = NativeFunction::from_copy_closure_with_captures(
             |this, _args, host: &Host, ctx| {
@@ -301,6 +355,38 @@ mod boa {
             host.clone(),
         );
 
+        // appendChild(child): attach (or move) `child` as this element's last
+        // child. Returns the child, or null if the DOM refused the move (cycle,
+        // text-node parent, …). No budget draw — the node was paid for at
+        // creation, and moves don't grow the arena.
+        let append_child = NativeFunction::from_copy_closure_with_captures(
+            |this, args, host: &Host, ctx| {
+                let parent = node_id_of(this, ctx)?;
+                let child_value = args.get_or_undefined(0).clone();
+                let child = node_id_of(&child_value, ctx)?;
+                let ok = host.0.borrow_mut().dom.append_child(parent, child);
+                Ok(if ok { child_value } else { JsValue::null() })
+            },
+            host.clone(),
+        );
+        // removeChild(child): detach and return the child (null if it was not a
+        // child of this element — no throw, degrade gracefully).
+        let remove_child = NativeFunction::from_copy_closure_with_captures(
+            |this, args, host: &Host, ctx| {
+                let parent = node_id_of(this, ctx)?;
+                let child_value = args.get_or_undefined(0).clone();
+                let child = node_id_of(&child_value, ctx)?;
+                let mut inner = host.0.borrow_mut();
+                if inner.dom.remove_child(parent, child) {
+                    inner.report.nodes_removed += 1;
+                    Ok(child_value)
+                } else {
+                    Ok(JsValue::null())
+                }
+            },
+            host.clone(),
+        );
+
         // `.accessor` wants `JsFunction`s; convert before borrowing `context`
         // mutably for the object builder.
         let get_fn = get_text.to_js_function(context.realm());
@@ -324,6 +410,8 @@ mod boa {
             )
             .function(set_attr, js_string!("setAttribute"), 2)
             .function(get_attr, js_string!("getAttribute"), 1)
+            .function(append_child, js_string!("appendChild"), 1)
+            .function(remove_child, js_string!("removeChild"), 1)
             .build()
             .into()
     }
@@ -525,6 +613,104 @@ mod tests {
             BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
             let id = dom.element_by_id("h").unwrap();
             assert_eq!(dom.node(id).attr("data-html"), Some("<span>hi</span>"));
+        }
+
+        // --- live-DOM tree mutation: createElement / appendChild / removeChild
+
+        #[test]
+        fn create_element_and_append_child_build_a_list() {
+            let mut dom = Dom::parse(
+                "<ul id=\"list\"></ul>\
+                 <script>\
+                 var list = document.getElementById('list');\
+                 for (var i = 1; i <= 3; i++) {\
+                   var li = document.createElement('LI');\
+                   li.textContent = 'Item ' + i;\
+                   list.appendChild(li);\
+                 }\
+                 </script>",
+            );
+            let report = BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
+
+            assert!(report.error.is_none(), "unexpected error: {:?}", report.error);
+            // 3 <li> elements + 3 text nodes from the textContent sets.
+            assert_eq!(report.nodes_added, 6);
+            let list = dom.element_by_id("list").unwrap();
+            let tags: Vec<Option<&str>> = dom
+                .node(list)
+                .children
+                .iter()
+                .map(|&c| dom.node(c).tag())
+                .collect();
+            assert_eq!(tags, vec![Some("li"); 3], "tag normalized to lowercase");
+            assert_eq!(dom.text_content(list), "Item 1Item 2Item 3");
+        }
+
+        #[test]
+        fn append_child_reaches_document_body() {
+            let mut dom = Dom::parse(
+                "<p>static</p>\
+                 <script>\
+                 var h = document.createElement('h1');\
+                 h.appendChild(document.createTextNode('ADDED'));\
+                 document.body.appendChild(h);\
+                 </script>",
+            );
+            let report = BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
+
+            assert!(report.error.is_none(), "unexpected error: {:?}", report.error);
+            let body = dom.body().unwrap();
+            assert!(dom.text_content(body).contains("ADDED"));
+            let last = *dom.node(body).children.last().unwrap();
+            assert_eq!(dom.node(last).tag(), Some("h1"));
+        }
+
+        #[test]
+        fn remove_child_detaches_a_subtree() {
+            let mut dom = Dom::parse(
+                "<div id=\"wrap\"><p id=\"gone\">remove me</p><p>keep</p></div>\
+                 <script>\
+                 var w = document.getElementById('wrap');\
+                 w.removeChild(document.getElementById('gone'));\
+                 </script>",
+            );
+            let report = BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
+
+            assert!(report.error.is_none(), "unexpected error: {:?}", report.error);
+            assert_eq!(report.nodes_removed, 1);
+            let wrap = dom.element_by_id("wrap").unwrap();
+            assert_eq!(dom.text_content(wrap), "keep");
+        }
+
+        #[test]
+        fn append_child_refuses_a_cycle_without_erroring() {
+            let mut dom = Dom::parse(
+                "<div id=\"outer\"><div id=\"inner\">t</div></div>\
+                 <script>\
+                 var r = document.getElementById('inner')\
+                     .appendChild(document.getElementById('outer'));\
+                 if (r === null) { document.getElementById('inner').setAttribute('data-refused', '1'); }\
+                 </script>",
+            );
+            let report = BoaScriptEngine.run(&mut dom, &ScriptLimits::default());
+
+            assert!(report.error.is_none(), "unexpected error: {:?}", report.error);
+            let inner = dom.element_by_id("inner").unwrap();
+            assert_eq!(dom.node(inner).attr("data-refused"), Some("1"));
+            let outer = dom.element_by_id("outer").unwrap();
+            assert_eq!(dom.node(inner).parent, Some(outer), "tree unchanged");
+        }
+
+        #[test]
+        fn create_element_respects_node_budget() {
+            let mut dom = Dom::parse(
+                "<div id=\"h\">x</div>\
+                 <script>var e = document.createElement('div');</script>",
+            );
+            let limits = ScriptLimits { max_new_nodes: 0, ..ScriptLimits::default() };
+            let report = BoaScriptEngine.run(&mut dom, &limits);
+            assert_eq!(report.limit_hit, Some(crate::script::ScriptLimit::Nodes));
+            assert_eq!(report.nodes_added, 0);
         }
 
         #[test]

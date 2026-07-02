@@ -207,6 +207,80 @@ impl Dom {
         }
     }
 
+    /// Create a detached element node (like `document.createElement`). It lives
+    /// in the arena with no parent until [`Dom::append_child`] attaches it; if the
+    /// script never attaches it, it stays orphaned and is simply never rendered.
+    pub fn create_element(&mut self, tag: &str) -> NodeId {
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data: NodeData::Element {
+                name: tag.trim().to_ascii_lowercase(),
+                attrs: Vec::new(),
+            },
+        });
+        id
+    }
+
+    /// Create a detached text node (like `document.createTextNode`).
+    pub fn create_text_node(&mut self, text: &str) -> NodeId {
+        let id = self.nodes.len();
+        self.nodes.push(Node {
+            parent: None,
+            children: Vec::new(),
+            data: NodeData::Text(text.to_string()),
+        });
+        id
+    }
+
+    /// Append `child` as the last child of `parent` (like `Node.appendChild`),
+    /// detaching it from its current parent first — so appending an attached node
+    /// *moves* it. Returns `false` (and leaves the tree untouched) when the move
+    /// is illegal: self-append, appending under one of the child's own
+    /// descendants (cycle), appending the document root, or a parent that cannot
+    /// hold children (text node).
+    pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if child == parent || child == self.root() {
+            return false;
+        }
+        if matches!(self.nodes[parent].data, NodeData::Text(_)) {
+            return false;
+        }
+        // Cycle guard: walk up from `parent`; if `child` is an ancestor, refuse.
+        let mut cursor = Some(parent);
+        while let Some(id) = cursor {
+            if id == child {
+                return false;
+            }
+            cursor = self.nodes[id].parent;
+        }
+        if let Some(old_parent) = self.nodes[child].parent {
+            self.nodes[old_parent].children.retain(|&c| c != child);
+        }
+        self.nodes[child].parent = Some(parent);
+        self.nodes[parent].children.push(child);
+        true
+    }
+
+    /// Remove `child` from `parent`'s children (like `Node.removeChild`).
+    /// Returns `false` if `child` is not a child of `parent`. The removed subtree
+    /// stays orphaned in the arena (unreachable from the root, never rendered)
+    /// and can be re-attached later with [`Dom::append_child`].
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if self.nodes[child].parent != Some(parent) {
+            return false;
+        }
+        self.nodes[parent].children.retain(|&c| c != child);
+        self.nodes[child].parent = None;
+        true
+    }
+
+    /// The document's `<body>` element, if present.
+    pub fn body(&self) -> Option<NodeId> {
+        self.nodes.iter().position(|node| node.tag() == Some("body"))
+    }
+
     /// Set (or add) an attribute on an element node; no-op for non-elements.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
         if let NodeData::Element { attrs, .. } = &mut self.nodes[id].data {
@@ -639,6 +713,70 @@ mod tests {
         assert!(tags.contains(&"td"));
         // tbody is implied by the HTML tree builder.
         assert!(tags.contains(&"tbody"));
+    }
+
+    #[test]
+    fn create_and_append_builds_subtree() {
+        let mut dom = Dom::parse("<div id=\"host\"></div>");
+        let host = dom.element_by_id("host").unwrap();
+
+        let li = dom.create_element("LI"); // tag is normalized to lowercase
+        let text = dom.create_text_node("item one");
+        assert!(dom.node(li).parent.is_none(), "created node starts detached");
+        assert!(dom.append_child(li, text));
+        assert!(dom.append_child(host, li));
+
+        assert_eq!(dom.node(li).tag(), Some("li"));
+        assert_eq!(dom.node(li).parent, Some(host));
+        assert_eq!(dom.node(host).children, vec![li]);
+        assert_eq!(dom.text_content(host), "item one");
+    }
+
+    #[test]
+    fn append_child_moves_an_attached_node() {
+        let mut dom = Dom::parse("<div id=\"a\"><span id=\"s\">x</span></div><div id=\"b\"></div>");
+        let (a, b) = (dom.element_by_id("a").unwrap(), dom.element_by_id("b").unwrap());
+        let span = dom.element_by_id("s").unwrap();
+
+        assert!(dom.append_child(b, span));
+
+        assert!(dom.node(a).children.is_empty(), "moved out of old parent");
+        assert_eq!(dom.node(b).children, vec![span]);
+        assert_eq!(dom.node(span).parent, Some(b));
+    }
+
+    #[test]
+    fn append_child_refuses_cycles_and_bad_parents() {
+        let mut dom = Dom::parse("<div id=\"outer\"><div id=\"inner\">t</div></div>");
+        let outer = dom.element_by_id("outer").unwrap();
+        let inner = dom.element_by_id("inner").unwrap();
+        let text = dom.node(inner).children[0];
+
+        assert!(!dom.append_child(inner, outer), "ancestor under descendant");
+        assert!(!dom.append_child(outer, outer), "self-append");
+        assert!(!dom.append_child(text, inner), "text nodes hold no children");
+        assert!(!dom.append_child(inner, dom.root()), "root is not movable");
+        // Tree unchanged by all the refused calls.
+        assert_eq!(dom.node(inner).parent, Some(outer));
+        assert_eq!(dom.node(outer).children, vec![inner]);
+    }
+
+    #[test]
+    fn remove_child_detaches_and_allows_reattach() {
+        let mut dom = Dom::parse("<ul id=\"l\"><li id=\"x\">one</li><li id=\"y\">two</li></ul>");
+        let list = dom.element_by_id("l").unwrap();
+        let x = dom.element_by_id("x").unwrap();
+        let y = dom.element_by_id("y").unwrap();
+
+        assert!(dom.remove_child(list, x));
+        assert_eq!(dom.node(list).children, vec![y]);
+        assert_eq!(dom.node(x).parent, None);
+        assert_eq!(dom.text_content(list), "two");
+        assert!(!dom.remove_child(list, x), "already detached");
+
+        // A removed subtree can come back.
+        assert!(dom.append_child(list, x));
+        assert_eq!(dom.text_content(list), "twoone");
     }
 
     /// The custom arena sink must produce the same tree the reference RcDom

@@ -901,9 +901,20 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       **Not yet done:** bidi paragraph reordering (UAX #9) for mixed LTR/RTL,
       font-fallback chains (CJK/emoji), `fitting_char_count`/char-level breaking
       still uses unshaped advances, and shaping-aware `letter-spacing`.
-- [ ] **Extend live-DOM JS** (ADR 0008): `document.createElement`/`appendChild`/
-      `removeChild`; and a decision record for/against mid-script layout reads
-      (`getBoundingClientRect`) — the genuinely hard part left after the spike.
+- [x] **Extend live-DOM JS** (ADR 0009): `document.createElement`/`createTextNode`
+      push detached arena nodes (drawn from the `max_new_nodes` budget; `null`
+      past the cap); `appendChild` attaches — and, on an attached node, *moves*
+      (reparents) — with a cycle guard that refuses illegal moves by returning
+      `null` instead of throwing; `removeChild` detaches (orphans stay in the
+      arena, dropped wholesale with the render); `document.body` exposed as the
+      attachment point. Script-created nodes go through the normal cascade, so
+      stylesheet classes apply. A document whose only content is script-built
+      renders end to end. Mid-script layout reads (`getBoundingClientRect`)
+      were considered and **rejected** — they would make layout re-entrant and
+      break the one-pass cost model; ADR 0009 records the reasoning and the
+      cheaper `measureText` escape hatch if demand appears. **Not yet done:**
+      `insertBefore`, `cloneNode`, `querySelector(All)`, JS-side tree traversal
+      (`parentNode`/`children`), events, timers.
 - [ ] **`line-height`** (currently fixed leading `font×1.35` flow / `×1.18` cells).
 
 ### Features (attach after the spine)
