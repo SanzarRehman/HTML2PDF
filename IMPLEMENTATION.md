@@ -931,6 +931,23 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       (overlays always sit above the flow), `bottom` against a positioned
       ancestor, `%` offsets, `sticky`, and stacking-context isolation
       (z-indexes compare globally, not per stacking context).
+- [x] **Bidi paragraph reordering (UAX #9)** via `unicode-bidi` (Servo's
+      implementation), two layers deep: (1) `TrueTypeFont::shape` itemizes a
+      mixed-direction string into visual runs and shapes each with an explicit
+      direction — joining forms are computed on logical text, glyphs emitted in
+      visual order, so a single string like `Total: ١٢٣` is right inside table
+      cells too; (2) `layout_line_box` reorders each wrapped line's word pieces
+      into visual order (`reorder_pieces_bidi`), reversing the pieces inside
+      each RTL run. Both layers resolve levels against an **LTR base** (HTML's
+      default) and skip cleanly via a cheap RTL-range char scan, so LTR-only
+      documents take the exact old path (verified: no perf change on the
+      22k-cell fixture). Verified visually with Arial: Arabic phrase embedded
+      in an English sentence, Hebrew inline, and a full Arabic paragraph all
+      place words right-to-left, and `pdftotext` recovers the logical text.
+      **Not yet done:** `dir="rtl"` / `direction: rtl` (RTL base paragraphs —
+      currently rendered against an LTR base and left-aligned, matching
+      Chrome's dir-less default), bracket mirroring, and pieces that straddle
+      a direction boundary move whole (assigned by first byte).
 - [x] **`line-height`**: unitless numbers, percentages (both = font-size
       multiples), and absolute lengths, applied to flow line boxes (per block,
       inherited through the cascade) and table-cell leading (absolute lengths

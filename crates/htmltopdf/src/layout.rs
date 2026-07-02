@@ -1477,6 +1477,9 @@ fn layout_line_box(
         if visual.is_empty() {
             break;
         }
+        // UAX #9: put the line's pieces in visual order when it mixes
+        // directions (each piece's own glyph order is handled by shaping).
+        let visual = reorder_pieces_bidi(visual);
 
         let line_width: f32 = visual
             .iter()
@@ -1549,6 +1552,54 @@ struct LinePiece {
     bold: bool,
     underline: bool,
     line_through: bool,
+}
+
+/// Reorder one visual line's pieces per UAX #9 so mixed LTR/RTL text reads
+/// correctly: embedding levels are resolved against an LTR base (HTML's
+/// default paragraph direction — `dir="rtl"` is not supported yet), and the
+/// pieces inside each right-to-left run are emitted in reverse order. Glyph
+/// order *within* a piece is the shaper's job (rustybuzz emits RTL segments
+/// visually), so only whole pieces move here; a piece is assigned to the run
+/// containing its first byte (word tokens rarely straddle a direction change).
+/// Purely-LTR lines return unchanged.
+fn reorder_pieces_bidi(pieces: Vec<LinePiece>) -> Vec<LinePiece> {
+    if !pieces
+        .iter()
+        .any(|piece| crate::font::contains_rtl(&piece.text))
+    {
+        return pieces;
+    }
+
+    let line_text: String = pieces.iter().map(|piece| piece.text.as_str()).collect();
+    let bidi = unicode_bidi::BidiInfo::new(&line_text, Some(unicode_bidi::Level::ltr()));
+    let paragraph = &bidi.paragraphs[0];
+    let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+
+    // Byte offset of each piece's start within the concatenated line text.
+    let mut starts = Vec::with_capacity(pieces.len());
+    let mut offset = 0;
+    for piece in &pieces {
+        starts.push(offset);
+        offset += piece.text.len();
+    }
+
+    let mut slots: Vec<Option<LinePiece>> = pieces.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(slots.len());
+    for range in runs {
+        let mut members: Vec<usize> = (0..slots.len())
+            .filter(|&i| slots[i].is_some() && range.contains(&starts[i]))
+            .collect();
+        if levels[range.start].is_rtl() {
+            members.reverse();
+        }
+        for index in members {
+            out.push(slots[index].take().expect("member selected once"));
+        }
+    }
+    // Anything not claimed by a run (defensive: shouldn't happen) keeps its
+    // logical position at the end.
+    out.extend(slots.into_iter().flatten());
+    out
 }
 
 /// Line-at-a-time greedy breaker over the tokenized inline runs. Each call to
@@ -2523,6 +2574,41 @@ mod tests {
         let after = find("after");
         let gap_first_nudgedless = first.y - after.y;
         assert!(gap_first_nudgedless > 0.0, "after must sit below first");
+    }
+
+    #[test]
+    fn bidi_reorders_rtl_pieces_within_a_line() {
+        use super::{reorder_pieces_bidi, LinePiece};
+        let piece = |text: &str| LinePiece {
+            text: text.to_string(),
+            font_size: 10.0,
+            color: Color::BLACK,
+            bold: false,
+            underline: false,
+            line_through: false,
+        };
+        // Logical: abc · אבג · space · דהו · xyz. The two Hebrew words and the
+        // space between them form one RTL run, so they swap; Latin stays put.
+        let pieces = vec![
+            piece("abc "),
+            piece("\u{05D0}\u{05D1}\u{05D2}"),
+            piece(" "),
+            piece("\u{05D3}\u{05D4}\u{05D5}"),
+            piece(" xyz"),
+        ];
+        let visual: Vec<String> = reorder_pieces_bidi(pieces)
+            .into_iter()
+            .map(|p| p.text)
+            .collect();
+        assert_eq!(
+            visual,
+            vec!["abc ", "\u{05D3}\u{05D4}\u{05D5}", " ", "\u{05D0}\u{05D1}\u{05D2}", " xyz"]
+        );
+
+        // A purely-LTR line is untouched.
+        let pieces = vec![piece("one "), piece("two")];
+        let visual: Vec<String> = reorder_pieces_bidi(pieces).into_iter().map(|p| p.text).collect();
+        assert_eq!(visual, vec!["one ", "two"]);
     }
 
     #[test]

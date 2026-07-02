@@ -21,6 +21,9 @@ html5ever = "0.39"
 owned_ttf_parser = "0.25.1"
 rustybuzz = "0.20"
 ttf-parser = "0.25.1"
+# UAX #9 bidirectional algorithm (Servo's implementation): computes embedding
+# levels + visual run order for mixed LTR/RTL text. Small, no default features.
+unicode-bidi = { version = "0.3", default-features = false, features = ["hardcoded-data"] }
 boa_engine = { version = "0.20", optional = true }
 boa_gc = { version = "0.20", optional = true }
 

@@ -291,7 +291,7 @@ impl TrueTypeFont {
     }
 
     fn shape_uncached(&self, text: &str) -> ShapedRun {
-        let Some(face) = &self.face else {
+        if self.face.is_none() {
             // Face unavailable (should not happen: parse() validated the data).
             // Fall back to unshaped per-character advances so measurement still
             // works; PDF emission will also fall back per character.
@@ -306,30 +306,75 @@ impl TrueTypeFont {
                 glyphs: Vec::new(),
                 width_em,
             };
-        };
+        }
 
+        // Fast path: no RTL characters → shape the whole string as one LTR run.
+        if !contains_rtl(text) {
+            let mut run = ShapedRun {
+                glyphs: Vec::new(),
+                width_em: 0.0,
+            };
+            self.shape_segment(text, None, &mut run);
+            return run;
+        }
+
+        // Bidi path (UAX #9): resolve embedding levels against an LTR base —
+        // HTML's default paragraph direction; `dir`/`direction: rtl` is not
+        // supported yet — then shape each visual run with its own explicit
+        // direction and concatenate in visual order. Forcing the direction per
+        // run matters twice over: joining forms must be computed on logical
+        // text, and a whole-buffer direction guess mis-shapes mixed strings.
+        let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
+        let paragraph = &bidi.paragraphs[0];
+        let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+        let mut run_out = ShapedRun {
+            glyphs: Vec::new(),
+            width_em: 0.0,
+        };
+        for range in runs {
+            let direction = if levels[range.start].is_rtl() {
+                rustybuzz::Direction::RightToLeft
+            } else {
+                rustybuzz::Direction::LeftToRight
+            };
+            self.shape_segment(&text[range], Some(direction), &mut run_out);
+        }
+        run_out
+    }
+
+    /// Shape one directionally-uniform segment and append its glyphs to `out`.
+    /// `direction: None` lets rustybuzz guess from content (LTR-only fast path).
+    fn shape_segment(
+        &self,
+        segment: &str,
+        direction: Option<rustybuzz::Direction>,
+        out: &mut ShapedRun,
+    ) {
+        let face = self.face.as_ref().expect("caller checked the face exists");
         let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
+        buffer.push_str(segment);
+        if let Some(direction) = direction {
+            buffer.guess_segment_properties();
+            buffer.set_direction(direction);
+        }
         let output = rustybuzz::shape(face, &[], buffer);
         let infos = output.glyph_infos();
         let positions = output.glyph_positions();
 
-        // Cluster boundaries (byte offsets into `text`), in logical order, so a
-        // glyph's cluster maps back to the characters it covers. The first glyph
-        // seen for a cluster carries the characters; the rest carry none.
+        // Cluster boundaries (byte offsets into `segment`), in logical order, so
+        // a glyph's cluster maps back to the characters it covers. The first
+        // glyph seen for a cluster carries the characters; the rest carry none.
         let mut boundaries: Vec<usize> = infos.iter().map(|info| info.cluster as usize).collect();
         boundaries.sort_unstable();
         boundaries.dedup();
         let cluster_end = |start: usize| -> usize {
             match boundaries.binary_search(&start) {
                 Ok(i) if i + 1 < boundaries.len() => boundaries[i + 1],
-                _ => text.len(),
+                _ => segment.len(),
             }
         };
 
         let mut seen = std::collections::HashSet::new();
-        let mut glyphs = Vec::with_capacity(infos.len());
-        let mut width_em = 0.0f32;
         for (info, pos) in infos.iter().zip(positions) {
             let gid = info.glyph_id as u16;
             let advance_em = pos.x_advance as f32 / self.units_per_em;
@@ -341,20 +386,18 @@ impl TrueTypeFont {
                 .unwrap_or(advance_em);
             let cluster = info.cluster as usize;
             let chars = if seen.insert(cluster) {
-                text[cluster..cluster_end(cluster)].to_string()
+                segment[cluster..cluster_end(cluster)].to_string()
             } else {
                 String::new()
             };
-            width_em += advance_em;
-            glyphs.push(ShapedGlyph {
+            out.width_em += advance_em;
+            out.glyphs.push(ShapedGlyph {
                 gid,
                 advance_em,
                 natural_em,
                 chars,
             });
         }
-
-        ShapedRun { glyphs, width_em }
     }
 
     /// Resolve the glyph widths and Unicode mapping for every text run the
@@ -480,6 +523,21 @@ fn load_family(name: &str) -> Result<(Vec<u8>, u32), String> {
 
 /// PostScript name (name id 6), falling back to family (id 1), sanitized to a
 /// valid PDF name (no spaces or delimiters).
+/// Whether `text` contains any character from a right-to-left script (Hebrew,
+/// Arabic and its extensions, Syriac, Thaana, NKo, plus the RTL presentation
+/// forms and supplementary-plane RTL blocks). A cheap pre-filter so purely-LTR
+/// text skips the UAX #9 machinery entirely.
+pub(crate) fn contains_rtl(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{0590}'..='\u{08FF}'      // Hebrew, Arabic, Syriac, Thaana, NKo, …
+            | '\u{FB1D}'..='\u{FDFF}'    // Hebrew/Arabic presentation forms A
+            | '\u{FE70}'..='\u{FEFF}'    // Arabic presentation forms B
+            | '\u{10800}'..='\u{10FFF}'  // ancient RTL scripts (SMP)
+            | '\u{1E800}'..='\u{1EFFF}') // Adlam, Mende Kikakui, Arabic math
+    })
+}
+
 fn postscript_name(face: &ttf_parser::Face) -> String {
     let mut postscript = None;
     let mut family = None;
@@ -683,6 +741,42 @@ mod tests {
         // Measurement goes through the same shaping (cache hit).
         let measured = font.text_width("AV", 1000.0);
         assert!((measured - run.width_em * 1000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn mixed_direction_text_shapes_in_visual_order() {
+        let Some(font) = system_font() else { return };
+        let embedded = font.embedding().expect("TrueType face");
+        // Latin, a two-word Hebrew phrase, Latin again. Visual order must keep
+        // the Latin in place and reverse the Hebrew segment.
+        let run = embedded.shape("abc \u{05D0}\u{05D1} \u{05D2}\u{05D3} xyz");
+        if run.glyphs.is_empty() {
+            return; // face without Hebrew coverage: nothing to assert
+        }
+        let covered: String = run.glyphs.iter().map(|g| g.chars.as_str()).collect();
+        // Every source character is still covered exactly once…
+        let mut sorted_covered: Vec<char> = covered.chars().collect();
+        let mut sorted_source: Vec<char> = "abc \u{05D0}\u{05D1} \u{05D2}\u{05D3} xyz".chars().collect();
+        sorted_covered.sort_unstable();
+        sorted_source.sort_unstable();
+        assert_eq!(sorted_covered, sorted_source);
+        // …but the Hebrew block reads right-to-left: the logically-later word
+        // (גד) comes before the earlier one (אב), and each word is reversed.
+        let pos = |c: char| covered.find(c).unwrap_or_else(|| panic!("missing {c}"));
+        assert!(pos('\u{05D2}') < pos('\u{05D0}'), "second Hebrew word paints first: {covered:?}");
+        assert!(pos('\u{05D1}') < pos('\u{05D0}'), "within a word, glyphs reverse: {covered:?}");
+        // The surrounding Latin stays put.
+        assert!(pos('a') < pos('\u{05D2}') && pos('\u{05D3}') < pos('x'), "{covered:?}");
+    }
+
+    #[test]
+    fn contains_rtl_detects_scripts() {
+        use super::contains_rtl;
+        assert!(!contains_rtl("plain ASCII 123"));
+        assert!(!contains_rtl("café naïve"));
+        assert!(contains_rtl("שלום"));
+        assert!(contains_rtl("مرحبا"));
+        assert!(contains_rtl("mixed מ text"));
     }
 
     #[test]
