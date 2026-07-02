@@ -305,6 +305,54 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
     pages
 }
 
+/// A positioned (absolute/fixed) box captured out of flow. Its paint commands
+/// are appended *after* the page's in-flow content — positioned boxes paint
+/// above normal flow, as in CSS — ordered by `z` (stable, so equal z keeps
+/// encounter order).
+struct Overlay {
+    z: i32,
+    /// Page the overlay belongs to; `None` = every page (`position: fixed`).
+    page: Option<usize>,
+    commands: Vec<PaintCommand>,
+    lines: Vec<Line>,
+    rects: Vec<Rect>,
+}
+
+/// The containing block established by the nearest positioned ancestor, for
+/// resolving an absolute descendant's `left`/`right`/`top` offsets. `None`
+/// means the page content box. (`bottom` always resolves against the page:
+/// the ancestor's height isn't known until its own layout finishes.)
+#[derive(Clone, Copy)]
+struct ContainingBlock {
+    x: f32,
+    top: f32,
+    width: f32,
+}
+
+/// Merge captured overlays into the finished pages, sorted by `z-index`.
+/// Page-bound overlays land on their page; `fixed` overlays are stamped onto
+/// every page (headers/footers/watermarks).
+fn apply_overlays(pages: &mut [Page], mut overlays: Vec<Overlay>) {
+    overlays.sort_by_key(|overlay| overlay.z);
+    for overlay in overlays {
+        match overlay.page {
+            Some(index) => {
+                let page = &mut pages[index.min(pages.len() - 1)];
+                page.commands.extend(overlay.commands);
+                page.lines.extend(overlay.lines);
+                page.rects.extend(overlay.rects);
+            }
+            None => {
+                for page in pages.iter_mut() {
+                    page.commands.extend(overlay.commands.iter().cloned());
+                    page.lines.extend(overlay.lines.iter().cloned());
+                    page.rects.extend(overlay.rects.iter().cloned());
+                }
+            }
+        }
+    }
+}
+
 /// Lay out the flow box tree by walking it recursively. Each block establishes a
 /// containing block (an x offset and a width); its inline content is wrapped to
 /// that width, and nested blocks indent by their margin/padding. The root
@@ -319,6 +367,7 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
     let content_width = options.page_size.width - options.margin_left - options.margin_right;
     let mut carried = 0.0;
     let mut floats: Vec<FloatBand> = Vec::new();
+    let mut overlays: Vec<Overlay> = Vec::new();
 
     layout_box_children(
         &flow.children,
@@ -330,8 +379,14 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
         &mut y,
         &mut carried,
         &mut floats,
+        &mut overlays,
+        None,
         options,
     );
+
+    // Positioned boxes paint above the flow, in z-index order; `fixed` ones
+    // repeat on every page.
+    apply_overlays(&mut pages, overlays);
 
     pages
 }
@@ -354,6 +409,8 @@ fn layout_box_children(
     y: &mut f32,
     carried: &mut f32,
     floats: &mut Vec<FloatBand>,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
@@ -370,13 +427,49 @@ fn layout_box_children(
                 // Out of flow: does not move the cursor and does not take part
                 // in margin collapsing. The static fallback position is the
                 // current cursor (with any pending margin applied visually).
-                layout_absolute_box(block, x, *y - *carried, pages, options);
+                // The box is laid out into a scratch page and captured as an
+                // overlay, painted above the flow after layout completes.
+                let fixed = block.position == Some(crate::html::PositionKind::Fixed);
+                let mut scratch = vec![Page::new()];
+                let mut nested: Vec<Overlay> = Vec::new();
+                layout_absolute_box(
+                    block,
+                    x,
+                    *y - *carried,
+                    &mut scratch,
+                    &mut nested,
+                    // `fixed` positions against the page even inside a
+                    // positioned ancestor (its containing block is the
+                    // viewport in CSS terms).
+                    if fixed { None } else { containing },
+                    options,
+                );
+                let mut captured = scratch.swap_remove(0);
+                // Nested positioned descendants paint above their ancestor in
+                // z order; nested `fixed` boxes keep their per-page repeat.
+                nested.sort_by_key(|overlay| overlay.z);
+                for inner in nested {
+                    if inner.page.is_none() {
+                        overlays.push(inner);
+                    } else {
+                        captured.commands.extend(inner.commands);
+                        captured.lines.extend(inner.lines);
+                        captured.rects.extend(inner.rects);
+                    }
+                }
+                overlays.push(Overlay {
+                    z: block.z_index.unwrap_or(0),
+                    page: if fixed { None } else { Some(pages.len() - 1) },
+                    commands: captured.commands,
+                    lines: captured.lines,
+                    rects: captured.rects,
+                });
             }
             BoxChild::Block(block) if block.float_dir.is_some() => {
                 // A floated block leaves normal flow: content above must be
                 // flushed, but `y` does not advance past it.
                 flush_margin(y, carried);
-                layout_float(block, x, width, pages, y, floats, options);
+                layout_float(block, x, width, pages, y, floats, overlays, containing, options);
             }
             BoxChild::Block(block)
                 if block.position == Some(crate::html::PositionKind::Relative) =>
@@ -393,12 +486,15 @@ fn layout_box_children(
                     .unwrap_or(0.0);
                 let start = *y;
                 let mut shifted = start - dy;
-                layout_block_box(block, x + dx, width, pages, &mut shifted, carried, floats, options);
+                layout_block_box(
+                    block, x + dx, width, pages, &mut shifted, carried, floats, overlays,
+                    containing, options,
+                );
                 *y = shifted + dy;
             }
-            BoxChild::Block(block) => {
-                layout_block_box(block, x, width, pages, y, carried, floats, options)
-            }
+            BoxChild::Block(block) => layout_block_box(
+                block, x, width, pages, y, carried, floats, overlays, containing, options,
+            ),
             BoxChild::Line(runs) => {
                 // Content flushes any pending margin above it.
                 flush_margin(y, carried);
@@ -430,6 +526,8 @@ fn layout_float(
     pages: &mut Vec<Page>,
     y: &mut f32,
     floats: &mut Vec<FloatBand>,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
     let is_left = block.float_dir == Some(crate::html::FloatDir::Left);
@@ -474,6 +572,8 @@ fn layout_float(
         &mut float_y,
         &mut carried,
         &mut inner_floats,
+        overlays,
+        containing,
         options,
     );
 
@@ -489,21 +589,29 @@ fn layout_float(
 /// Place an absolutely positioned block against the page content box: CSS
 /// `left`/`right`/`top`/`bottom` offsets pick the edges (falling back to the
 /// in-flow cursor position), width is the CSS width or shrink-to-fit, and the
-/// flow cursor is not advanced. First pass: the containing block is always the
-/// page content box (positioned ancestors are not tracked), `fixed` behaves as
-/// absolute on the current page, and the box paints in encounter order (later
-/// flow content paints over it when overlapping).
+/// flow cursor is not advanced. `left`/`right`/`top` resolve against the
+/// nearest positioned ancestor's containing block when there is one (else the
+/// page content box); `bottom` always resolves against the page, since the
+/// ancestor's height isn't known mid-layout. The caller captures the scratch
+/// page this renders into as an [`Overlay`], so the box paints above the flow
+/// in z-index order; content past the page bottom is dropped (absolute boxes
+/// do not paginate).
 fn layout_absolute_box(
     block: &crate::box_tree::BlockBox,
     static_x: f32,
     cursor_y: f32,
     pages: &mut Vec<Page>,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
-    let content_x = options.margin_left;
-    let content_width = options.page_size.width - options.margin_left - options.margin_right;
+    let page_content_width = options.page_size.width - options.margin_left - options.margin_right;
     let page_top = options.page_size.height - options.margin_top;
     let page_bottom = options.margin_bottom;
+    let (content_x, content_width, top_edge) = match containing {
+        Some(cb) => (cb.x, cb.width.max(1.0), cb.top),
+        None => (options.margin_left, page_content_width, page_top),
+    };
 
     let width = block
         .css_width
@@ -527,7 +635,7 @@ fn layout_absolute_box(
         static_x
     };
     let top = if let Some(offset) = block.offset_top {
-        page_top - offset
+        top_edge - offset
     } else if let Some(offset) = block.offset_bottom {
         page_bottom + offset + height
     } else {
@@ -545,6 +653,8 @@ fn layout_absolute_box(
         &mut box_y,
         &mut carried,
         &mut inner_floats,
+        overlays,
+        containing,
         options,
     );
 }
@@ -654,6 +764,8 @@ fn layout_flex_box(
     inner_width: f32,
     pages: &mut Vec<Page>,
     y: &mut f32,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
@@ -685,7 +797,7 @@ fn layout_flex_box(
                 *y -= gap;
             }
             let mut carried = 0.0;
-            item.layout(inner_x, inner_width, pages, y, &mut carried, options);
+            item.layout(inner_x, inner_width, pages, y, &mut carried, overlays, containing, options);
         }
         return;
     }
@@ -748,7 +860,7 @@ fn layout_flex_box(
     for ((item, width), height) in items.iter().zip(&widths).zip(&heights) {
         let mut item_y = top - (row_height - height) * align_factor;
         let mut carried = 0.0;
-        item.layout(cursor, *width, pages, &mut item_y, &mut carried, options);
+        item.layout(cursor, *width, pages, &mut item_y, &mut carried, overlays, containing, options);
         lowest = lowest.min(item_y);
         cursor += width + between;
     }
@@ -797,14 +909,16 @@ impl FlexItem<'_> {
         pages: &mut Vec<Page>,
         y: &mut f32,
         carried: &mut f32,
+        overlays: &mut Vec<Overlay>,
+        containing: Option<ContainingBlock>,
         options: &RenderOptions,
     ) {
         // A flex/grid item establishes its own flow: floats do not escape it.
         let mut floats: Vec<FloatBand> = Vec::new();
         match self {
-            FlexItem::Block(b) => {
-                layout_block_box(b, x, width, pages, y, carried, &mut floats, options)
-            }
+            FlexItem::Block(b) => layout_block_box(
+                b, x, width, pages, y, carried, &mut floats, overlays, containing, options,
+            ),
             FlexItem::Line(runs) => {
                 layout_line_box(runs, x, width, TextAlign::Left, None, pages, y, &mut floats, options)
             }
@@ -813,13 +927,17 @@ impl FlexItem<'_> {
 
     /// Dry-run the item into scratch pages to learn the height it will consume
     /// at `width`. Cheap (a flex item is a small subtree) and exact, since it
-    /// runs the same layout code as the paint pass.
+    /// runs the same layout code as the paint pass. Positioned descendants are
+    /// captured into a throwaway list — out-of-flow boxes contribute no height.
     fn measure_height(&self, width: f32, options: &RenderOptions) -> f32 {
         let mut scratch = vec![Page::new()];
         let start = options.page_size.height - options.margin_top;
         let mut item_y = start;
         let mut carried = 0.0;
-        self.layout(0.0, width, &mut scratch, &mut item_y, &mut carried, options);
+        let mut overlays: Vec<Overlay> = Vec::new();
+        self.layout(
+            0.0, width, &mut scratch, &mut item_y, &mut carried, &mut overlays, None, options,
+        );
         start - item_y
     }
 }
@@ -840,6 +958,8 @@ fn layout_grid_box(
     inner_width: f32,
     pages: &mut Vec<Page>,
     y: &mut f32,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
@@ -989,6 +1109,8 @@ fn layout_grid_box(
                 pages,
                 &mut item_y,
                 &mut carried,
+                overlays,
+                containing,
                 options,
             );
         }
@@ -1100,6 +1222,8 @@ fn layout_block_box(
     y: &mut f32,
     carried: &mut f32,
     floats: &mut Vec<FloatBand>,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
     // An explicit CSS `width` (content-box) narrows the block: it occupies
@@ -1148,15 +1272,31 @@ fn layout_block_box(
     let box_x = x + block.margin.left;
     let box_width = (width - block.margin.left - block.margin.right).max(1.0);
 
+    // A positioned block (relative/absolute/fixed) establishes the containing
+    // block that its absolutely-positioned descendants resolve offsets against.
+    let child_containing = if block.position.is_some() {
+        Some(ContainingBlock {
+            x: inner_x,
+            top: *y - *carried,
+            width: inner_width,
+        })
+    } else {
+        containing
+    };
+
     if let Some(flex) = &block.flex {
         // A flex container lays out its block children along the main axis
         // instead of stacking them. Content above must be flushed first.
         flush_margin(y, carried);
-        layout_flex_box(block, flex, inner_x, inner_width, pages, y, options);
+        layout_flex_box(
+            block, flex, inner_x, inner_width, pages, y, overlays, child_containing, options,
+        );
     } else if let Some(grid) = &block.grid {
         // A grid container places its children into column tracks, row-major.
         flush_margin(y, carried);
-        layout_grid_box(block, grid, inner_x, inner_width, pages, y, options);
+        layout_grid_box(
+            block, grid, inner_x, inner_width, pages, y, overlays, child_containing, options,
+        );
     } else {
         layout_box_children(
             &block.children,
@@ -1168,6 +1308,8 @@ fn layout_block_box(
             y,
             carried,
             floats,
+            overlays,
+            child_containing,
             options,
         );
     }
@@ -2384,6 +2526,81 @@ mod tests {
     }
 
     #[test]
+    fn fixed_boxes_repeat_on_every_page() {
+        let mut html = String::from(
+            "<style>.w { position: fixed; top: 10pt; right: 10pt; }</style>\
+             <div class=\"w\">WATERMARK</div>",
+        );
+        for i in 0..120 {
+            html.push_str(&format!("<p>filler paragraph number {i}</p>"));
+        }
+        let document = crate::html::parse(&html);
+        let pages = layout_document(&document, &RenderOptions::default());
+
+        assert!(pages.len() >= 2, "need a multi-page document, got {}", pages.len());
+        for (index, page) in pages.iter().enumerate() {
+            let stamped = page.lines.iter().any(|l| l.text.contains("WATERMARK"));
+            assert!(stamped, "page {index} is missing the fixed watermark");
+        }
+        // And it paints at the same spot on every page.
+        let ys: Vec<f32> = pages
+            .iter()
+            .map(|p| p.lines.iter().find(|l| l.text.contains("WATERMARK")).unwrap().y)
+            .collect();
+        assert!(ys.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01), "{ys:?}");
+    }
+
+    #[test]
+    fn z_index_orders_overlapping_positioned_boxes() {
+        // `.low` comes later in the document but has the smaller z-index, so it
+        // must paint first (underneath).
+        let document = crate::html::parse(
+            "<style>\
+             .high { position: absolute; top: 100pt; left: 50pt; z-index: 5; }\
+             .low  { position: absolute; top: 100pt; left: 50pt; z-index: 1; }\
+             </style>\
+             <p>flow</p>\
+             <div class=\"high\">TOP</div>\
+             <div class=\"low\">UNDER</div>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let page = &pages[0];
+
+        let index_of = |needle: &str| {
+            page.commands
+                .iter()
+                .position(|c| matches!(c, PaintCommand::Text(t) if t.text.contains(needle)))
+                .unwrap_or_else(|| panic!("missing {needle}"))
+        };
+        assert!(index_of("UNDER") < index_of("TOP"), "z-index must reorder painting");
+        // Positioned content paints above in-flow content regardless of source order.
+        assert!(index_of("flow") < index_of("UNDER"));
+    }
+
+    #[test]
+    fn absolute_resolves_against_positioned_ancestor() {
+        let document = crate::html::parse(
+            "<style>\
+             .card { position: relative; margin-top: 100pt; margin-left: 60pt; }\
+             .badge { position: absolute; top: 0; left: 0; margin: 0; }\
+             </style>\
+             <div class=\"card\"><p>card body</p><div class=\"badge\">BADGE</div></div>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+        let find = |t: &str| lines.iter().find(|l| l.text.contains(t)).unwrap();
+
+        let badge = find("BADGE");
+        let body = find("card");
+        // left:0 → the card's content edge, not the page margin.
+        assert!((badge.x - (options.margin_left + 60.0)).abs() < 1.0, "x {}", badge.x);
+        // top:0 → the card's top edge: the badge overlays the card's first line,
+        // far below the page top it would sit at without the positioned ancestor.
+        assert!((badge.y - body.y).abs() < 2.0, "badge y {} vs body y {}", badge.y, body.y);
+    }
+
+    #[test]
     fn float_bands_narrow_and_release_lines() {
         use super::{below_next_float, float_band_at, FloatBand};
         let floats = vec![
@@ -2462,6 +2679,7 @@ mod tests {
                     css_width: None,
                     line_height: None,
                     position: None,
+                    z_index: None,
                     offset_top: None,
                     offset_right: None,
                     offset_bottom: None,
@@ -2520,6 +2738,7 @@ mod tests {
                     css_width: None,
                     line_height: None,
                     position: None,
+                    z_index: None,
                     offset_top: None,
                     offset_right: None,
                     offset_bottom: None,
@@ -2582,6 +2801,7 @@ mod tests {
                 css_width: None,
                 line_height: None,
                 position: None,
+                z_index: None,
                 offset_top: None,
                 offset_right: None,
                 offset_bottom: None,
@@ -2660,6 +2880,7 @@ mod tests {
                         css_width: None,
                         line_height,
                         position: None,
+                        z_index: None,
                         offset_top: None,
                         offset_right: None,
                         offset_bottom: None,
@@ -2719,6 +2940,7 @@ mod tests {
                     css_width: None,
                     line_height: None,
                     position: None,
+                    z_index: None,
                     offset_top: None,
                     offset_right: None,
                     offset_bottom: None,

@@ -915,6 +915,22 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       cheaper `measureText` escape hatch if demand appears. **Not yet done:**
       `insertBefore`, `cloneNode`, `querySelector(All)`, JS-side tree traversal
       (`parentNode`/`children`), events, timers.
+- [x] **`position: fixed` per page, positioned-ancestor containing blocks,
+      `z-index`**: positioned (absolute/fixed) boxes are now laid out into a
+      scratch page and captured as *overlays*, appended after each page's
+      in-flow content — so they paint **above** the flow (as CSS specifies)
+      sorted by `z-index` (stable; `auto` = 0), and a `fixed` box's overlay is
+      stamped onto **every** page (print headers/footers/watermarks). Absolute
+      descendants resolve `left`/`right`/`top` against the nearest positioned
+      ancestor's content box (`bottom` still resolves against the page — the
+      ancestor's height isn't known mid-layout); `fixed` always positions
+      against the page. Absolute boxes no longer spill onto a real next page:
+      content past the page bottom is dropped (they don't paginate). Guarded by
+      a multi-page `features/fixed-per-page` parity fixture (17 total).
+      **Not yet done:** negative `z-index` painting *below* in-flow content
+      (overlays always sit above the flow), `bottom` against a positioned
+      ancestor, `%` offsets, `sticky`, and stacking-context isolation
+      (z-indexes compare globally, not per stacking context).
 - [x] **`line-height`**: unitless numbers, percentages (both = font-size
       multiples), and absolute lengths, applied to flow line boxes (per block,
       inherited through the cascade) and table-cell leading (absolute lengths

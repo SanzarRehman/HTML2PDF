@@ -112,6 +112,8 @@ pub struct CellStyle {
     pub clear: Option<Clear>,
     /// CSS `position` (static when `None`) and its box offsets, points.
     pub position: Option<PositionKind>,
+    /// CSS `z-index` (`None` = `auto`), meaningful on positioned boxes.
+    pub z_index: Option<i32>,
     pub offset_top: Option<f32>,
     pub offset_right: Option<f32>,
     pub offset_bottom: Option<f32>,
@@ -159,6 +161,7 @@ impl Default for CellStyle {
             float_dir: None,
             clear: None,
             position: None,
+            z_index: None,
             offset_top: None,
             offset_right: None,
             offset_bottom: None,
@@ -745,6 +748,7 @@ fn build_block(
         css_width: own.width,
         line_height: own.line_height,
         position: own.position,
+        z_index: own.z_index,
         offset_top: own.offset_top,
         offset_right: own.offset_right,
         offset_bottom: own.offset_bottom,
@@ -1391,6 +1395,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         float_dir: own.float_dir,
         clear: own.clear,
         position: own.position,
+        z_index: own.z_index,
         offset_top: own.offset_top,
         offset_right: own.offset_right,
         offset_bottom: own.offset_bottom,
@@ -2993,6 +2998,9 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 _ => None, // static / sticky unsupported
             };
         }
+        // `auto` (and any non-integer) stays `None`; fractional z-indexes are
+        // invalid CSS and likewise ignored.
+        "z-index" => target.cell.z_index = value.trim().parse::<i32>().ok(),
         "top" => target.cell.offset_top = parse_css_offset(value),
         "right" if parse_css_offset(value).is_some() => {
             target.cell.offset_right = parse_css_offset(value);
@@ -3366,6 +3374,7 @@ impl CellStyle {
         self.float_dir = other.float_dir.or(self.float_dir);
         self.clear = other.clear.or(self.clear);
         self.position = other.position.or(self.position);
+        self.z_index = other.z_index.or(self.z_index);
         self.offset_top = other.offset_top.or(self.offset_top);
         self.offset_right = other.offset_right.or(self.offset_right);
         self.offset_bottom = other.offset_bottom.or(self.offset_bottom);

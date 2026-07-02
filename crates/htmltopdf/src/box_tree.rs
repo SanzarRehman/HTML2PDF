@@ -121,6 +121,8 @@ pub struct BlockBox {
     pub line_height: Option<crate::html::LineHeight>,
     /// CSS `position` (static when `None`) with its box offsets in points.
     pub position: Option<PositionKind>,
+    /// CSS `z-index` (`None` = `auto` = 0): paint order among positioned boxes.
+    pub z_index: Option<i32>,
     pub offset_top: Option<f32>,
     pub offset_right: Option<f32>,
     pub offset_bottom: Option<f32>,
