@@ -599,6 +599,181 @@ impl FlexItem<'_> {
     }
 }
 
+/// First-pass CSS grid: place the container's children into the column tracks
+/// of `grid-template-columns`, row-major (auto-placement), honoring
+/// `grid-column: span N`, `gap`, `fr` fractions, fixed lengths, and `auto`
+/// (content-sized) tracks. Rows are sized to their tallest item (via the same
+/// measure pass flex uses) and may break to a new page between rows.
+///
+/// Not yet handled: line-based placement (`grid-column: 1 / 3`), named
+/// lines/areas, `minmax()`, dense packing, and `align`/`justify` of items
+/// within their cells (items are top-left in their cell).
+fn layout_grid_box(
+    block: &crate::box_tree::BlockBox,
+    grid: &crate::box_tree::GridContainer,
+    inner_x: f32,
+    inner_width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    options: &RenderOptions,
+) {
+    use crate::box_tree::BoxChild;
+    use crate::html::GridTrack;
+
+    // Grid items, with their column span. Anonymous inline content spans 1.
+    let items: Vec<(FlexItem, usize)> = block
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            BoxChild::Block(b) => Some((FlexItem::Block(b), b.grid_span.max(1))),
+            BoxChild::Line(runs) => Some((FlexItem::Line(runs), 1)),
+            _ => None,
+        })
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+
+    let tracks: Vec<GridTrack> = if grid.columns.is_empty() {
+        vec![GridTrack::Auto]
+    } else {
+        grid.columns.clone()
+    };
+    let track_count = tracks.len();
+
+    // Auto-placement, row-major: each item takes the next `span` tracks,
+    // wrapping to a fresh row when it does not fit on the current one.
+    struct Placed {
+        item: usize,
+        row: usize,
+        col: usize,
+        span: usize,
+    }
+    let mut placements = Vec::with_capacity(items.len());
+    let (mut row, mut col) = (0usize, 0usize);
+    for (index, (_, span)) in items.iter().enumerate() {
+        let span = (*span).min(track_count);
+        if col + span > track_count {
+            row += 1;
+            col = 0;
+        }
+        placements.push(Placed { item: index, row, col, span });
+        col += span;
+        if col >= track_count {
+            row += 1;
+            col = 0;
+        }
+    }
+    let row_count = placements.iter().map(|p| p.row).max().unwrap_or(0) + 1;
+
+    // Track widths: fixed lengths as declared; `auto` sized to the widest
+    // single-span item placed in that track; `fr` shares of what remains.
+    let total_column_gap = grid.column_gap * (track_count as f32 - 1.0).max(0.0);
+    let avail = (inner_width - total_column_gap).max(0.0);
+
+    let mut auto_size = vec![0.0f32; track_count];
+    for placed in &placements {
+        if placed.span == 1 && matches!(tracks[placed.col], GridTrack::Auto) {
+            let basis = items[placed.item].0.basis(&options.font).min(avail);
+            auto_size[placed.col] = auto_size[placed.col].max(basis);
+        }
+    }
+
+    let non_fr: f32 = tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| match track {
+            GridTrack::Pt(width) => *width,
+            GridTrack::Auto => auto_size[index],
+            GridTrack::Fr(_) => 0.0,
+        })
+        .sum();
+    let fr_total: f32 = tracks
+        .iter()
+        .map(|track| if let GridTrack::Fr(weight) = track { *weight } else { 0.0 })
+        .sum();
+    let remaining = (avail - non_fr).max(0.0);
+
+    let mut widths: Vec<f32> = tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| match track {
+            GridTrack::Pt(width) => *width,
+            GridTrack::Auto => auto_size[index],
+            GridTrack::Fr(weight) => {
+                if fr_total > 0.0 {
+                    remaining * weight / fr_total
+                } else {
+                    0.0
+                }
+            }
+        })
+        .collect();
+
+    // Over-wide fixed/auto tracks: shrink everything proportionally to fit.
+    let used: f32 = widths.iter().sum();
+    if used > avail && used > 0.0 {
+        let scale = avail / used;
+        for width in &mut widths {
+            *width *= scale;
+        }
+    }
+
+    // Column left edges.
+    let mut lefts = Vec::with_capacity(track_count);
+    let mut cursor = inner_x;
+    for width in &widths {
+        lefts.push(cursor);
+        cursor += width + grid.column_gap;
+    }
+    // Width of a cell spanning `span` tracks from `col` (includes crossed gaps).
+    let cell_width = |col: usize, span: usize| -> f32 {
+        widths[col..col + span].iter().sum::<f32>()
+            + grid.column_gap * (span as f32 - 1.0).max(0.0)
+    };
+
+    // Lay rows out top-down; each row is as tall as its tallest item and may
+    // move to a fresh page as a unit (a single row is not split).
+    for row in 0..row_count {
+        let row_placements: Vec<&Placed> =
+            placements.iter().filter(|p| p.row == row).collect();
+        if row_placements.is_empty() {
+            continue;
+        }
+
+        let row_height = row_placements
+            .iter()
+            .map(|p| {
+                items[p.item]
+                    .0
+                    .measure_height(cell_width(p.col, p.span), options)
+            })
+            .fold(0.0f32, f32::max);
+
+        if !has_space(*y, options, row_height) {
+            push_page(pages, y, options);
+        }
+
+        let top = *y;
+        for placed in row_placements {
+            let mut item_y = top;
+            let mut carried = 0.0;
+            items[placed.item].0.layout(
+                lefts[placed.col],
+                cell_width(placed.col, placed.span),
+                pages,
+                &mut item_y,
+                &mut carried,
+                options,
+            );
+        }
+        *y = top - row_height;
+        if row + 1 < row_count {
+            *y -= grid.row_gap;
+        }
+    }
+}
+
 /// Return `(leading offset, gap between items)` for a `justify-content` value,
 /// given the leftover `slack`, the base `gap`, and item count `n`.
 fn justify_offsets(
@@ -729,6 +904,10 @@ fn layout_block_box(
         // instead of stacking them. Content above must be flushed first.
         flush_margin(y, carried);
         layout_flex_box(block, flex, inner_x, inner_width, pages, y, options);
+    } else if let Some(grid) = &block.grid {
+        // A grid container places its children into column tracks, row-major.
+        flush_margin(y, carried);
+        layout_grid_box(block, grid, inner_x, inner_width, pages, y, options);
     } else {
         layout_box_children(
             &block.children,
@@ -1816,6 +1995,8 @@ mod tests {
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
+                    grid: None,
+                    grid_span: 1,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
@@ -1863,6 +2044,8 @@ mod tests {
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
+                    grid: None,
+                    grid_span: 1,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: long,
                         font_size: 12.0,
@@ -1914,6 +2097,8 @@ mod tests {
                 flex: None,
                 flex_grow: 0.0,
                 flex_basis: None,
+                grid: None,
+                grid_span: 1,
                 children: vec![BoxChild::Line(vec![InlineRun {
                     text: text.to_string(),
                     font_size: 10.0,
@@ -1974,6 +2159,8 @@ mod tests {
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
+                    grid: None,
+                    grid_span: 1,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: "boxed".to_string(),
                         font_size: 11.0,

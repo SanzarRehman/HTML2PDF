@@ -68,9 +68,10 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `font-style: italic` | ❌ | |
 | `letter-spacing`, `text-indent`, `text-transform`, `word-spacing` | ❌ | |
 | `display: flex` (+ `flex`, `flex-grow`, `flex-basis`, `justify-content`, `align-items`, `gap`, `flex-direction`) | 🟡 | Row: grow/basis sizing, justify-content, **align-items** (center/end via measure pass), inline (`span`) children promoted to items, anonymous text items. **Column**: vertical stack with `gap` (no height grow/justify). No `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, or cross-page rows. |
+| `display: grid` (+ `grid-template-columns`, `gap`/`row-gap`/`column-gap`, `grid-column: span N`) | 🟡 | Tracks: fixed lengths, `fr`, `auto`, `repeat(N, …)`. Row-major auto-placement; rows sized to tallest item; page-break between rows. No line-based placement (`1 / 3`), named lines/areas, `minmax()`, `grid-template-rows`, dense packing, or cell alignment. |
 | `float`, `clear` | ❌ | |
 | `position` (relative/absolute/fixed/sticky), `top`/`left`/`z-index` | ❌ | |
-| `grid*`, `columns`, `flex-wrap`, `flex-shrink` (explicit), `order` | ❌ | |
+| `columns` (multi-col), `flex-wrap`, `flex-shrink` (explicit), `order` | ❌ | |
 | `transform`, `opacity`, `box-shadow`, `border-radius`, `filter` | ❌ | |
 | `object-fit`, `max-width`/`min-width`/`max-height`/`min-height` | ❌ | |
 | `calc()`, custom properties (`--var`, `var()`) | ❌ | |

@@ -858,7 +858,17 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
 - [ ] **Finish flexbox** *(phase 2 shipped — see below)*: remaining gaps are
       `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, column-direction
       main-axis sizing (height grow/justify), and flex rows spanning a page break.
-- [ ] **CSS grid** (`display: grid`): track sizing, spans, auto-placement.
+- [x] **CSS grid, first pass** (`display: grid`): `grid-template-columns` with
+      fixed lengths / `fr` / `auto` / `repeat(N, …)`, row-major auto-placement,
+      `grid-column: span N`, and separate row/column gaps. Auto tracks size to
+      their widest single-span item; `fr` shares the remainder; over-wide track
+      sets shrink proportionally. Rows size to their tallest item (measure pass)
+      and page-break between rows. Note: adding grid required dropping `Copy`
+      from `CellStyle` (track lists are `Vec`s) — verified no wall-time change
+      and +5 MB peak RSS on the 22k-cell fixture.
+      **Not yet done:** line-based placement (`grid-column: 1 / 3`), named
+      lines/areas, `minmax()`, `grid-template-rows`, dense packing, and
+      `align`/`justify` of items within cells.
 - [ ] **`position` / `float`**: relative/absolute positioning subset and floated
       boxes with text wrap — needed for real page layouts.
 - [ ] **Text shaping via `rustybuzz` (HarfBuzz)**: kerning, ligatures, and

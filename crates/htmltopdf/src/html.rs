@@ -53,7 +53,7 @@ pub struct TableCell {
     pub style: CellStyle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CellStyle {
     pub align: Option<TextAlign>,
     pub vertical_align: Option<VerticalAlign>,
@@ -96,6 +96,14 @@ pub struct CellStyle {
     pub flex_grow: Option<f32>,
     /// `flex-basis` in points; `None` = `auto` (use the item's content size).
     pub flex_basis: Option<f32>,
+    /// `display: grid` — this element establishes a grid container.
+    pub display_grid: bool,
+    /// `grid-template-columns` track list (`None` = single auto column).
+    pub grid_template: Option<Vec<GridTrack>>,
+    /// `row-gap` (or the first value of a two-value `gap`), points.
+    pub row_gap: Option<f32>,
+    /// `grid-column: span N` on a grid item.
+    pub grid_span: Option<usize>,
 }
 
 impl Default for CellStyle {
@@ -131,6 +139,10 @@ impl Default for CellStyle {
             gap: None,
             flex_grow: None,
             flex_basis: None,
+            display_grid: false,
+            grid_template: None,
+            row_gap: None,
+            grid_span: None,
         }
     }
 }
@@ -173,6 +185,15 @@ pub enum OverflowWrap {
 pub enum WordBreak {
     Normal,
     BreakAll,
+}
+
+/// One track of a `grid-template-columns` list: a fixed length (points), a
+/// fraction of the free space (`fr`), or content-sized (`auto`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridTrack {
+    Pt(f32),
+    Fr(f32),
+    Auto,
 }
 
 /// Flex container main axis. First-pass flexbox supports `row` (horizontal);
@@ -602,11 +623,11 @@ fn build_block(
         let marker = li_marker(dom, id);
         acc.push_text(&marker, &child_ctx);
     }
-    if own.display_flex {
-        // Every element child of a flex container becomes a flex item (per the
-        // flexbox model), so inline elements like <span> are built as blocks
-        // here instead of folding into a shared line. Bare text between them
-        // still accumulates into anonymous line items.
+    if own.display_flex || own.display_grid {
+        // Every element child of a flex/grid container becomes an item (per the
+        // flexbox/grid models), so inline elements like <span> are built as
+        // blocks here instead of folding into a shared line. Bare text between
+        // them still accumulates into anonymous line items.
         for &child in &dom.node(id).children {
             let child_node = dom.node(child);
             match child_node.tag() {
@@ -640,6 +661,11 @@ fn build_block(
         align: own.align_items.unwrap_or(AlignItems::Stretch),
         gap: own.gap.unwrap_or(0.0),
     });
+    let grid = own.display_grid.then(|| crate::box_tree::GridContainer {
+        columns: own.grid_template.clone().unwrap_or_default(),
+        column_gap: own.gap.unwrap_or(0.0),
+        row_gap: own.row_gap.unwrap_or(0.0),
+    });
     Some(crate::box_tree::BlockBox {
         kind,
         margin,
@@ -650,6 +676,8 @@ fn build_block(
         flex,
         flex_grow: own.flex_grow.unwrap_or(0.0),
         flex_basis: own.flex_basis,
+        grid,
+        grid_span: own.grid_span.unwrap_or(1),
         children: acc.children,
     })
 }
@@ -1162,7 +1190,7 @@ fn cells_from_row(
         // The cell's computed style already includes properties inherited from
         // its ancestors; layer the spreadsheet class alignment heuristic on top
         // only where neither the cascade nor inheritance set an alignment.
-        let mut style = computed.style[child];
+        let mut style = computed.style[child].clone();
         infer_cell_alignment(&mut style, &node.classes().collect::<Vec<_>>());
 
         cells.push(TableCell {
@@ -1239,11 +1267,11 @@ fn compute_inherited_node(
         // their parent's style and hidden state.
         _ => (inherited, parent_hidden),
     };
-    out.style[id] = style;
+    out.style[id] = style.clone();
     out.hidden[id] = hidden;
 
     for &child in &node.children {
-        compute_inherited_node(dom, child, style, hidden, stylesheet, cache, out);
+        compute_inherited_node(dom, child, style.clone(), hidden, stylesheet, cache, out);
     }
 }
 
@@ -1276,7 +1304,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         margin_top: own.margin_top,
         margin_bottom: own.margin_bottom,
         background_color: own.background_color,
-        // Flex properties are not inherited.
+        // Flex/grid properties are not inherited.
         display_flex: own.display_flex,
         flex_direction: own.flex_direction,
         justify_content: own.justify_content,
@@ -1284,6 +1312,10 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         gap: own.gap,
         flex_grow: own.flex_grow,
         flex_basis: own.flex_basis,
+        display_grid: own.display_grid,
+        grid_template: own.grid_template.clone(),
+        row_gap: own.row_gap,
+        grid_span: own.grid_span,
     }
 }
 
@@ -1314,27 +1346,29 @@ fn element_own(
         format!("{tag}|{class_attr}|{inline_style}|{ancestor_sig}")
     };
     if let Some(result) = cache.get(&key) {
-        return *result;
+        return result.clone();
     }
 
     let classes = class_attr.split_whitespace().collect::<Vec<_>>();
     let declarations = stylesheet.computed_declarations(dom, id, tag, &classes);
-    let mut style = declarations.resolved().cell;
-    let mut display = declarations.resolved().display;
+    let resolved = declarations.resolved();
+    let mut style = resolved.cell;
+    let mut display = resolved.display;
 
     if !inline_style.is_empty() {
         let inline = parse_style_declarations(inline_style);
         // Inline declarations layer on top of the resolved rule style (same
         // logic as before), and an inline `display` overrides the rule's.
+        let inline_display = inline.resolved().display;
         let mut merged = StyleDeclarations::default();
         merged.normal.cell = style;
         merged.merge_inline(inline);
         style = merged.resolved().cell;
-        display = inline.resolved().display.or(display);
+        display = inline_display.or(display);
     }
 
     let result = (style, display == Some(CssDisplay::None));
-    cache.insert(key, result);
+    cache.insert(key, result.clone());
     result
 }
 
@@ -1520,13 +1554,13 @@ struct SimpleSelector {
     context: Vec<(Combinator, Compound)>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct StyleDeclarations {
     normal: DeclarationLayer,
     important: DeclarationLayer,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct DeclarationLayer {
     cell: CellStyle,
     display: Option<CssDisplay>,
@@ -1656,7 +1690,7 @@ impl Stylesheet {
 
         let mut declarations = StyleDeclarations::default();
         for rule in matched {
-            declarations.merge(rule.declarations);
+            declarations.merge(rule.declarations.clone());
         }
 
         declarations
@@ -2055,8 +2089,8 @@ impl StyleDeclarations {
     }
 
     fn resolved(&self) -> DeclarationLayer {
-        let mut resolved = self.normal;
-        resolved.merge(self.important);
+        let mut resolved = self.normal.clone();
+        resolved.merge(self.important.clone());
         resolved
     }
 }
@@ -2186,7 +2220,7 @@ impl<'i> QualifiedRuleParser<'i> for RuleParser {
         let declarations = parse_declaration_block(input);
         Ok(prelude
             .into_iter()
-            .map(|selector| (selector, declarations))
+            .map(|selector| (selector, declarations.clone()))
             .collect())
     }
 }
@@ -2723,6 +2757,51 @@ fn apply_flex_shorthand(target: &mut DeclarationLayer, value: &str) {
     }
 }
 
+/// Parse a `grid-template-columns` track list: lengths, `fr` fractions, `auto`,
+/// and non-nested `repeat(N, tracks…)`. Unknown tokens (`minmax()`, named
+/// lines, percentages) are skipped.
+fn parse_grid_tracks(value: &str) -> Vec<GridTrack> {
+    fn parse_token(token: &str) -> Option<GridTrack> {
+        let token = token.trim();
+        if token.eq_ignore_ascii_case("auto") {
+            return Some(GridTrack::Auto);
+        }
+        if let Some(fr) = token.strip_suffix("fr") {
+            return fr.trim().parse::<f32>().ok().map(GridTrack::Fr);
+        }
+        parse_css_length(token).map(GridTrack::Pt)
+    }
+
+    let mut out = Vec::new();
+    let mut rest = value.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("repeat(") {
+            let Some(close) = after.find(')') else { break };
+            let inner = &after[..close];
+            if let Some((count, tracks)) = inner.split_once(',') {
+                if let Ok(count) = count.trim().parse::<usize>() {
+                    let unit: Vec<GridTrack> = tracks
+                        .split_whitespace()
+                        .filter_map(parse_token)
+                        .collect();
+                    for _ in 0..count.min(100) {
+                        out.extend(unit.iter().copied());
+                    }
+                }
+            }
+            rest = &after[close + 1..];
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            if let Some(track) = parse_token(&rest[..end]) {
+                out.push(track);
+            }
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
 fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value: &str) {
     match property {
         "display" if value.eq_ignore_ascii_case("none") => {
@@ -2764,11 +2843,43 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 _ => Some(AlignItems::Stretch),
             };
         }
-        "gap" | "column-gap" => {
-            // A single length; `row gap` in a `gap` shorthand is ignored (row
-            // flex uses the column gap).
-            if let Some(g) = value.split_whitespace().next().and_then(parse_css_length) {
+        "gap" => {
+            // `gap: <row-gap> <column-gap>` — a single value sets both.
+            let lengths: Vec<f32> = value
+                .split_whitespace()
+                .filter_map(parse_css_length)
+                .collect();
+            if let Some(&row) = lengths.first() {
+                target.cell.row_gap = Some(row);
+                target.cell.gap = Some(*lengths.get(1).unwrap_or(&row));
+            }
+        }
+        "column-gap" => {
+            if let Some(g) = parse_css_length(value) {
                 target.cell.gap = Some(g);
+            }
+        }
+        "row-gap" => {
+            if let Some(g) = parse_css_length(value) {
+                target.cell.row_gap = Some(g);
+            }
+        }
+        "display" if value.eq_ignore_ascii_case("grid") || value.eq_ignore_ascii_case("inline-grid") => {
+            target.cell.display_grid = true;
+        }
+        "grid-template-columns" => {
+            let tracks = parse_grid_tracks(value);
+            if !tracks.is_empty() {
+                target.cell.grid_template = Some(tracks);
+            }
+        }
+        "grid-column" => {
+            // Only the `span N` form is supported; line-based placement is not.
+            let v = value.trim().to_ascii_lowercase();
+            if let Some(rest) = v.strip_prefix("span") {
+                if let Ok(n) = rest.trim().parse::<usize>() {
+                    target.cell.grid_span = Some(n.max(1));
+                }
             }
         }
         "flex-grow" => target.cell.flex_grow = value.trim().parse::<f32>().ok(),
@@ -3105,6 +3216,10 @@ impl CellStyle {
         self.gap = other.gap.or(self.gap);
         self.flex_grow = other.flex_grow.or(self.flex_grow);
         self.flex_basis = other.flex_basis.or(self.flex_basis);
+        self.display_grid |= other.display_grid;
+        self.grid_template = other.grid_template.or(self.grid_template.take());
+        self.row_gap = other.row_gap.or(self.row_gap);
+        self.grid_span = other.grid_span.or(self.grid_span);
     }
 }
 
@@ -3220,6 +3335,54 @@ mod tests {
         assert!(find("under").underline && !find("under").line_through);
         assert!(find("struck").line_through && !find("struck").underline);
         assert!(find("both").underline && find("both").line_through);
+    }
+
+    #[test]
+    fn parses_grid_template_columns() {
+        use super::{parse_grid_tracks, GridTrack};
+        assert_eq!(
+            parse_grid_tracks("120pt auto 1fr"),
+            vec![GridTrack::Pt(120.0), GridTrack::Auto, GridTrack::Fr(1.0)]
+        );
+        assert_eq!(parse_grid_tracks("repeat(3, 1fr)"), vec![GridTrack::Fr(1.0); 3]);
+        assert_eq!(
+            parse_grid_tracks("repeat(2, 50pt 2fr) auto"),
+            vec![
+                GridTrack::Pt(50.0),
+                GridTrack::Fr(2.0),
+                GridTrack::Pt(50.0),
+                GridTrack::Fr(2.0),
+                GridTrack::Auto
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_container_and_span_reach_the_box_tree() {
+        let document = parse(
+            "<style>.g { display:grid; grid-template-columns: repeat(2, 1fr); gap: 6pt 9pt; } \
+                    .w { grid-column: span 2; }</style>\
+             <p>before</p>\
+             <div class=\"g\"><div class=\"w\">wide</div><div>a</div><div>b</div></div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let grid_block = flow_blocks(&flow)
+            .into_iter()
+            .find(|b| b.grid.is_some())
+            .expect("a grid container");
+        let grid = grid_block.grid.as_ref().unwrap();
+        assert_eq!(grid.columns.len(), 2);
+        assert_eq!(grid.row_gap, 6.0);
+        assert_eq!(grid.column_gap, 9.0);
+        let spans: Vec<usize> = grid_block
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                BoxChild::Block(b) => Some(b.grid_span),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spans, vec![2, 1, 1]);
     }
 
     #[test]
@@ -3731,7 +3894,7 @@ mod tests {
             <table><tr><td class="style10">Student ID</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.align, Some(super::TextAlign::Center));
         assert!(style.bold);
@@ -3751,7 +3914,7 @@ mod tests {
             <table><tr><td class="clip">abc@example.com</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.overflow, Some(super::Overflow::Hidden));
         assert_eq!(style.white_space, Some(super::WhiteSpace::NoWrap));
@@ -3833,7 +3996,7 @@ mod tests {
             <table><tr><td class="notice">Warning</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(
             style.color,
@@ -3878,7 +4041,7 @@ mod tests {
             <table><tr><td class="amount">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.font_size, Some(10.0));
         assert_eq!(style.align, Some(super::TextAlign::Right));
@@ -3895,7 +4058,7 @@ mod tests {
             <table><tr><td class="amount">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.font_size, Some(12.0));
         assert_eq!(style.align, Some(super::TextAlign::Center));
@@ -3912,7 +4075,7 @@ mod tests {
             <table><tr><td class="amount">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.font_size, Some(12.0));
         assert_eq!(style.align, Some(super::TextAlign::Right));
@@ -3934,7 +4097,7 @@ mod tests {
             <table><tr><td class="amount">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.font_size, Some(10.0));
         assert_eq!(style.align, Some(super::TextAlign::Right));
@@ -3970,7 +4133,7 @@ mod tests {
             <table><tr><td class="amount">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.align, Some(super::TextAlign::Right));
         assert_eq!(style.font_size, Some(12.0));
@@ -3986,7 +4149,7 @@ mod tests {
             <table><tr><td>x</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(
             style.color,
@@ -4038,7 +4201,7 @@ mod tests {
             <table><tr><td>x</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_ne!(style.border, Some(true));
         assert_eq!(style.background_color, None);
@@ -4054,7 +4217,7 @@ mod tests {
             <table><tr><td class="a">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.align, Some(super::TextAlign::Right));
         assert_eq!(style.font_size, Some(9.0));
@@ -4071,7 +4234,7 @@ mod tests {
             <table><tr><td class="amount">9.00</td></tr></table>
             "#,
         );
-        let style = document.blocks[0].cells[0].style;
+        let style = document.blocks[0].cells[0].style.clone();
 
         assert_eq!(style.font_size, Some(8.0));
         assert_eq!(style.align, Some(super::TextAlign::Center));

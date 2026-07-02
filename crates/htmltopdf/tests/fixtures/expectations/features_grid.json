@@ -1,0 +1,32 @@
+{
+  "fixture": "grid",
+  "layer": "features",
+  "description": "First-pass CSS grid: repeat()/fr/auto/fixed tracks, row-major auto-placement, grid-column span, row/column gaps.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "re",
+      "f",
+      "rg"
+    ],
+    "must_contain_text": [
+      "Grid",
+      "Three",
+      "Fixed",
+      "Auto",
+      "Chart",
+      "KPI"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Six cells fill a 3-column grid as two rows of equal-width tracks with gaps.",
+    "The 120pt/auto/1fr row: fixed yellow column, teal column shrink-wrapped to its text, pink column taking the remainder.",
+    "The dashboard places a span-2 chart plus two KPIs on row one, and two KPIs plus a span-2 panel on row two.",
+    "Row gap (8pt) and column gap (12pt) are visibly different."
+  ]
+}

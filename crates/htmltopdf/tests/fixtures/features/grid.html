@@ -1,0 +1,36 @@
+<!DOCTYPE html><html><head><style>
+@page{margin:28.8pt}
+body{font-size:11pt}
+h2{font-size:13pt}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:10pt;margin-bottom:14pt}
+.cell{background:#eef;border:1px solid #99c;padding:6pt}
+.mix{display:grid;grid-template-columns:120pt auto 1fr;gap:8pt;margin-bottom:14pt}
+.a{background:#fe8;padding:6pt}
+.b{background:#8fe;padding:6pt}
+.c{background:#fcc;padding:6pt}
+.dash{display:grid;grid-template-columns:repeat(4,1fr);gap:8pt 12pt}
+.wide{grid-column:span 2;background:#dfd;border:1px solid #6a6;padding:6pt}
+.kpi{background:#eee;border:1px solid #bbb;padding:6pt}
+</style></head><body>
+<h1>CSS Grid</h1>
+<h2>repeat(3, 1fr) + gap</h2>
+<div class="g3">
+  <div class="cell">One</div><div class="cell">Two</div><div class="cell">Three</div>
+  <div class="cell">Four</div><div class="cell">Five</div><div class="cell">Six</div>
+</div>
+<h2>120pt / auto / 1fr</h2>
+<div class="mix">
+  <div class="a">Fixed 120pt</div>
+  <div class="b">Auto sized</div>
+  <div class="c">Takes the rest of the row width (1fr) with wrapping text to prove it.</div>
+</div>
+<h2>Dashboard: 4 tracks, span 2, two gaps (8pt row / 12pt col)</h2>
+<div class="dash">
+  <div class="wide">Chart spanning two tracks</div>
+  <div class="kpi">KPI A</div>
+  <div class="kpi">KPI B</div>
+  <div class="kpi">KPI C</div>
+  <div class="kpi">KPI D</div>
+  <div class="wide">Another two-track panel</div>
+</div>
+</body></html>

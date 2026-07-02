@@ -13,7 +13,7 @@
 
 use crate::color::Color;
 use crate::html::{
-    AlignItems, BlockKind, FlexDirection, JustifyContent, TableCell, TextAlign,
+    AlignItems, BlockKind, FlexDirection, GridTrack, JustifyContent, TableCell, TextAlign,
 };
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
@@ -100,6 +100,11 @@ pub struct BlockBox {
     /// container (`flex-grow`; `flex-basis` in points, `None` = auto/content).
     pub flex_grow: f32,
     pub flex_basis: Option<f32>,
+    /// `Some` when this block is a `display: grid` container: its children are
+    /// placed into columns row-major instead of stacking vertically.
+    pub grid: Option<GridContainer>,
+    /// `grid-column: span N` when this block is a grid item (1 = one track).
+    pub grid_span: usize,
     pub children: Vec<BoxChild>,
 }
 
@@ -110,6 +115,15 @@ pub struct FlexContainer {
     pub justify: JustifyContent,
     pub align: AlignItems,
     pub gap: f32,
+}
+
+/// Grid container parameters resolved from the cascade. An empty `columns`
+/// list behaves as a single `auto` column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridContainer {
+    pub columns: Vec<GridTrack>,
+    pub column_gap: f32,
+    pub row_gap: f32,
 }
 
 /// The four CSS box edges, in points.
