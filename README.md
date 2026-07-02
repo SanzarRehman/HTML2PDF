@@ -83,12 +83,21 @@ Works today:
   structural pseudo-classes (`:first-child`, `:nth-child()`, `:*-of-type`,
   `:empty`, `:root`, `:not()`); `@media print` queries; specificity, source
   order, inheritance, and `!important`.
-- Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes.
+- Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes —
+  and tables rendered inline with the surrounding flow content.
 - Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
   alignment, wrapping, clipping, and repeated table headers.
 - CSS colors, font sizes, bold text (rendered as faux-bold fill+stroke), text
-  alignment, margins, padding (with
-  vertical margin collapse), block backgrounds, and basic borders.
+  alignment, text decoration (underline/line-through), margins, padding (with
+  vertical margin collapse), `line-height`, block backgrounds, and basic borders.
+- Modern layout, first pass each: **flexbox** (`display: flex` — grow/basis,
+  `justify-content`, `align-items`, gaps, row and column), **grid**
+  (`display: grid` — fixed/`fr`/`auto`/`repeat()` tracks, `span`, gaps),
+  **floats** with real text wrap (`float: left/right`, `clear`, stacked floats),
+  and **positioning** (`position: relative/absolute` with box offsets, CSS
+  `width` on in-flow blocks).
+- **Text shaping** (HarfBuzz via `rustybuzz`) for embedded fonts: kerning
+  reproduced in the PDF, ligatures with extractable text, Arabic joining forms.
 - Block-level `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded
   in-house, alpha as a soft mask), from file paths and `data:` URIs, with
   `width`/`height` sizing and aspect-ratio preservation.
@@ -101,25 +110,33 @@ Works today:
 Opt-in (behind the `js` build feature):
 
 - A bounded pre-layout **JavaScript** stage (Boa) that runs inline `<script>`s
-  against a minimal `document` API (`getElementById`, `textContent`,
-  `get/setAttribute`, `console.log`) and mutates the DOM before layout. Enable
-  with `--features js` and pass `--js` (CLI) or use
+  against a live DOM and mutates it before layout: `getElementById`,
+  `textContent`, `get/setAttribute`, `innerHTML` (get/set), `createElement`,
+  `createTextNode`, `appendChild`, `removeChild`, and `document.body` — enough
+  to build a whole document from script. Every run is capped by node/iteration
+  budgets. Enable with `--features js` and pass `--js` (CLI) or use
   `Engine::render_html_with_scripts`.
 
 Not complete yet:
 
 - Dynamic pseudo-classes (`:hover`, `:focus`, …) and pseudo-elements
   (`::before`) — dropped, since they do not apply to static print output.
-- Broader JavaScript: `innerHTML`/`createElement`, DOM traversal, events, timers.
-- Inline/floated images, `object-fit`, CSS-sized images, and remote (`http`)
-  image URLs; SVG, canvas, flexbox, grid, floats, and absolute positioning.
-- Full browser text shaping and baseline handling.
-- Exact non-Latin layout metrics for every script.
+- Broader JavaScript: DOM traversal from JS, `querySelector`, events, timers,
+  and mid-script layout reads (rejected by design — ADR 0009).
+- Inline/floated images, `object-fit`, and remote (`http`) image URLs; SVG and
+  canvas.
+- `flex-wrap`, grid line-based placement/`minmax()`, `position: fixed` repeated
+  per page, `z-index` stacking.
+- Bidi paragraph reordering (UAX #9) and font fallback chains (CJK/emoji).
 - Complete CSS selector/property coverage.
 - Full visual compatibility with Chromium.
 
-See [OVERVIEW.md](OVERVIEW.md), [IMPLEMENTATION.md](IMPLEMENTATION.md), and
-[PLAN.md](PLAN.md) for the deeper roadmap and benchmark history.
+See [docs/COVERAGE.md](docs/COVERAGE.md) for the full ✅/🟡/❌ support matrix,
+and [OVERVIEW.md](OVERVIEW.md), [IMPLEMENTATION.md](IMPLEMENTATION.md), and
+[PLAN.md](PLAN.md) for the deeper roadmap and benchmark history. A Chromium
+parity harness (`crates/htmltopdf/tests/parity_tests.rs` + fixtures) guards
+every shipped feature; `scripts/compare-parity.sh` diffs rendered pages against
+headless Chrome.
 
 ## Quick Start
 
@@ -257,7 +274,7 @@ Important engine modules:
 | `dom.rs` | `html5ever` integration and compact arena DOM |
 | `html.rs` | CSS parsing, cascade, computed styles, document extraction |
 | `box_tree.rs` | Nested flow box tree |
-| `layout.rs` | Pagination, text wrapping, tables, and page layout |
+| `layout.rs` | Pagination, line breaking, tables, flex/grid, floats, positioning |
 | `paint.rs` | Backend-neutral display-list commands |
 | `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, image XObjects |
 | `image.rs` | `<img>` loading: `data:` URIs, JPEG headers, in-house PNG decoding |
@@ -290,13 +307,14 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- Broaden CSS properties and computed-value coverage.
-- Broaden image support (inline/floated images, CSS sizing, remote URLs).
-- Add SVG support.
-- Broaden font subsetting and non-Latin text measurement.
-- Add visual comparison tests against browser output.
-- Add bounded pre-layout JavaScript through a runtime abstraction.
-- Add more CSS layout modes, including absolute positioning, flexbox, and grid.
+- `position: fixed` repeated on every page (print headers/watermarks), and
+  `z-index` stacking.
+- Bidi paragraph reordering (UAX #9) and font fallback chains.
+- Deepen flexbox (`flex-wrap`) and grid (line-based placement, `minmax()`).
+- Broaden CSS properties and computed-value coverage (`%` lengths, `calc()`,
+  custom properties).
+- Broaden image support (inline/floated images, remote URLs) and add SVG.
+- Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
 - Harden the HTTP server for production deployment patterns.
 
 ## Author
