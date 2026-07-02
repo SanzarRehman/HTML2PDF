@@ -567,10 +567,11 @@ fn layout_float(
 ) {
     let is_left = block.float_dir == Some(crate::html::FloatDir::Left);
 
-    // Shrink-to-fit: CSS width if declared, else max-content + own edges,
-    // clamped to the containing width.
+    // Shrink-to-fit: CSS width (points or percent) if declared, else
+    // max-content + own edges, clamped to the containing width.
     let float_width = block
         .css_width
+        .or(block.css_width_percent.map(|pct| pct / 100.0 * width))
         .map(|w| w + block.padding.left + block.padding.right)
         .unwrap_or_else(|| {
             measure_max_content(&block.children, options)
@@ -650,6 +651,7 @@ fn layout_absolute_box(
 
     let width = block
         .css_width
+        .or(block.css_width_percent.map(|pct| pct / 100.0 * content_width))
         .map(|w| w + block.padding.left + block.padding.right)
         .unwrap_or_else(|| {
             measure_max_content(&block.children, options)
@@ -710,7 +712,16 @@ fn layout_float_image(
     if image.width <= 0.0 || image.height <= 0.0 {
         return;
     }
-    let scale = (width / image.width).min(1.0);
+    let mut scale = match image.css_width_percent {
+        Some(pct) => (pct / 100.0 * width) / image.width,
+        None => (width / image.width).min(1.0),
+    };
+    if let Some(max_w) = image
+        .max_width
+        .or(image.max_width_percent.map(|pct| pct / 100.0 * width))
+    {
+        scale = scale.min(max_w / image.width);
+    }
     let (w, h) = (image.width * scale, image.height * scale);
 
     if !has_space(*y, options, h) {
@@ -1221,11 +1232,22 @@ fn layout_image_box(
         return;
     }
 
-    // Scale down to the content width and to a full page's height if oversized,
-    // preserving the aspect ratio.
+    // A percentage width sizes the image against the containing block (this
+    // may scale *up*); `max-width` (points or percent) clamps it. Otherwise
+    // scale down to the content width — and to a full page's height — if
+    // oversized, preserving the aspect ratio.
     let page_height = options.page_size.height - options.margin_top - options.margin_bottom;
-    let mut scale = 1.0_f32;
-    if image.width > width {
+    let mut scale = match image.css_width_percent {
+        Some(pct) => (pct / 100.0 * width) / image.width,
+        None => 1.0_f32,
+    };
+    let max_w = image
+        .max_width
+        .or(image.max_width_percent.map(|pct| pct / 100.0 * width));
+    if let Some(max_w) = max_w {
+        scale = scale.min(max_w / image.width);
+    }
+    if image.width * scale > width {
         scale = scale.min(width / image.width);
     }
     if image.height * scale > page_height {
@@ -1261,18 +1283,33 @@ fn layout_block_box(
     containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
-    // An explicit CSS `width` (content-box) narrows the block: it occupies
-    // `width + padding + margins`, clamped to the containing width, and stays
-    // left-aligned (no `margin: auto` centering yet).
-    let width = match block.css_width {
-        Some(css) => (css
-            + block.padding.left
-            + block.padding.right
-            + block.margin.left
-            + block.margin.right)
-            .min(width),
+    // An explicit CSS `width` (content-box; points or a percentage of the
+    // containing block) narrows the block to `width + padding + margins`,
+    // clamped to the containing width; `max-width` clamps further. With
+    // `margin: auto` on both sides, the leftover space centers the box.
+    let edges =
+        block.padding.left + block.padding.right + block.margin.left + block.margin.right;
+    let css_width = block
+        .css_width
+        .or(block.css_width_percent.map(|pct| pct / 100.0 * width));
+    let max_outer = block
+        .max_width
+        .or(block.max_width_percent.map(|pct| pct / 100.0 * width))
+        .map(|max| max + edges);
+    let outer = match css_width {
+        Some(css) => (css + edges).min(width),
         None => width,
     };
+    let outer = match max_outer {
+        Some(max) => outer.min(max),
+        None => outer,
+    };
+    let x = if block.center && outer < width {
+        x + (width - outer) / 2.0
+    } else {
+        x
+    };
+    let width = outer;
 
     // `clear` drops the block below the matching active floats first.
     if let Some(clear) = block.clear {
@@ -2711,6 +2748,58 @@ mod tests {
     }
 
     #[test]
+    fn percent_width_max_width_and_margin_auto_centering() {
+        let document = crate::html::parse(
+            "<style>\
+             .half { width: 50%; margin: 0 auto; }\
+             .capped { max-width: 100pt; }\
+             .pct { width: 25%; }\
+             </style>\
+             <div class=\"half\">centered</div>\
+             <div class=\"pct\">quarter</div>\
+             <div class=\"capped\">a capped div whose text is far wider than one \
+             hundred points so it must wrap into several lines</div>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+        let find = |t: &str| lines.iter().find(|l| l.text.contains(t)).unwrap();
+
+        let content = options.page_size.width - options.margin_left - options.margin_right; // 499
+        // width: 50% + margin auto → the box starts at the centering offset.
+        let centered = find("centered");
+        let expected_x = options.margin_left + (content - content * 0.5) / 2.0;
+        assert!(
+            (centered.x - expected_x).abs() < 1.0,
+            "centered x {} vs expected {expected_x}",
+            centered.x
+        );
+        // width: 25% without auto margins stays left-aligned.
+        let quarter = find("quarter");
+        assert!((quarter.x - options.margin_left).abs() < 1.0, "x {}", quarter.x);
+
+        // max-width: 100pt wraps the long text: every capped line stays inside
+        // 100pt, and there are several of them.
+        let capped: Vec<_> = lines
+            .iter()
+            .filter(|l| {
+                l.text.contains("capped")
+                    || l.text.contains("hundred")
+                    || l.text.contains("wrap")
+            })
+            .collect();
+        assert!(capped.len() >= 2, "capped div must wrap");
+        for line in &capped {
+            let text_width = estimate_text_width(&line.text, line.font_size, &options.font);
+            assert!(
+                text_width <= 101.0,
+                "line `{}` is {text_width}pt wide",
+                line.text
+            );
+        }
+    }
+
+    #[test]
     fn absolute_resolves_against_positioned_ancestor() {
         let document = crate::html::parse(
             "<style>\
@@ -2810,6 +2899,10 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    css_width_percent: None,
+                    max_width: None,
+                    max_width_percent: None,
+                    center: false,
                     line_height: None,
                     position: None,
                     z_index: None,
@@ -2872,6 +2965,10 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    css_width_percent: None,
+                    max_width: None,
+                    max_width_percent: None,
+                    center: false,
                     line_height: None,
                     position: None,
                     z_index: None,
@@ -2936,6 +3033,10 @@ mod tests {
                 float_dir: None,
                 clear: None,
                 css_width: None,
+                css_width_percent: None,
+                max_width: None,
+                max_width_percent: None,
+                center: false,
                 line_height: None,
                 position: None,
                 z_index: None,
@@ -3019,6 +3120,10 @@ mod tests {
                         float_dir: None,
                         clear: None,
                         css_width: None,
+                        css_width_percent: None,
+                        max_width: None,
+                        max_width_percent: None,
+                        center: false,
                         line_height,
                         position: None,
                         z_index: None,
@@ -3080,6 +3185,10 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    css_width_percent: None,
+                    max_width: None,
+                    max_width_percent: None,
+                    center: false,
                     line_height: None,
                     position: None,
                     z_index: None,

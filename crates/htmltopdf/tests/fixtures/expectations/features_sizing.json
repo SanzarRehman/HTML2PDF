@@ -1,0 +1,29 @@
+{
+  "fixture": "sizing",
+  "layer": "features",
+  "description": "Percentage widths, max-width (pt and %), and margin:auto horizontal centering.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "re"
+    ],
+    "must_contain_text": [
+      "Percentage",
+      "centered",
+      "30%",
+      "max-width",
+      "capped"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The 60% card is horizontally centered on the page.",
+    "The 30% box hugs the left margin at roughly a third of the width.",
+    "The 180pt-capped box wraps its text within a narrow border.",
+    "The 50%-capped box is half the content width."
+  ]
+}

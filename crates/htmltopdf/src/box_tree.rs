@@ -72,9 +72,14 @@ pub struct ImageBox {
     /// Presentational `width`/`height` attributes, in CSS pixels.
     pub attr_width: Option<f32>,
     pub attr_height: Option<f32>,
-    /// Cascaded CSS `width`/`height`, already resolved to points.
+    /// Cascaded CSS `width`/`height`, already resolved to points; a
+    /// percentage width resolves against the containing block at layout time.
     pub css_width: Option<f32>,
+    pub css_width_percent: Option<f32>,
     pub css_height: Option<f32>,
+    /// CSS `max-width` (points / percent), clamped at layout time.
+    pub max_width: Option<f32>,
+    pub max_width_percent: Option<f32>,
     pub image_index: Option<usize>,
     pub width: f32,
     pub height: f32,
@@ -114,8 +119,15 @@ pub struct BlockBox {
     /// CSS `clear`: drop below active floats on the given side(s) first.
     pub clear: Option<Clear>,
     /// Cascaded CSS `width` (points), honored for floated blocks (otherwise a
-    /// float is shrink-to-fit) and positioned boxes.
+    /// float is shrink-to-fit), positioned boxes, and in-flow blocks. A
+    /// percentage width resolves against the containing block at layout time.
     pub css_width: Option<f32>,
+    pub css_width_percent: Option<f32>,
+    /// CSS `max-width` (points / percent), clamping the used width.
+    pub max_width: Option<f32>,
+    pub max_width_percent: Option<f32>,
+    /// `margin-left: auto` + `margin-right: auto` + a width = centered.
+    pub center: bool,
     /// CSS `line-height` (inherited): overrides the default leading of this
     /// block's line boxes (`None` = UA default, `font × 1.35`).
     pub line_height: Option<crate::html::LineHeight>,

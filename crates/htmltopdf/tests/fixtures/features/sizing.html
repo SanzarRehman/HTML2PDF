@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-size: 11pt; }
+  .card {
+    width: 60%; margin: 10pt auto; border: 1pt solid;
+    padding: 8pt; background-color: #f4f6f8;
+  }
+  .narrow { width: 30%; border: 1pt solid; padding: 4pt; }
+  .capped { max-width: 180pt; border: 1pt solid; padding: 4pt; margin-top: 8pt; }
+  .capped-pct { max-width: 50%; border: 1pt solid; padding: 4pt; margin-top: 8pt; }
+</style>
+</head>
+<body>
+  <h1>Percentage sizing</h1>
+
+  <div class="card">A centered card: width 60% with margin auto. The quick brown
+  fox jumps over the lazy dog so this wraps within the card.</div>
+
+  <div class="narrow">30% wide box, left aligned.</div>
+
+  <div class="capped">This box has max-width 180pt, so its long line of text is
+  forced to wrap into several shorter lines inside the border.</div>
+
+  <div class="capped-pct">And this one is capped at 50% of the page width with
+  enough words to wrap at least once.</div>
+</body>
+</html>

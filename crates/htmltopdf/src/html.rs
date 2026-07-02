@@ -83,10 +83,20 @@ pub struct CellStyle {
     pub italic: Option<bool>,
     /// CSS `line-height` (inherited). `None` = `normal` (UA default leading).
     pub line_height: Option<LineHeight>,
-    /// CSS `width`/`height` in points. Currently consumed only by `<img>` sizing;
-    /// table column/row geometry uses a separate parse.
+    /// CSS `width`/`height` in points. Consumed by `<img>` sizing, blocks,
+    /// floats, and positioned boxes; table column/row geometry uses a separate
+    /// parse. A percentage width lives in `width_percent` (resolved against
+    /// the containing block at layout time).
     pub width: Option<f32>,
+    pub width_percent: Option<f32>,
     pub height: Option<f32>,
+    /// CSS `max-width` in points / percent of the containing block.
+    pub max_width: Option<f32>,
+    pub max_width_percent: Option<f32>,
+    /// `margin-left: auto` / `margin-right: auto` (both set + a width =
+    /// horizontal centering).
+    pub margin_left_auto: bool,
+    pub margin_right_auto: bool,
     pub padding_left: Option<f32>,
     pub padding_right: Option<f32>,
     pub padding_top: Option<f32>,
@@ -148,7 +158,12 @@ impl Default for CellStyle {
             italic: None,
             line_height: None,
             width: None,
+            width_percent: None,
             height: None,
+            max_width: None,
+            max_width_percent: None,
+            margin_left_auto: false,
+            margin_right_auto: false,
             padding_left: None,
             padding_right: None,
             padding_top: None,
@@ -724,7 +739,10 @@ fn build_node(
                                     .attr("height")
                                     .and_then(|v| v.trim().parse::<f32>().ok()),
                                 css_width: own.width,
+                                css_width_percent: own.width_percent,
                                 css_height: own.height,
+                                max_width: own.max_width,
+                                max_width_percent: own.max_width_percent,
                                 image_index: None,
                                 width: 0.0,
                                 height: 0.0,
@@ -884,6 +902,10 @@ fn build_block(
         float_dir: own.float_dir,
         clear: own.clear,
         css_width: own.width,
+        css_width_percent: own.width_percent,
+        max_width: own.max_width,
+        max_width_percent: own.max_width_percent,
+        center: own.margin_left_auto && own.margin_right_auto,
         line_height: own.line_height,
         position: own.position,
         z_index: own.z_index,
@@ -1527,7 +1549,12 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         border: own.border,
         overflow: own.overflow,
         width: own.width,
+        width_percent: own.width_percent,
         height: own.height,
+        max_width: own.max_width,
+        max_width_percent: own.max_width_percent,
+        margin_left_auto: own.margin_left_auto,
+        margin_right_auto: own.margin_right_auto,
         padding_left: own.padding_left,
         padding_right: own.padding_right,
         padding_top: own.padding_top,
@@ -1671,6 +1698,17 @@ fn parse_line_height(value: &str) -> Option<LineHeight> {
         return (number >= 0.0).then_some(LineHeight::Number(number));
     }
     parse_css_length(value).map(LineHeight::Length)
+}
+
+/// Parse a percentage value (`"55%"` → `55.0`); `None` for anything else.
+fn parse_css_percent(value: &str) -> Option<f32> {
+    value
+        .trim()
+        .strip_suffix('%')?
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|n| *n >= 0.0)
 }
 
 fn parse_css_length(value: &str) -> Option<f32> {
@@ -3260,7 +3298,14 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             };
         }
         "line-height" => target.cell.line_height = parse_line_height(value),
-        "width" => target.cell.width = parse_css_length(value),
+        "width" => match parse_css_percent(value) {
+            Some(pct) => target.cell.width_percent = Some(pct),
+            None => target.cell.width = parse_css_length(value),
+        },
+        "max-width" => match parse_css_percent(value) {
+            Some(pct) => target.cell.max_width_percent = Some(pct),
+            None => target.cell.max_width = parse_css_length(value),
+        },
         "height" => target.cell.height = parse_css_length(value),
         "color" => target.cell.color = parse_css_color(value),
         "background-color" => target.cell.background_color = parse_css_color(value),
@@ -3276,7 +3321,13 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             target.cell.padding_bottom = bottom;
             target.cell.padding_left = left;
         }
+        "margin-left" if value.trim().eq_ignore_ascii_case("auto") => {
+            target.cell.margin_left_auto = true;
+        }
         "margin-left" => target.cell.margin_left = parse_css_length(value),
+        "margin-right" if value.trim().eq_ignore_ascii_case("auto") => {
+            target.cell.margin_right_auto = true;
+        }
         "margin-right" => target.cell.margin_right = parse_css_length(value),
         "margin-top" => target.cell.margin_top = parse_css_length(value),
         "margin-bottom" => target.cell.margin_bottom = parse_css_length(value),
@@ -3286,6 +3337,19 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             target.cell.margin_right = right;
             target.cell.margin_bottom = bottom;
             target.cell.margin_left = left;
+            // `margin: 0 auto` (and friends): detect `auto` in the expanded
+            // right/left slots of the 1-to-4 shorthand.
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            let (right_auto, left_auto) = match parts.as_slice() {
+                [a] => (a.eq_ignore_ascii_case("auto"), a.eq_ignore_ascii_case("auto")),
+                [_, b] | [_, b, _] => {
+                    (b.eq_ignore_ascii_case("auto"), b.eq_ignore_ascii_case("auto"))
+                }
+                [_, b, _, d, ..] => (b.eq_ignore_ascii_case("auto"), d.eq_ignore_ascii_case("auto")),
+                [] => (false, false),
+            };
+            target.cell.margin_right_auto |= right_auto;
+            target.cell.margin_left_auto |= left_auto;
         }
         "overflow" if value.eq_ignore_ascii_case("visible") => {
             target.cell.overflow = Some(Overflow::Visible);
@@ -3526,7 +3590,12 @@ impl CellStyle {
         self.italic = other.italic.or(self.italic);
         self.line_height = other.line_height.or(self.line_height);
         self.width = other.width.or(self.width);
+        self.width_percent = other.width_percent.or(self.width_percent);
         self.height = other.height.or(self.height);
+        self.max_width = other.max_width.or(self.max_width);
+        self.max_width_percent = other.max_width_percent.or(self.max_width_percent);
+        self.margin_left_auto |= other.margin_left_auto;
+        self.margin_right_auto |= other.margin_right_auto;
         self.padding_left = other.padding_left.or(self.padding_left);
         self.padding_right = other.padding_right.or(self.padding_right);
         self.padding_top = other.padding_top.or(self.padding_top);

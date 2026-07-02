@@ -72,12 +72,13 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `display: grid` (+ `grid-template-columns`, `gap`/`row-gap`/`column-gap`, `grid-column: span N`) | 🟡 | Tracks: fixed lengths, `fr`, `auto`, `repeat(N, …)`. Row-major auto-placement; rows sized to tallest item; page-break between rows. No line-based placement (`1 / 3`), named lines/areas, `minmax()`, `grid-template-rows`, dense packing, or cell alignment. |
 | `float: left/right` + `clear` | 🟡 | Floated blocks (shrink-to-fit or CSS `width`) and floated images; line boxes shorten around the exclusion bands (interval-accurate for stacked floats) and re-widen below; a word that can't fit beside a float drops below it instead of breaking. Floats never split across pages (page break retires them). No `clear` on inline content, no float stacking overflow to a new band row, no margins between float and wrapped text beyond the float's own box. |
 | `position: relative/absolute/fixed` (+ `top`/`right`/`bottom`/`left`, `z-index`) | 🟡 | Relative = visual offset with flow preserved. Absolute = out of flow; `left`/`right`/`top` resolve against the nearest **positioned ancestor's** containing block (else the page content box), `bottom` against the page. **`fixed` repeats on every page** (headers/footers/watermarks). Positioned boxes paint **above** in-flow content, ordered by `z-index` (integer; `auto`=0). Absolute boxes don't paginate (content past the page bottom is dropped). No negative-z-below-flow, no `%` offsets, no `sticky`. |
-| `width` on in-flow blocks | 🟡 | Content-box width honored (left-aligned); no `margin: auto` centering, no `height`. |
+| `width` on in-flow blocks | 🟡 | Content-box width (points or `%`), `max-width` (points or `%`), and **`margin: auto` horizontal centering**; no `height`/`min-width`. |
 | `columns` (multi-col), `flex-wrap`, `flex-shrink` (explicit), `order` | ❌ | |
 | `transform`, `opacity`, `box-shadow`, `border-radius`, `filter` | ❌ | |
-| `object-fit`, `max-width`/`min-width`/`max-height`/`min-height` | ❌ | |
+| `max-width` (pt / `%`) | 🟡 | On blocks and images (`max-width: 100%` works). |
+| `object-fit`, `min-width`, `max-height`, `min-height` | ❌ | |
 | `calc()`, custom properties (`--var`, `var()`) | ❌ | |
-| `%` lengths | ❌ | Only absolute units. |
+| `%` lengths | 🟡 | `width`/`max-width` on blocks, floats, positioned boxes, and images (of the containing block). Not yet on `height`, margins/padding, or offsets. |
 
 ## Images
 
@@ -89,7 +90,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | PNG alpha → `/SMask` | ✅ | |
 | Inline/floated images | ❌ | Always breaks to its own line. |
 | Remote `http(s)` URLs | ❌ | |
-| `object-fit`, `max-width:100%`, `%` sizes | ❌ | |
+| CSS `%` width / `max-width` (incl. `max-width:100%`) | ✅ | Percent of the containing block; `%` may scale up, `max-width` clamps. |
+| `object-fit` | ❌ | |
 | Sub-byte / interlaced / 16-bit PNG; GIF, WebP, SVG, BMP | ❌ | |
 | `srcset` / `<picture>` | ❌ | |
 

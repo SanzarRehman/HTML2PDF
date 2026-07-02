@@ -880,10 +880,17 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       `@font-face` (web fonts from CSS), synthetic italic slant when no italic
       face exists, `font-weight` granularity beyond bold/regular (300/600/900
       map to the nearest), and bold synthesis for fallback-chain faces.
-- [ ] **`%` lengths + sizing keywords**: percentage widths/heights against the
-      containing block, `max-width`/`min-width` (incl. `max-width: 100%` on
-      images), and `margin: auto` horizontal centering. Small parser+layout
-      slices, huge template coverage.
+- [x] **`%` lengths + sizing keywords (first pass)**: `width` and `max-width`
+      accept percentages, resolved against the containing block at layout time
+      (parse time can't know it) — on in-flow blocks, floats, absolute boxes,
+      and images (`width: 120%` may scale an image up; `max-width: 100%`
+      clamps). `margin: auto` on both sides centers a width-constrained block
+      (`margin: 0 auto` shorthand detected in the expanded 1-to-4 slots).
+      Verified geometry: a 60%+auto card centers to the half-point exactly;
+      caps clamp border boxes to the point. `features/sizing` parity fixture
+      (19 total). **Not yet done:** `%` heights/margins/padding/offsets,
+      `min-width`, `max-height`, `height` on blocks, and `auto` margins
+      combined with a single `auto` side (off-center distribution).
 - [ ] **Link annotations + outline**: `<a href>` → PDF `/Annots` link
       rectangles (external URLs and `#anchor` → internal GoTo), and a document
       outline (bookmarks) from `h1`–`h3`. Pure pdf.rs additions; the display
