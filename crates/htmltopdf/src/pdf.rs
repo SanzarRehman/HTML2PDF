@@ -86,19 +86,19 @@ pub fn write_pdf(
         format!(" /XObject << {entries} >>")
     };
 
-    // For an embedded font, resolve the glyph ids / widths / Unicode mapping for
-    // exactly the characters this document uses.
+    // For an embedded font, shape every unique text run this document paints
+    // (cache-assisted — layout already shaped them for measurement) to resolve
+    // the used glyph ids, their natural widths, and the Unicode mapping.
     let cid = embedded.map(|font| {
-        let used: std::collections::BTreeSet<char> = pages
+        let used: std::collections::BTreeSet<&str> = pages
             .iter()
             .flat_map(|page| page.commands.iter())
             .filter_map(|command| match command {
-                PaintCommand::Text(text) => Some(text.text.chars()),
+                PaintCommand::Text(text) => Some(text.text.as_str()),
                 _ => None,
             })
-            .flatten()
             .collect();
-        font.cid_layout(&used)
+        font.shaped_cid_layout(used.into_iter())
     });
 
     // Subset the embedded program to the used glyphs when possible (retain-GIDs,
@@ -106,7 +106,7 @@ pub fn write_pdf(
     // gets a `ABCDEF+` name prefix, as PDF readers expect.
     let used_gids: Option<std::collections::BTreeSet<u16>> = cid
         .as_ref()
-        .map(|cid| cid.char_to_gid.values().copied().collect());
+        .map(|cid| cid.widths.iter().map(|(gid, _)| *gid).collect());
     let font_program: Option<Vec<u8>> = match (embedded, used_gids.as_ref()) {
         (Some(font), Some(gids)) => font.subset(gids),
         _ => None,
@@ -157,11 +157,10 @@ pub fn write_pdf(
         }
     }
 
-    let char_to_gid = cid.as_ref().map(|cid| &cid.char_to_gid);
     for (index, page) in pages.iter().enumerate() {
         let page_id = first_page_id + (index * 2);
         let content_id = page_id + 1;
-        let content = page_content(page, char_to_gid);
+        let content = page_content(page, embedded);
 
         writer.object(
             page_id,
@@ -232,7 +231,7 @@ pub fn write_pdf(
         );
         // Retain-GIDs keeps the /W, /ToUnicode, and Identity map valid against the
         // (possibly subset) program.
-        let program = font_program.as_deref().unwrap_or(&font.data);
+        let program = font_program.as_deref().unwrap_or(font.data());
         writer.font_file_object(fontfile_id, program)?;
         writer.stream_object(tounicode_id, to_unicode_cmap(cid).as_bytes())?;
     }
@@ -310,12 +309,14 @@ fn to_unicode_cmap(cid: &crate::font::CidLayout) -> String {
          1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
     );
 
-    // `beginbfchar` blocks are limited to 100 entries each by the spec.
-    let entries: Vec<(u16, char)> = cid.gid_to_unicode.iter().map(|(&g, &c)| (g, c)).collect();
+    // `beginbfchar` blocks are limited to 100 entries each by the spec. A
+    // destination may be several characters (a ligature glyph maps to them all).
+    let entries: Vec<(u16, &String)> = cid.gid_to_unicode.iter().map(|(&g, c)| (g, c)).collect();
     for chunk in entries.chunks(100) {
         cmap.push_str(&format!("{} beginbfchar\n", chunk.len()));
-        for (gid, ch) in chunk {
-            cmap.push_str(&format!("<{:04X}> <{}>\n", gid, utf16_be_hex(*ch)));
+        for (gid, chars) in chunk {
+            let dest: String = chars.chars().map(utf16_be_hex).collect();
+            cmap.push_str(&format!("<{:04X}> <{}>\n", gid, dest));
         }
         cmap.push_str("endbfchar\n");
     }
@@ -340,10 +341,7 @@ fn compress_stream(stream: &[u8]) -> Result<Vec<u8>, PdfError> {
     encoder.finish().map_err(PdfError::Compression)
 }
 
-fn page_content(
-    page: &Page,
-    char_to_gid: Option<&std::collections::BTreeMap<char, u16>>,
-) -> String {
+fn page_content(page: &Page, embedded: Option<&crate::font::TrueTypeFont>) -> String {
     let mut content = String::new();
     // Track the current fill color so faux-bold text can stroke in the same color.
     let mut fill = (0.0f32, 0.0f32, 0.0f32);
@@ -415,16 +413,24 @@ fn page_content(
                     content.push_str(&format!("{:.3} w 2 Tr\n", text.font_size * 0.03));
                 }
                 content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
-                match char_to_gid {
-                    // Embedded Type0/Identity-H font: write glyph ids as a
-                    // 2-byte-per-glyph hex string.
-                    Some(map) => {
-                        content.push('<');
-                        for ch in text.text.chars() {
-                            let gid = map.get(&ch).copied().unwrap_or(0);
-                            content.push_str(&format!("{gid:04X}"));
+                match embedded {
+                    // Embedded Type0/Identity-H font: write the *shaped* glyph
+                    // ids (ligatures substituted) as a TJ array whose numeric
+                    // adjustments reproduce kerning: the viewer advances each
+                    // glyph by its natural /W width, so the correction is
+                    // (natural - shaped) in 1/1000 em.
+                    Some(font) => {
+                        let run = font.shape(&text.text);
+                        content.push_str("[<");
+                        for glyph in &run.glyphs {
+                            content.push_str(&format!("{:04X}", glyph.gid));
+                            let adjust =
+                                ((glyph.natural_em - glyph.advance_em) * 1000.0).round() as i32;
+                            if adjust != 0 {
+                                content.push_str(&format!("> {adjust} <"));
+                            }
                         }
-                        content.push_str("> Tj\n");
+                        content.push_str(">] TJ\n");
                     }
                     // Standard-14 Helvetica: a WinAnsi literal string.
                     None => {
@@ -599,10 +605,9 @@ mod tests {
     #[test]
     fn to_unicode_cmap_maps_glyphs_back_to_text() {
         let mut gid_to_unicode = std::collections::BTreeMap::new();
-        gid_to_unicode.insert(36u16, 'A');
-        gid_to_unicode.insert(0x4E16u16, '世');
+        gid_to_unicode.insert(36u16, "A".to_string());
+        gid_to_unicode.insert(0x4E16u16, "世".to_string());
         let cid = crate::font::CidLayout {
-            char_to_gid: std::collections::BTreeMap::new(),
             widths: Vec::new(),
             gid_to_unicode,
         };

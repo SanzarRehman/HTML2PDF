@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Advance width, in 1/1000 em, for a character rendered in Helvetica.
 ///
@@ -106,9 +107,22 @@ enum FontKind {
 }
 
 /// A parsed TrueType/OpenType font: the raw bytes for embedding plus the metrics
-/// the layout engine and PDF `FontDescriptor` need (scaled to PDF 1000-unit em).
+/// the layout engine and PDF `FontDescriptor` need (scaled to PDF 1000-unit em),
+/// and a cached HarfBuzz (`rustybuzz`) face for text shaping.
 pub struct TrueTypeFont {
-    pub data: Vec<u8>,
+    /// Cached shaping face borrowing `data`'s heap buffer.
+    ///
+    /// SAFETY invariants for the `'static` lie:
+    /// - declared *before* `data`, so it drops first;
+    /// - `data` is private and never mutated/reallocated after `parse`;
+    /// - a `Vec`'s heap buffer is stable across moves of the owning struct;
+    /// - the face never escapes with the `'static` lifetime (private field,
+    ///   used only inside shaping methods).
+    face: Option<rustybuzz::Face<'static>>,
+    /// Shaped-run cache keyed by the exact source string. `Mutex` (not
+    /// `RefCell`) because `Font` is shared across render threads via `Arc`.
+    shape_cache: Mutex<HashMap<String, Arc<ShapedRun>>>,
+    data: Vec<u8>,
     pub index: u32,
     pub postscript_name: String,
     pub units_per_em: f32,
@@ -121,6 +135,30 @@ pub struct TrueTypeFont {
     pub italic_angle: f32,
     pub flags: u32,
     pub stem_v: i32,
+}
+
+/// One glyph of a shaped run.
+#[derive(Debug, Clone)]
+pub struct ShapedGlyph {
+    pub gid: u16,
+    /// Shaped advance (kerning applied), as a fraction of the em.
+    pub advance_em: f32,
+    /// The glyph's natural (`hmtx`) advance, as a fraction of the em. This is
+    /// what a PDF viewer applies from `/W`, so the writer emits `TJ`
+    /// adjustments of `natural - shaped` to reproduce kerning.
+    pub natural_em: f32,
+    /// Source characters this glyph covers (its cluster; empty for glyphs that
+    /// share a cluster with a predecessor). Used for `/ToUnicode`, so ligature
+    /// glyphs map back to all of their characters.
+    pub chars: String,
+}
+
+/// A shaped text run: the output of HarfBuzz for one source string.
+#[derive(Debug, Clone, Default)]
+pub struct ShapedRun {
+    pub glyphs: Vec<ShapedGlyph>,
+    /// Total shaped advance as a fraction of the em.
+    pub width_em: f32,
 }
 
 impl Default for Font {
@@ -182,8 +220,17 @@ impl Font {
     }
 
     /// Measured advance width of `text` in user-space units at `font_size`.
+    ///
+    /// For an embedded TrueType face this is the *shaped* width (HarfBuzz via
+    /// `rustybuzz`): kerning and ligatures applied, exactly what the PDF output
+    /// reproduces. The built-in Helvetica keeps the per-character AFM sum.
     pub fn text_width(&self, text: &str, font_size: f32) -> f32 {
-        font_size * text.chars().map(|c| self.advance_em(c)).sum::<f32>()
+        match &self.kind {
+            FontKind::Helvetica => {
+                font_size * text.chars().map(|c| self.advance_em(c)).sum::<f32>()
+            }
+            FontKind::TrueType(font) => font_size * font.shape(text).width_em,
+        }
     }
 
     /// Largest character prefix of `text` (count) whose width fits `max_width`.
@@ -204,20 +251,24 @@ impl Font {
 }
 
 /// The glyph data needed to embed a font as a PDF Type0/CIDFontType2 composite:
-/// the character-to-glyph mapping (for writing text as glyph ids under
-/// `Identity-H`), per-glyph advance widths (for `/W`), and a glyph-to-Unicode
-/// map (for the `/ToUnicode` CMap, so the text stays extractable/searchable).
+/// per-glyph natural advance widths (for `/W`; kerning is reproduced with `TJ`
+/// adjustments at write time) and a glyph-to-Unicode map (for the `/ToUnicode`
+/// CMap, so the text stays extractable/searchable — a ligature glyph maps back
+/// to all of its source characters).
 pub struct CidLayout {
-    /// Used characters → glyph id. Characters with no glyph are omitted (they
-    /// render as `.notdef`).
-    pub char_to_gid: std::collections::BTreeMap<char, u16>,
-    /// `(glyph id, advance in 1000-unit em)` for each used glyph, sorted by id.
+    /// `(glyph id, natural advance in 1000-unit em)` for each used glyph,
+    /// sorted by id.
     pub widths: Vec<(u16, i32)>,
-    /// Glyph id → a representative Unicode scalar (for `/ToUnicode`).
-    pub gid_to_unicode: std::collections::BTreeMap<u16, char>,
+    /// Glyph id → the Unicode characters it covers (for `/ToUnicode`).
+    pub gid_to_unicode: std::collections::BTreeMap<u16, String>,
 }
 
 impl TrueTypeFont {
+    /// The raw font program bytes (for full embedding when subsetting fails).
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// A subset of the font program containing only `used_gids` (plus `.notdef`
     /// and composite components), or `None` if it cannot be subset (e.g. a
     /// CFF/OpenType-CFF font) — in which case the caller embeds the full program.
@@ -225,31 +276,110 @@ impl TrueTypeFont {
         crate::subset::subset(&self.data, self.index, used_gids)
     }
 
-    /// Resolve the glyph ids, widths, and Unicode mapping for a set of used
-    /// characters, by re-parsing the (already validated) face once. Used only at
-    /// PDF-write time, so the per-call parse cost is paid once per render.
-    pub fn cid_layout(&self, used_chars: &std::collections::BTreeSet<char>) -> CidLayout {
+    /// Shape `text` with HarfBuzz (cached by the exact string). Returns an empty
+    /// run (no glyphs, zero width) only if the face failed to parse at load.
+    pub fn shape(&self, text: &str) -> Arc<ShapedRun> {
+        if let Some(hit) = self.shape_cache.lock().unwrap().get(text) {
+            return hit.clone();
+        }
+        let run = Arc::new(self.shape_uncached(text));
+        self.shape_cache
+            .lock()
+            .unwrap()
+            .insert(text.to_string(), run.clone());
+        run
+    }
+
+    fn shape_uncached(&self, text: &str) -> ShapedRun {
+        let Some(face) = &self.face else {
+            // Face unavailable (should not happen: parse() validated the data).
+            // Fall back to unshaped per-character advances so measurement still
+            // works; PDF emission will also fall back per character.
+            let width_em = text
+                .chars()
+                .map(|c| {
+                    f32::from(self.advances.get(&c).copied().unwrap_or(self.default_advance))
+                        / self.units_per_em
+                })
+                .sum();
+            return ShapedRun {
+                glyphs: Vec::new(),
+                width_em,
+            };
+        };
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = rustybuzz::shape(face, &[], buffer);
+        let infos = output.glyph_infos();
+        let positions = output.glyph_positions();
+
+        // Cluster boundaries (byte offsets into `text`), in logical order, so a
+        // glyph's cluster maps back to the characters it covers. The first glyph
+        // seen for a cluster carries the characters; the rest carry none.
+        let mut boundaries: Vec<usize> = infos.iter().map(|info| info.cluster as usize).collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        let cluster_end = |start: usize| -> usize {
+            match boundaries.binary_search(&start) {
+                Ok(i) if i + 1 < boundaries.len() => boundaries[i + 1],
+                _ => text.len(),
+            }
+        };
+
+        let mut seen = std::collections::HashSet::new();
+        let mut glyphs = Vec::with_capacity(infos.len());
+        let mut width_em = 0.0f32;
+        for (info, pos) in infos.iter().zip(positions) {
+            let gid = info.glyph_id as u16;
+            let advance_em = pos.x_advance as f32 / self.units_per_em;
+            let natural_em = self
+                .face
+                .as_ref()
+                .and_then(|f| f.glyph_hor_advance(ttf_parser::GlyphId(gid)))
+                .map(|units| f32::from(units) / self.units_per_em)
+                .unwrap_or(advance_em);
+            let cluster = info.cluster as usize;
+            let chars = if seen.insert(cluster) {
+                text[cluster..cluster_end(cluster)].to_string()
+            } else {
+                String::new()
+            };
+            width_em += advance_em;
+            glyphs.push(ShapedGlyph {
+                gid,
+                advance_em,
+                natural_em,
+                chars,
+            });
+        }
+
+        ShapedRun { glyphs, width_em }
+    }
+
+    /// Resolve the glyph widths and Unicode mapping for every text run the
+    /// document paints, by shaping each unique string (cache-assisted; the
+    /// layout pass already shaped most of them for measurement).
+    pub fn shaped_cid_layout<'a>(&self, texts: impl Iterator<Item = &'a str>) -> CidLayout {
         use std::collections::BTreeMap;
 
-        let mut char_to_gid = BTreeMap::new();
-        let mut gid_to_unicode = BTreeMap::new();
         let mut widths = BTreeMap::new();
-
-        if let Ok(face) = ttf_parser::Face::parse(&self.data, self.index) {
-            for &ch in used_chars {
-                let Some(gid) = face.glyph_index(ch) else {
-                    continue;
-                };
-                char_to_gid.insert(ch, gid.0);
-                gid_to_unicode.entry(gid.0).or_insert(ch);
-                let advance = face.glyph_hor_advance(gid).unwrap_or(0);
-                let width = (advance as f32 * 1000.0 / self.units_per_em).round() as i32;
-                widths.insert(gid.0, width);
+        let mut gid_to_unicode = BTreeMap::new();
+        for text in texts {
+            let run = self.shape(text);
+            for glyph in &run.glyphs {
+                widths
+                    .entry(glyph.gid)
+                    .or_insert_with(|| (glyph.natural_em * 1000.0).round() as i32);
+                if !glyph.chars.is_empty() {
+                    gid_to_unicode
+                        .entry(glyph.gid)
+                        .or_insert_with(|| glyph.chars.clone());
+                }
             }
         }
 
         CidLayout {
-            char_to_gid,
             widths: widths.into_iter().collect(),
             gid_to_unicode,
         }
@@ -300,7 +430,9 @@ impl TrueTypeFont {
             flags |= 64;
         }
 
-        Ok(TrueTypeFont {
+        let mut font = TrueTypeFont {
+            face: None,
+            shape_cache: Mutex::new(HashMap::new()),
             postscript_name: postscript_name(&face),
             units_per_em,
             advances,
@@ -319,7 +451,17 @@ impl TrueTypeFont {
             stem_v: 80,
             data,
             index,
-        })
+        };
+
+        // Build the cached shaping face over `font.data`'s heap buffer. See the
+        // SAFETY notes on the `face` field: the buffer is stable across moves of
+        // `font`, `data` is never mutated again, and `face` (declared first)
+        // drops before `data`.
+        let slice: &'static [u8] =
+            unsafe { std::slice::from_raw_parts(font.data.as_ptr(), font.data.len()) };
+        font.face = rustybuzz::Face::from_slice(slice, index);
+
+        Ok(font)
     }
 }
 
@@ -494,6 +636,65 @@ mod tests {
     fn loading_a_missing_font_path_errors() {
         let result = Font::load(&FontSource::Path("/no/such/font.ttf".into()));
         assert!(result.is_err());
+    }
+
+    /// A system TrueType face for shaping tests, or `None` (test skips) on
+    /// machines without one.
+    fn system_font() -> Option<Font> {
+        let candidates = [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ];
+        let path = candidates
+            .iter()
+            .find(|p| std::path::Path::new(p).is_file())?;
+        Font::load(&FontSource::Path(path.into())).ok()
+    }
+
+    #[test]
+    fn shaped_clusters_cover_all_source_characters() {
+        let Some(font) = system_font() else { return };
+        let embedded = font.embedding().expect("TrueType face");
+        let text = "Vault first office";
+        let run = embedded.shape(text);
+        assert!(!run.glyphs.is_empty());
+        // Every source character appears in exactly one glyph's cluster string
+        // (ligatures collapse several chars into one glyph's cluster).
+        let covered: String = run.glyphs.iter().map(|g| g.chars.as_str()).collect();
+        assert_eq!(covered, text);
+        assert!(run.width_em > 0.0);
+    }
+
+    #[test]
+    fn shaping_applies_kerning_to_measurement() {
+        let Some(font) = system_font() else { return };
+        let embedded = font.embedding().expect("TrueType face");
+        // "AV" kerns in virtually every Latin text face; the shaped width must
+        // not exceed the sum of the two natural advances, and for a kerning
+        // pair it is strictly smaller.
+        let run = embedded.shape("AV");
+        let natural: f32 = run.glyphs.iter().map(|g| g.natural_em).sum();
+        assert!(
+            run.width_em <= natural + 1e-4,
+            "shaped {} vs natural {natural}",
+            run.width_em
+        );
+        // Measurement goes through the same shaping (cache hit).
+        let measured = font.text_width("AV", 1000.0);
+        assert!((measured - run.width_em * 1000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn shaped_cid_layout_collects_gids_and_unicode() {
+        let Some(font) = system_font() else { return };
+        let embedded = font.embedding().expect("TrueType face");
+        let cid = embedded.shaped_cid_layout(["Hello", "World"].into_iter());
+        assert!(!cid.widths.is_empty());
+        // Every mapped glyph resolves back to at least one character.
+        assert!(cid.gid_to_unicode.values().all(|s| !s.is_empty()));
+        let all: String = cid.gid_to_unicode.values().cloned().collect();
+        assert!(all.contains('H') && all.contains('W'));
     }
 
     #[test]

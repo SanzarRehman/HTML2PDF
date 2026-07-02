@@ -95,10 +95,12 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 
 | Feature | Status | Notes |
 |---|---|---|
-| Base-14 standard PDF fonts (default) | ✅ | WinAnsi text, selectable. |
+| Base-14 standard PDF fonts (default) | ✅ | WinAnsi text, selectable. AFM per-char metrics (no shaping — no face to shape with). |
 | Embed one TTF via `--font` | ✅ | Type0/Identity-H, glyph subsetting, ToUnicode. |
-| Real glyph metrics + line breaking | ✅ | via `ttf-parser`/`fontdb`. |
-| Bold/italic faces, multiple families, font fallback | ❌ | Faux-bold only; no CJK/emoji fallback or shaping (no HarfBuzz). |
+| **Text shaping (HarfBuzz via `rustybuzz`)** for embedded fonts | ✅ | Kerning (measured *and* reproduced in PDF via `TJ` adjustments), ligatures (GSUB; ToUnicode maps a ligature glyph back to all its chars), Arabic joining forms with correct in-run RTL order. Shaped-run cache keyed by string. |
+| Real glyph metrics + line breaking | ✅ | via `ttf-parser`/`fontdb`; widths are shaped widths when a face is embedded. |
+| Bidi paragraph reordering (mixed LTR/RTL) | ❌ | A single-script run renders correctly; mixed-direction paragraphs are not reordered (no UAX #9). |
+| Bold/italic faces, multiple families, font fallback | ❌ | Faux-bold only; one face per document — no CJK/emoji fallback chain. |
 
 ## JavaScript (opt-in: `--js` / `js` feature)
 

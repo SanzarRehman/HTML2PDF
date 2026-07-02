@@ -871,10 +871,19 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       `align`/`justify` of items within cells.
 - [ ] **`position` / `float`**: relative/absolute positioning subset and floated
       boxes with text wrap — needed for real page layouts.
-- [ ] **Text shaping via `rustybuzz` (HarfBuzz)**: kerning, ligatures, and
-      CJK/Arabic/emoji + bidi + font fallback. Biggest *fidelity* lever — replaces
-      the per-character advance estimate that drives every line break and column
-      fit, so it is the best path to true Chromium parity.
+- [x] **Text shaping via `rustybuzz` (HarfBuzz)** for embedded fonts: layout
+      measures *shaped* widths (kerning + ligatures) and the PDF writer emits the
+      shaped glyph ids as `TJ` arrays whose numeric adjustments reproduce kerning
+      (`/W` carries natural advances). Ligature glyphs map back to all their
+      source characters in `/ToUnicode` (text stays extractable); Arabic gets
+      joining forms and correct in-run RTL order. The `rustybuzz::Face` is cached
+      per font (self-referential over the font bytes, dropped first), and shaped
+      runs are cached by string behind a `Mutex` (fonts are shared across render
+      threads via `Arc`). Cost on the 22k-cell fixture with a font: +0.03 s /
+      +3 MB vs unshaped; the default base-14 path is unchanged (no face to shape).
+      **Not yet done:** bidi paragraph reordering (UAX #9) for mixed LTR/RTL,
+      font-fallback chains (CJK/emoji), `fitting_char_count`/char-level breaking
+      still uses unshaped advances, and shaping-aware `letter-spacing`.
 - [ ] **Extend live-DOM JS** (ADR 0008): `document.createElement`/`appendChild`/
       `removeChild`; and a decision record for/against mid-script layout reads
       (`getBoundingClientRect`) — the genuinely hard part left after the spike.

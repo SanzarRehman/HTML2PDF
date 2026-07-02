@@ -19,6 +19,7 @@ flate2 = "1"
 fontdb = "0.23.0"
 html5ever = "0.39"
 owned_ttf_parser = "0.25.1"
+rustybuzz = "0.20"
 ttf-parser = "0.25.1"
 boa_engine = { version = "0.20", optional = true }
 boa_gc = { version = "0.20", optional = true }
