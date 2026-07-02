@@ -249,6 +249,11 @@ Supported query parameters:
 | `landscape` | `true` | Force A4 landscape output |
 | `margin` | `36` | Set all page margins in PDF points |
 | `font` | `Georgia` | Embed a font by family name or file path |
+| `js` | `true` | Run the bounded pre-layout JavaScript stage (needs a server built with `--features js`; rejected otherwise) |
+
+JavaScript is strictly opt-in at every layer: without the `js` build feature it
+isn't compiled in; without `js=true` (server) / `--js` (CLI) the script stage is
+never entered — a script-free render pays zero JS cost.
 
 Load-test the API:
 

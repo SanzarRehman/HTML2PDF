@@ -31,6 +31,8 @@ POST /render
     landscape=true     force landscape orientation
     margin=<points>    page margin in PDF points (e.g. margin=36)
     font=<path|family> embed a TrueType font by file path or system family name
+    js=true            run the bounded pre-layout JavaScript stage (requires a
+                       server build with `--features js`; rejected otherwise)
 
   Examples:
     curl -X POST http://127.0.0.1:8080/render \\
@@ -155,9 +157,33 @@ fn render(request: &mut Request, url: &str) -> Handled {
         return Err((400, "empty request body; POST an HTML document to render".to_string()));
     }
 
-    let options = options_from_query(url)?;
+    let (options, run_js) = options_from_query(url)?;
 
-    match Engine::new().render_html(&html, options) {
+    // JavaScript is strictly opt-in per request (`js=true`) and only in builds
+    // with the `js` feature — a request never pays any script cost otherwise.
+    let rendered = if run_js {
+        #[cfg(feature = "js")]
+        {
+            Engine::new().render_html_with_scripts(
+                &html,
+                options,
+                &htmltopdf::BoaScriptEngine,
+                &htmltopdf::ScriptLimits::default(),
+            )
+        }
+        #[cfg(not(feature = "js"))]
+        {
+            return Err((
+                400,
+                "this build has no JavaScript support; rebuild with `--features js` to use js=true"
+                    .to_string(),
+            ));
+        }
+    } else {
+        Engine::new().render_html(&html, options)
+    };
+
+    match rendered {
         Ok(pdf) => Ok((pdf, "application/pdf", Some("document.pdf"))),
         Err(error) => {
             let message = error.to_string();
@@ -172,15 +198,19 @@ fn render(request: &mut Request, url: &str) -> Handled {
     }
 }
 
-fn options_from_query(url: &str) -> Result<RenderOptions, (u16, String)> {
+fn options_from_query(url: &str) -> Result<(RenderOptions, bool), (u16, String)> {
     let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut options = RenderOptions::default();
+    let mut run_js = false;
 
     for pair in query.split('&').filter(|part| !part.is_empty()) {
         let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
         let value = percent_decode(raw_value);
 
         match key {
+            "js" if value == "true" || value == "1" => {
+                run_js = true;
+            }
             "landscape" if value == "true" || value == "1" => {
                 options.page_size = PageSize::A4_LANDSCAPE;
             }
@@ -207,7 +237,7 @@ fn options_from_query(url: &str) -> Result<RenderOptions, (u16, String)> {
         }
     }
 
-    Ok(options)
+    Ok((options, run_js))
 }
 
 fn content_length(request: &Request) -> Option<usize> {
