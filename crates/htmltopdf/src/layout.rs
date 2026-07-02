@@ -318,6 +318,7 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
     let mut y = options.page_size.height - options.margin_top;
     let content_width = options.page_size.width - options.margin_left - options.margin_right;
     let mut carried = 0.0;
+    let mut floats: Vec<FloatBand> = Vec::new();
 
     layout_box_children(
         &flow.children,
@@ -327,6 +328,7 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
         &mut pages,
         &mut y,
         &mut carried,
+        &mut floats,
         options,
     );
 
@@ -340,6 +342,7 @@ fn flush_margin(y: &mut f32, carried: &mut f32) {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn layout_box_children(
     children: &[crate::box_tree::BoxChild],
     x: f32,
@@ -348,19 +351,30 @@ fn layout_box_children(
     pages: &mut Vec<Page>,
     y: &mut f32,
     carried: &mut f32,
+    floats: &mut Vec<FloatBand>,
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
 
     for child in children {
         match child {
+            BoxChild::Block(block) if block.float_dir.is_some() => {
+                // A floated block leaves normal flow: content above must be
+                // flushed, but `y` does not advance past it.
+                flush_margin(y, carried);
+                layout_float(block, x, width, pages, y, floats, options);
+            }
             BoxChild::Block(block) => {
-                layout_block_box(block, x, width, pages, y, carried, options)
+                layout_block_box(block, x, width, pages, y, carried, floats, options)
             }
             BoxChild::Line(runs) => {
                 // Content flushes any pending margin above it.
                 flush_margin(y, carried);
-                layout_line_box(runs, x, width, align, pages, y, options);
+                layout_line_box(runs, x, width, align, pages, y, floats, options);
+            }
+            BoxChild::Image(image) if image.float_dir.is_some() => {
+                flush_margin(y, carried);
+                layout_float_image(image, x, width, pages, y, floats, options);
             }
             BoxChild::Image(image) => {
                 flush_margin(y, carried);
@@ -371,6 +385,118 @@ fn layout_box_children(
             }
         }
     }
+}
+
+/// Place a floated block: shrink-to-fit width (or the CSS `width`), positioned
+/// at the left or right edge beside any floats already active, painted at the
+/// current `y` without advancing it, and registered as a [`FloatBand`] so the
+/// following line boxes shorten around it. A float never splits across pages.
+fn layout_float(
+    block: &crate::box_tree::BlockBox,
+    x: f32,
+    width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    floats: &mut Vec<FloatBand>,
+    options: &RenderOptions,
+) {
+    let is_left = block.float_dir == Some(crate::html::FloatDir::Left);
+
+    // Shrink-to-fit: CSS width if declared, else max-content + own edges,
+    // clamped to the containing width.
+    let float_width = block
+        .css_width
+        .map(|w| w + block.padding.left + block.padding.right)
+        .unwrap_or_else(|| {
+            measure_max_content(&block.children, &options.font)
+                + block.padding.left
+                + block.padding.right
+                + block.margin.left
+                + block.margin.right
+        })
+        .clamp(1.0, width);
+
+    let item = FlexItem::Block(block);
+    let height = item.measure_height(float_width, options);
+    if !has_space(*y, options, height) {
+        push_page(pages, y, options);
+        floats.clear();
+    }
+
+    let (band_x, band_width) = float_band_at(floats, *y, x, width);
+    let float_x = if is_left {
+        band_x
+    } else {
+        band_x + band_width - float_width
+    };
+
+    let top = *y;
+    let mut float_y = top;
+    let mut carried = 0.0;
+    let mut inner_floats: Vec<FloatBand> = Vec::new();
+    layout_block_box(
+        block,
+        float_x,
+        float_width,
+        pages,
+        &mut float_y,
+        &mut carried,
+        &mut inner_floats,
+        options,
+    );
+
+    floats.push(FloatBand {
+        left: is_left,
+        x0: float_x,
+        x1: float_x + float_width,
+        top,
+        bottom: top - height,
+    });
+}
+
+/// Place a floated image at the flow edge and register its exclusion band.
+fn layout_float_image(
+    image: &crate::box_tree::ImageBox,
+    x: f32,
+    width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    floats: &mut Vec<FloatBand>,
+    options: &RenderOptions,
+) {
+    let Some(image_index) = image.image_index else {
+        return;
+    };
+    if image.width <= 0.0 || image.height <= 0.0 {
+        return;
+    }
+    let scale = (width / image.width).min(1.0);
+    let (w, h) = (image.width * scale, image.height * scale);
+
+    if !has_space(*y, options, h) {
+        push_page(pages, y, options);
+        floats.clear();
+    }
+    let (band_x, band_width) = float_band_at(floats, *y, x, width);
+    let is_left = image.float_dir == Some(crate::html::FloatDir::Left);
+    let ix = if is_left { band_x } else { band_x + band_width - w };
+
+    let page = pages.last_mut().expect("at least one page exists");
+    page.commands.push(PaintCommand::Image(ImageCommand {
+        image_index,
+        x: ix,
+        y: *y - h,
+        width: w,
+        height: h,
+    }));
+
+    floats.push(FloatBand {
+        left: is_left,
+        x0: ix,
+        x1: ix + w,
+        top: *y,
+        bottom: *y - h,
+    });
 }
 
 /// Lay out a flow-embedded table in document order, sharing the page/`y` cursor
@@ -578,10 +704,14 @@ impl FlexItem<'_> {
         carried: &mut f32,
         options: &RenderOptions,
     ) {
+        // A flex/grid item establishes its own flow: floats do not escape it.
+        let mut floats: Vec<FloatBand> = Vec::new();
         match self {
-            FlexItem::Block(b) => layout_block_box(b, x, width, pages, y, carried, options),
+            FlexItem::Block(b) => {
+                layout_block_box(b, x, width, pages, y, carried, &mut floats, options)
+            }
             FlexItem::Line(runs) => {
-                layout_line_box(runs, x, width, TextAlign::Left, pages, y, options)
+                layout_line_box(runs, x, width, TextAlign::Left, pages, y, &mut floats, options)
             }
         }
     }
@@ -866,6 +996,7 @@ fn layout_image_box(
     *y -= draw_height;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_block_box(
     block: &crate::box_tree::BlockBox,
     x: f32,
@@ -873,8 +1004,18 @@ fn layout_block_box(
     pages: &mut Vec<Page>,
     y: &mut f32,
     carried: &mut f32,
+    floats: &mut Vec<FloatBand>,
     options: &RenderOptions,
 ) {
+    // `clear` drops the block below the matching active floats first.
+    if let Some(clear) = block.clear {
+        let below = below_next_float(floats, *y - *carried, Some(clear));
+        if below < *y - *carried {
+            flush_margin(y, carried);
+            *y = below;
+        }
+    }
+
     // This block's top margin collapses with the margin carried from above.
     *carried = carried.max(block.margin.top);
 
@@ -917,6 +1058,7 @@ fn layout_block_box(
             pages,
             y,
             carried,
+            floats,
             options,
         );
     }
@@ -996,8 +1138,59 @@ fn paint_decorations(
     }
 }
 
-/// Wrap one line box's runs to `width` and paint each visual line, honoring the
-/// per-run font size and color and the block's text alignment.
+/// An active float exclusion band: a floated box occupying the vertical range
+/// `[bottom, top]` (page coordinates, y downward-decreasing) at the left or
+/// right edge of the flow, `width` points wide. Line boxes that overlap the
+/// band shorten to the space beside it.
+pub(crate) struct FloatBand {
+    left: bool,
+    /// The horizontal interval the float actually occupies (page coordinates),
+    /// so stacked floats (side by side) exclude the right span at any `y`.
+    x0: f32,
+    x1: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// The horizontal segment available for a line starting at `y` inside the
+/// content box `[x, x + width]`, after subtracting active float bands: text
+/// sits right of every active left float and left of every active right float.
+fn float_band_at(floats: &[FloatBand], y: f32, x: f32, width: f32) -> (f32, f32) {
+    let mut left_edge = x;
+    let mut right_edge = x + width;
+    for band in floats {
+        if band.top >= y - 0.5 && band.bottom < y - 0.5 {
+            if band.left {
+                left_edge = left_edge.max(band.x1);
+            } else {
+                right_edge = right_edge.min(band.x0);
+            }
+        }
+    }
+    (left_edge, (right_edge - left_edge).max(1.0))
+}
+
+/// The y just below the nearest active float bottom at `y` (for dropping a line
+/// or a cleared block past floats). Returns `y` unchanged if none are active.
+fn below_next_float(floats: &[FloatBand], y: f32, side: Option<crate::html::Clear>) -> f32 {
+    use crate::html::Clear;
+    let mut target = y;
+    for band in floats {
+        let matches = match side {
+            None | Some(Clear::Both) => true,
+            Some(Clear::Left) => band.left,
+            Some(Clear::Right) => !band.left,
+        };
+        if matches && band.top >= y - 0.5 && band.bottom < y - 0.5 {
+            target = target.min(band.bottom);
+        }
+    }
+    target
+}
+
+/// Wrap one line box's runs and paint each visual line, honoring the per-run
+/// font size and color and the block's text alignment. Lines are built one at a
+/// time so each can shorten around the float bands active at its own `y`.
 fn layout_line_box(
     runs: &[crate::box_tree::InlineRun],
     x: f32,
@@ -1005,9 +1198,34 @@ fn layout_line_box(
     align: TextAlign,
     pages: &mut Vec<Page>,
     y: &mut f32,
+    floats: &mut Vec<FloatBand>,
     options: &RenderOptions,
 ) {
-    for visual in wrap_inline_runs(runs, width, &options.font) {
+    let mut breaker = LineBreaker::new(runs);
+    while !breaker.is_done() {
+        let (band_x, band_width) = float_band_at(floats, *y, x, width);
+
+        // A word that does not fit beside a float but would fit at full width
+        // drops below the float instead of being broken mid-word.
+        if band_width + WRAP_TOLERANCE < width {
+            if let Some(token_width) = breaker.peek_token_width(&options.font) {
+                if token_width > band_width + WRAP_TOLERANCE
+                    && token_width <= width + WRAP_TOLERANCE
+                {
+                    let below = below_next_float(floats, *y, None);
+                    if below < *y {
+                        *y = below;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let visual = breaker.next_line(band_width, &options.font);
+        if visual.is_empty() {
+            break;
+        }
+
         let line_width: f32 = visual
             .iter()
             .map(|piece| estimate_text_width(&piece.text, piece.font_size, &options.font))
@@ -1019,12 +1237,16 @@ fn layout_line_box(
             .fold(0.0_f32, f32::max);
         let leading = max_font * 1.35;
 
-        ensure_space(pages, y, options, leading);
+        // A page break retires the previous page's floats.
+        if !has_space(*y, options, leading) {
+            push_page(pages, y, options);
+            floats.clear();
+        }
 
         let mut px = match align {
-            TextAlign::Left => x,
-            TextAlign::Center => x + ((width - line_width) / 2.0).max(0.0),
-            TextAlign::Right => x + (width - line_width).max(0.0),
+            TextAlign::Left => band_x,
+            TextAlign::Center => band_x + ((band_width - line_width) / 2.0).max(0.0),
+            TextAlign::Right => band_x + (band_width - line_width).max(0.0),
         };
 
         // Drop the baseline below the line's top edge by the tallest run's
@@ -1072,134 +1294,159 @@ struct LinePiece {
     line_through: bool,
 }
 
-/// Wrap styled inline runs into visual lines. Whitespace is collapsed across run
-/// boundaries (so `Hello <b>world</b>.` keeps a single space and no space before
-/// the period), and words are placed greedily. A word wider than the whole line
-/// is broken character-by-character as a last resort, so flow text never runs off
-/// the page edge (a pragmatic deviation from CSS `overflow-wrap: normal`, which
-/// would let it overflow — losing content is worse for paged output).
-fn wrap_inline_runs(
-    runs: &[crate::box_tree::InlineRun],
-    max_width: f32,
-    font: &crate::font::Font,
-) -> Vec<Vec<LinePiece>> {
-    let tokens = tokenize_runs(runs);
-
-    let mut lines: Vec<Vec<LinePiece>> = Vec::new();
-    let mut current: Vec<LinePiece> = Vec::new();
-    let mut current_width = 0.0_f32;
-
-    for token in tokens {
-        let token_width: f32 = token
-            .pieces
-            .iter()
-            .map(|piece| estimate_text_width(&piece.text, piece.font_size, font))
-            .sum();
-
-        // A token wider than the line can never fit by wrapping; start it on a
-        // fresh line and break it across lines character by character. The small
-        // tolerance avoids a spurious break when a word measures exactly the line
-        // width (e.g. a column auto-sized to its own content) but a float ULP
-        // tips the comparison.
-        if token_width > max_width + WRAP_TOLERANCE {
-            if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-                current_width = 0.0;
-            }
-            break_long_token(&token.pieces, max_width, font, &mut lines, &mut current, &mut current_width);
-            continue;
-        }
-
-        let space_width = if current.is_empty() {
-            0.0
-        } else {
-            estimate_text_width(" ", token.space_font_size, font)
-        };
-
-        if !current.is_empty()
-            && current_width + space_width + token_width > max_width + WRAP_TOLERANCE
-        {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0.0;
-        }
-
-        if !current.is_empty() {
-            // Re-measure the separator at the (possibly new) line's leading run.
-            let space_width = estimate_text_width(" ", token.space_font_size, font);
-            let lead = token.pieces.first();
-            current.push(LinePiece {
-                text: " ".to_string(),
-                font_size: token.space_font_size,
-                color: lead.map(|p| p.color).unwrap_or(Color::BLACK),
-                bold: lead.map(|p| p.bold).unwrap_or(false),
-                // Share the following word's decoration so a run of decorated
-                // words gets a continuous underline/strike across the spaces.
-                underline: lead.map(|p| p.underline).unwrap_or(false),
-                line_through: lead.map(|p| p.line_through).unwrap_or(false),
-            });
-            current_width += space_width;
-        }
-
-        for piece in token.pieces {
-            current_width += estimate_text_width(&piece.text, piece.font_size, font);
-            current.push(piece);
-        }
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    lines
+/// Line-at-a-time greedy breaker over the tokenized inline runs. Each call to
+/// [`next_line`](Self::next_line) may use a different maximum width, which is
+/// what lets lines shorten around float bands. Whitespace collapses across run
+/// boundaries; a word wider than the whole line is broken character-by-character
+/// as a last resort (a pragmatic deviation from CSS `overflow-wrap: normal` —
+/// losing content off the page edge is worse for paged output).
+struct LineBreaker {
+    tokens: std::collections::VecDeque<Token>,
 }
 
-/// Break an over-long token across lines, one character at a time, preserving
-/// each character's style. Appends to `current` (flushing full lines into
-/// `lines`) and leaves any trailing partial line in `current` so following
-/// content can continue on it.
-fn break_long_token(
+impl LineBreaker {
+    fn new(runs: &[crate::box_tree::InlineRun]) -> Self {
+        Self {
+            tokens: tokenize_runs(runs).into(),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Width of the next unplaced token, if any.
+    fn peek_token_width(&self, font: &crate::font::Font) -> Option<f32> {
+        self.tokens.front().map(|token| {
+            token
+                .pieces
+                .iter()
+                .map(|piece| estimate_text_width(&piece.text, piece.font_size, font))
+                .sum()
+        })
+    }
+
+    /// Build the next visual line, at most `max_width` wide. Returns an empty
+    /// vec only when all tokens are consumed.
+    fn next_line(&mut self, max_width: f32, font: &crate::font::Font) -> Vec<LinePiece> {
+        let mut current: Vec<LinePiece> = Vec::new();
+        let mut current_width = 0.0_f32;
+
+        while let Some(token) = self.tokens.front() {
+            let token_width: f32 = token
+                .pieces
+                .iter()
+                .map(|piece| estimate_text_width(&piece.text, piece.font_size, font))
+                .sum();
+
+            // A token wider than the line can never fit by wrapping: fill this
+            // line character-by-character (starting on an empty line) and queue
+            // the remainder as the next token.
+            if token_width > max_width + WRAP_TOLERANCE {
+                if !current.is_empty() {
+                    break;
+                }
+                let token = self.tokens.pop_front().expect("front token exists");
+                let leftover =
+                    fill_from_long_token(&token.pieces, max_width, font, &mut current, &mut current_width);
+                if !leftover.is_empty() {
+                    self.tokens.push_front(Token {
+                        pieces: leftover,
+                        space_font_size: 0.0,
+                    });
+                }
+                break;
+            }
+
+            let space_width = if current.is_empty() {
+                0.0
+            } else {
+                estimate_text_width(" ", token.space_font_size, font)
+            };
+            if !current.is_empty()
+                && current_width + space_width + token_width > max_width + WRAP_TOLERANCE
+            {
+                break;
+            }
+
+            let token = self.tokens.pop_front().expect("front token exists");
+            if !current.is_empty() {
+                let lead = token.pieces.first();
+                current.push(LinePiece {
+                    text: " ".to_string(),
+                    font_size: token.space_font_size,
+                    color: lead.map(|p| p.color).unwrap_or(Color::BLACK),
+                    bold: lead.map(|p| p.bold).unwrap_or(false),
+                    // Share the following word's decoration so a run of decorated
+                    // words gets a continuous underline/strike across the spaces.
+                    underline: lead.map(|p| p.underline).unwrap_or(false),
+                    line_through: lead.map(|p| p.line_through).unwrap_or(false),
+                });
+                current_width += space_width;
+            }
+            for piece in token.pieces {
+                current_width += estimate_text_width(&piece.text, piece.font_size, font);
+                current.push(piece);
+            }
+        }
+
+        current
+    }
+}
+
+/// Fill `current` character-by-character from an over-long token until
+/// `max_width`, returning the unplaced remainder (style preserved). A single
+/// character wider than the line is still placed so callers always progress.
+fn fill_from_long_token(
     pieces: &[LinePiece],
     max_width: f32,
     font: &crate::font::Font,
-    lines: &mut Vec<Vec<LinePiece>>,
     current: &mut Vec<LinePiece>,
     current_width: &mut f32,
-) {
+) -> Vec<LinePiece> {
+    let mut leftover: Vec<LinePiece> = Vec::new();
+    let mut full = false;
+
+    let push_merged = |list: &mut Vec<LinePiece>, piece: &LinePiece, ch: char| {
+        if let Some(last) = list.last_mut() {
+            if last.font_size == piece.font_size
+                && last.color == piece.color
+                && last.bold == piece.bold
+                && last.underline == piece.underline
+                && last.line_through == piece.line_through
+            {
+                last.text.push(ch);
+                return;
+            }
+        }
+        list.push(LinePiece {
+            text: ch.to_string(),
+            font_size: piece.font_size,
+            color: piece.color,
+            bold: piece.bold,
+            underline: piece.underline,
+            line_through: piece.line_through,
+        });
+    };
+
     for piece in pieces {
         for ch in piece.text.chars() {
+            if full {
+                push_merged(&mut leftover, piece, ch);
+                continue;
+            }
             let char_width = estimate_text_width(&ch.to_string(), piece.font_size, font);
-
-            // Wrap before this character if the line already has content and the
-            // character would overflow. A single character wider than the line is
-            // still placed (on its own line) so we never loop forever.
             if !current.is_empty() && *current_width + char_width > max_width {
-                lines.push(std::mem::take(current));
-                *current_width = 0.0;
+                full = true;
+                push_merged(&mut leftover, piece, ch);
+                continue;
             }
-
-            if let Some(last) = current.last_mut() {
-                if last.font_size == piece.font_size
-                    && last.color == piece.color
-                    && last.bold == piece.bold
-                    && last.underline == piece.underline
-                    && last.line_through == piece.line_through
-                {
-                    last.text.push(ch);
-                    *current_width += char_width;
-                    continue;
-                }
-            }
-            current.push(LinePiece {
-                text: ch.to_string(),
-                font_size: piece.font_size,
-                color: piece.color,
-                bold: piece.bold,
-                underline: piece.underline,
-                line_through: piece.line_through,
-            });
+            push_merged(current, piece, ch);
             *current_width += char_width;
         }
     }
+
+    leftover
 }
 
 /// A whitespace-delimited token built from the inline run stream. A token may
@@ -1965,6 +2212,47 @@ mod tests {
     };
 
     #[test]
+    fn float_bands_narrow_and_release_lines() {
+        use super::{below_next_float, float_band_at, FloatBand};
+        let floats = vec![
+            FloatBand { left: true, x0: 48.0, x1: 148.0, top: 700.0, bottom: 600.0 },
+            FloatBand { left: false, x0: 400.0, x1: 500.0, top: 700.0, bottom: 650.0 },
+        ];
+        // Inside both bands: text sits between the left float's right edge and
+        // the right float's left edge.
+        assert_eq!(float_band_at(&floats, 690.0, 48.0, 452.0), (148.0, 252.0));
+        // Below the right float, only the left band still narrows the line.
+        assert_eq!(float_band_at(&floats, 640.0, 48.0, 452.0), (148.0, 352.0));
+        // Below both, the full width is back.
+        assert_eq!(float_band_at(&floats, 590.0, 48.0, 452.0), (48.0, 452.0));
+        // Clearing drops just below the matching float's bottom.
+        assert_eq!(below_next_float(&floats, 690.0, Some(crate::html::Clear::Left)), 600.0);
+        assert_eq!(below_next_float(&floats, 690.0, Some(crate::html::Clear::Right)), 650.0);
+        assert_eq!(below_next_float(&floats, 690.0, Some(crate::html::Clear::Both)), 600.0);
+        // Nothing active: unchanged.
+        assert_eq!(below_next_float(&floats, 550.0, Some(crate::html::Clear::Both)), 550.0);
+    }
+
+    #[test]
+    fn floated_block_narrows_following_text_lines() {
+        let document = crate::html::parse(
+            "<style>.f { float: left; width: 100pt; } </style>\
+             <div class=\"f\">float</div>\
+             <p>alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu \
+             nu xi omicron pi rho sigma tau upsilon phi chi psi omega and yet more \
+             words to make absolutely sure the paragraph wraps well past the float \
+             so the last lines return to the left margin after it ends.</p>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let xs: Vec<f32> = pages[0].lines.iter().map(|l| l.x).collect();
+        let margin = options.margin_left;
+        // Some lines are pushed right of the float; later ones return to the margin.
+        assert!(xs.iter().any(|&x| x > margin + 90.0), "no narrowed lines: {xs:?}");
+        assert!(xs.iter().any(|&x| (x - margin).abs() < 0.5), "no full-width lines: {xs:?}");
+    }
+
+    #[test]
     fn justify_offsets_distribute_slack() {
         use crate::html::JustifyContent::*;
         // 3 items, 30pt slack, 10pt base gap.
@@ -1997,6 +2285,9 @@ mod tests {
                     flex_basis: None,
                     grid: None,
                     grid_span: 1,
+                    float_dir: None,
+                    clear: None,
+                    css_width: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
@@ -2046,6 +2337,9 @@ mod tests {
                     flex_basis: None,
                     grid: None,
                     grid_span: 1,
+                    float_dir: None,
+                    clear: None,
+                    css_width: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: long,
                         font_size: 12.0,
@@ -2099,6 +2393,9 @@ mod tests {
                 flex_basis: None,
                 grid: None,
                 grid_span: 1,
+                float_dir: None,
+                clear: None,
+                css_width: None,
                 children: vec![BoxChild::Line(vec![InlineRun {
                     text: text.to_string(),
                     font_size: 10.0,
@@ -2161,6 +2458,9 @@ mod tests {
                     flex_basis: None,
                     grid: None,
                     grid_span: 1,
+                    float_dir: None,
+                    clear: None,
+                    css_width: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: "boxed".to_string(),
                         font_size: 11.0,

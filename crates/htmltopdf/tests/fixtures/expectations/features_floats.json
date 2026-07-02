@@ -1,0 +1,29 @@
+{
+  "fixture": "floats",
+  "layer": "features",
+  "description": "CSS floats: left/right floated blocks and a floated image with text wrap, stacked right floats, and clear:both.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "re",
+      "f",
+      "rg",
+      "Do"
+    ],
+    "must_contain_text": [
+      "Floats",
+      "quick",
+      "cleared"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Text wraps to the right of the left-floated box and re-widens below it.",
+    "The right-floated box and the right-floated image sit side by side; text wraps around both without overlapping either.",
+    "The clear:both block starts below every float above it, full width."
+  ]
+}

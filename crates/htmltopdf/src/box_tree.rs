@@ -13,7 +13,8 @@
 
 use crate::color::Color;
 use crate::html::{
-    AlignItems, BlockKind, FlexDirection, GridTrack, JustifyContent, TableCell, TextAlign,
+    AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent, TableCell,
+    TextAlign,
 };
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
@@ -77,6 +78,8 @@ pub struct ImageBox {
     pub image_index: Option<usize>,
     pub width: f32,
     pub height: f32,
+    /// CSS `float` on the image: text wraps around it.
+    pub float_dir: Option<FloatDir>,
 }
 
 /// A block-level box. `kind` drives the default font size (and the default
@@ -105,6 +108,14 @@ pub struct BlockBox {
     pub grid: Option<GridContainer>,
     /// `grid-column: span N` when this block is a grid item (1 = one track).
     pub grid_span: usize,
+    /// CSS `float`: the block is taken out of normal flow and placed at the
+    /// left/right edge; following line boxes shorten around it.
+    pub float_dir: Option<FloatDir>,
+    /// CSS `clear`: drop below active floats on the given side(s) first.
+    pub clear: Option<Clear>,
+    /// Cascaded CSS `width` (points), honored for floated blocks (otherwise a
+    /// float is shrink-to-fit).
+    pub css_width: Option<f32>,
     pub children: Vec<BoxChild>,
 }
 

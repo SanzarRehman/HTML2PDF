@@ -104,6 +104,10 @@ pub struct CellStyle {
     pub row_gap: Option<f32>,
     /// `grid-column: span N` on a grid item.
     pub grid_span: Option<usize>,
+    /// CSS `float` (left/right); `None` = not floated.
+    pub float_dir: Option<FloatDir>,
+    /// CSS `clear`.
+    pub clear: Option<Clear>,
 }
 
 impl Default for CellStyle {
@@ -143,6 +147,8 @@ impl Default for CellStyle {
             grid_template: None,
             row_gap: None,
             grid_span: None,
+            float_dir: None,
+            clear: None,
         }
     }
 }
@@ -185,6 +191,21 @@ pub enum OverflowWrap {
 pub enum WordBreak {
     Normal,
     BreakAll,
+}
+
+/// CSS `float` direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatDir {
+    Left,
+    Right,
+}
+
+/// CSS `clear`: which floated sides a block must drop below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clear {
+    Left,
+    Right,
+    Both,
 }
 
 /// One track of a `grid-template-columns` list: a fixed length (points), a
@@ -540,6 +561,7 @@ fn build_node(
                                 image_index: None,
                                 width: 0.0,
                                 height: 0.0,
+                                float_dir: own.float_dir,
                             }));
                     }
                 }
@@ -678,6 +700,9 @@ fn build_block(
         flex_basis: own.flex_basis,
         grid,
         grid_span: own.grid_span.unwrap_or(1),
+        float_dir: own.float_dir,
+        clear: own.clear,
+        css_width: own.width,
         children: acc.children,
     })
 }
@@ -1316,6 +1341,8 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         grid_template: own.grid_template.clone(),
         row_gap: own.row_gap,
         grid_span: own.grid_span,
+        float_dir: own.float_dir,
+        clear: own.clear,
     }
 }
 
@@ -2873,6 +2900,21 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 target.cell.grid_template = Some(tracks);
             }
         }
+        "float" => {
+            target.cell.float_dir = match value.trim().to_ascii_lowercase().as_str() {
+                "left" => Some(FloatDir::Left),
+                "right" => Some(FloatDir::Right),
+                _ => None, // `none` clears an earlier float
+            };
+        }
+        "clear" => {
+            target.cell.clear = match value.trim().to_ascii_lowercase().as_str() {
+                "left" => Some(Clear::Left),
+                "right" => Some(Clear::Right),
+                "both" => Some(Clear::Both),
+                _ => None,
+            };
+        }
         "grid-column" => {
             // Only the `span N` form is supported; line-based placement is not.
             let v = value.trim().to_ascii_lowercase();
@@ -3220,6 +3262,8 @@ impl CellStyle {
         self.grid_template = other.grid_template.or(self.grid_template.take());
         self.row_gap = other.row_gap.or(self.row_gap);
         self.grid_span = other.grid_span.or(self.grid_span);
+        self.float_dir = other.float_dir.or(self.float_dir);
+        self.clear = other.clear.or(self.clear);
     }
 }
 

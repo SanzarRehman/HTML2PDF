@@ -869,8 +869,18 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       **Not yet done:** line-based placement (`grid-column: 1 / 3`), named
       lines/areas, `minmax()`, `grid-template-rows`, dense packing, and
       `align`/`justify` of items within cells.
-- [ ] **`position` / `float`**: relative/absolute positioning subset and floated
-      boxes with text wrap — needed for real page layouts.
+- [x] **`float` / `clear`, first pass**: floated blocks (shrink-to-fit or CSS
+      `width`) and floated images placed at the flow edges; the line breaker was
+      reworked to build lines one at a time so each shortens to the float bands
+      active at its own `y` (interval-accurate for stacked floats) and re-widens
+      below; words that cannot fit beside a float drop below it; `clear:
+      left/right/both` drops a block past the matching floats; a page break
+      retires the page's floats. **Not yet done:** floats that overflow into a
+      second band row when they don't fit side by side, `float: none`
+      overriding an earlier float in the cascade, and relative/absolute
+      positioning (still open, next line).
+- [ ] **`position`**: relative/absolute positioning subset — needed for real
+      page layouts (overlays, watermarks, positioned headers).
 - [x] **Text shaping via `rustybuzz` (HarfBuzz)** for embedded fonts: layout
       measures *shaped* widths (kerning + ligatures) and the PDF writer emits the
       shaped glyph ids as `TJ` arrays whose numeric adjustments reproduce kerning
