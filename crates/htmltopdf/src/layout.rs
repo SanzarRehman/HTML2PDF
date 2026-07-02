@@ -325,6 +325,7 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
         options.margin_left,
         content_width,
         TextAlign::Left,
+        None,
         &mut pages,
         &mut y,
         &mut carried,
@@ -348,6 +349,7 @@ fn layout_box_children(
     x: f32,
     width: f32,
     align: TextAlign,
+    line_height: Option<crate::html::LineHeight>,
     pages: &mut Vec<Page>,
     y: &mut f32,
     carried: &mut f32,
@@ -400,7 +402,7 @@ fn layout_box_children(
             BoxChild::Line(runs) => {
                 // Content flushes any pending margin above it.
                 flush_margin(y, carried);
-                layout_line_box(runs, x, width, align, pages, y, floats, options);
+                layout_line_box(runs, x, width, align, line_height, pages, y, floats, options);
             }
             BoxChild::Image(image) if image.float_dir.is_some() => {
                 flush_margin(y, carried);
@@ -804,7 +806,7 @@ impl FlexItem<'_> {
                 layout_block_box(b, x, width, pages, y, carried, &mut floats, options)
             }
             FlexItem::Line(runs) => {
-                layout_line_box(runs, x, width, TextAlign::Left, pages, y, &mut floats, options)
+                layout_line_box(runs, x, width, TextAlign::Left, None, pages, y, &mut floats, options)
             }
         }
     }
@@ -1161,6 +1163,7 @@ fn layout_block_box(
             inner_x,
             inner_width,
             block.align,
+            block.line_height,
             pages,
             y,
             carried,
@@ -1302,6 +1305,7 @@ fn layout_line_box(
     x: f32,
     width: f32,
     align: TextAlign,
+    line_height: Option<crate::html::LineHeight>,
     pages: &mut Vec<Page>,
     y: &mut f32,
     floats: &mut Vec<FloatBand>,
@@ -1336,12 +1340,17 @@ fn layout_line_box(
             .iter()
             .map(|piece| estimate_text_width(&piece.text, piece.font_size, &options.font))
             .sum();
-        // Leading follows the tallest run on the line.
+        // Leading follows the tallest run on the line; an explicit `line-height`
+        // overrides the UA default (×1.35).
         let max_font = visual
             .iter()
             .map(|piece| piece.font_size)
             .fold(0.0_f32, f32::max);
-        let leading = max_font * 1.35;
+        let leading = resolve_leading(line_height, max_font, FLOW_LEADING_FACTOR);
+        // When line-height exceeds the default line box, distribute the extra as
+        // half-leading (glyphs sit mid-line, as browsers do). When it's smaller
+        // (or unset) the baseline stays where the default box puts it.
+        let half_leading = ((leading - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
 
         // A page break retires the previous page's floats.
         if !has_space(*y, options, leading) {
@@ -1358,7 +1367,7 @@ fn layout_line_box(
         // Drop the baseline below the line's top edge by the tallest run's
         // ascent (~0.8 em), so ascenders stay inside the line box instead of
         // overlapping the border/padding of the box above.
-        let baseline = *y - max_font * 0.8;
+        let baseline = *y - half_leading - max_font * 0.8;
 
         let page = pages.last_mut().expect("at least one page exists");
         for piece in &visual {
@@ -1824,7 +1833,12 @@ fn plan_table_cells<'a>(
         // `table_geometry` (min-content still overflows); normally this is 1.0.
         let paint_scale = table_geometry.paint_scale;
         let font_size = cell_font_size(cell) * paint_scale;
-        let leading = font_size * 1.18;
+        // Cell leading honors CSS `line-height`; absolute lengths shrink with
+        // the table's paint scale, like the font itself.
+        let leading = match cell.style.line_height {
+            Some(crate::html::LineHeight::Length(points)) => points * paint_scale,
+            other => resolve_leading(other, font_size, CELL_LEADING_FACTOR),
+        };
         let padding_left = cell.style.padding_left.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
         let padding_right = cell.style.padding_right.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
         let padding_top = cell.style.padding_top.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
@@ -1908,6 +1922,26 @@ struct TableGeometry {
 /// width (an auto-sized column fitting its own content) is not broken by a
 /// floating-point rounding error.
 const WRAP_TOLERANCE: f32 = 0.25;
+
+/// UA-default leading factors (multiples of the font size) when no CSS
+/// `line-height` applies: flow line boxes and table-cell lines.
+const FLOW_LEADING_FACTOR: f32 = 1.35;
+const CELL_LEADING_FACTOR: f32 = 1.18;
+
+/// The distance between successive baselines: an explicit CSS `line-height`
+/// (a number scales the font in use, a length is absolute), else the UA
+/// default `font × default_factor`.
+fn resolve_leading(
+    line_height: Option<crate::html::LineHeight>,
+    font_size: f32,
+    default_factor: f32,
+) -> f32 {
+    match line_height {
+        Some(crate::html::LineHeight::Number(n)) => font_size * n,
+        Some(crate::html::LineHeight::Length(points)) => points,
+        None => font_size * default_factor,
+    }
+}
 
 /// Default table-cell font size (pt) when the cascade sets none — the browser
 /// default of ~11pt rather than a shrink-to-fit fudge.
@@ -2426,6 +2460,7 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    line_height: None,
                     position: None,
                     offset_top: None,
                     offset_right: None,
@@ -2483,6 +2518,7 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    line_height: None,
                     position: None,
                     offset_top: None,
                     offset_right: None,
@@ -2544,6 +2580,7 @@ mod tests {
                 float_dir: None,
                 clear: None,
                 css_width: None,
+                line_height: None,
                 position: None,
                 offset_top: None,
                 offset_right: None,
@@ -2585,6 +2622,72 @@ mod tests {
     }
 
     #[test]
+    fn line_height_controls_line_spacing_and_half_leading() {
+        use crate::box_tree::{BlockBox, BoxChild, Edges, FlowRoot, InlineRun};
+        use crate::html::LineHeight;
+
+        let render = |line_height: Option<LineHeight>| {
+            let line = |text: &str| {
+                BoxChild::Line(vec![InlineRun {
+                    text: text.to_string(),
+                    font_size: 10.0,
+                    bold: false,
+                    underline: false,
+                    line_through: false,
+                    color: Color::BLACK,
+                }])
+            };
+            let document = Document {
+                page_style: crate::html::PageStyle::default(),
+                table_style: crate::html::TableStyle::default(),
+                table_columns: Vec::new(),
+                images: Vec::new(),
+                flow: Some(FlowRoot {
+                    children: vec![BoxChild::Block(BlockBox {
+                        kind: BlockKind::Paragraph,
+                        margin: Edges::default(),
+                        padding: Edges::default(),
+                        align: crate::html::TextAlign::Left,
+                        background: None,
+                        border: false,
+                        flex: None,
+                        flex_grow: 0.0,
+                        flex_basis: None,
+                        grid: None,
+                        grid_span: 1,
+                        float_dir: None,
+                        clear: None,
+                        css_width: None,
+                        line_height,
+                        position: None,
+                        offset_top: None,
+                        offset_right: None,
+                        offset_bottom: None,
+                        offset_left: None,
+                        children: vec![line("one"), line("two")],
+                    })],
+                }),
+                blocks: Vec::new(),
+            };
+            layout_document(&document, &RenderOptions::default())
+        };
+
+        let default = render(None);
+        let doubled = render(Some(LineHeight::Number(2.0)));
+        let fixed = render(Some(LineHeight::Length(30.0)));
+
+        let gap = |pages: &[super::Page]| pages[0].lines[0].y - pages[0].lines[1].y;
+        assert!((gap(&default) - 13.5).abs() < 0.01, "default = 10 × 1.35");
+        assert!((gap(&doubled) - 20.0).abs() < 0.01, "number scales the font");
+        assert!((gap(&fixed) - 30.0).abs() < 0.01, "length is absolute");
+
+        // Extra leading is split around the glyphs: with line-height 2.0 the
+        // first baseline sits (20 − 13.5)/2 = 3.25pt lower than by default.
+        let shift = default[0].lines[0].y - doubled[0].lines[0].y;
+        assert!((shift - 3.25).abs() < 0.01, "half-leading shift, got {shift}");
+    }
+
+    #[test]
     fn paints_block_background_behind_text() {
         use crate::box_tree::{BlockBox, BoxChild, Edges, FlowRoot, InlineRun};
 
@@ -2614,6 +2717,7 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    line_height: None,
                     position: None,
                     offset_top: None,
                     offset_right: None,

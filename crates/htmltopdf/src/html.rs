@@ -68,6 +68,8 @@ pub struct CellStyle {
     pub border: Option<bool>,
     pub overflow: Option<Overflow>,
     pub font_size: Option<f32>,
+    /// CSS `line-height` (inherited). `None` = `normal` (UA default leading).
+    pub line_height: Option<LineHeight>,
     /// CSS `width`/`height` in points. Currently consumed only by `<img>` sizing;
     /// table column/row geometry uses a separate parse.
     pub width: Option<f32>,
@@ -127,6 +129,7 @@ impl Default for CellStyle {
             border: None,
             overflow: None,
             font_size: None,
+            line_height: None,
             width: None,
             height: None,
             padding_left: None,
@@ -162,6 +165,19 @@ impl Default for CellStyle {
             offset_left: None,
         }
     }
+}
+
+/// A cascaded CSS `line-height` value. `normal` is represented as the absence
+/// of a value (`None` in [`CellStyle::line_height`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeight {
+    /// Unitless number or percentage: a multiple of the element's font size,
+    /// re-resolved against each descendant's own font size (how CSS inherits a
+    /// number — we approximate the `%`/`em` compute-then-inherit rule the same
+    /// way, which matches when font sizes don't change mid-subtree).
+    Number(f32),
+    /// Absolute length in points.
+    Length(f32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -727,6 +743,7 @@ fn build_block(
         float_dir: own.float_dir,
         clear: own.clear,
         css_width: own.width,
+        line_height: own.line_height,
         position: own.position,
         offset_top: own.offset_top,
         offset_right: own.offset_right,
@@ -1335,6 +1352,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         // Inheritable: the element's own value wins, else the parent's.
         align: own.align.or(parent.align),
         font_size: own.font_size.or(parent.font_size),
+        line_height: own.line_height.or(parent.line_height),
         color: own.color.or(parent.color),
         white_space: own.white_space.or(parent.white_space),
         overflow_wrap: own.overflow_wrap.or(parent.overflow_wrap),
@@ -1455,6 +1473,29 @@ fn parse_css_offset(value: &str) -> Option<f32> {
     } else {
         parse_css_length(value)
     }
+}
+
+/// Parse a CSS `line-height` value. `normal` (and anything invalid or negative)
+/// is `None`; a unitless number or `%` is a font-size multiple; a length is
+/// absolute. Order matters: a bare number must NOT fall through to
+/// `parse_css_length` (which reads unitless values as points).
+fn parse_line_height(value: &str) -> Option<LineHeight> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("normal") {
+        return None;
+    }
+    if let Some(percent) = value.strip_suffix('%') {
+        return percent
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|n| *n >= 0.0)
+            .map(|n| LineHeight::Number(n / 100.0));
+    }
+    if let Ok(number) = value.parse::<f32>() {
+        return (number >= 0.0).then_some(LineHeight::Number(number));
+    }
+    parse_css_length(value).map(LineHeight::Length)
 }
 
 fn parse_css_length(value: &str) -> Option<f32> {
@@ -3032,6 +3073,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             }
         }
         "font-size" => target.cell.font_size = parse_css_length(value),
+        "line-height" => target.cell.line_height = parse_line_height(value),
         "width" => target.cell.width = parse_css_length(value),
         "height" => target.cell.height = parse_css_length(value),
         "color" => target.cell.color = parse_css_color(value),
@@ -3294,6 +3336,7 @@ impl CellStyle {
         self.border = other.border.or(self.border);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
+        self.line_height = other.line_height.or(self.line_height);
         self.width = other.width.or(self.width);
         self.height = other.height.or(self.height);
         self.padding_left = other.padding_left.or(self.padding_left);
@@ -3989,6 +4032,71 @@ mod tests {
         assert_eq!(document.page_style.margin_top, Some(54.0));
         assert_eq!(document.page_style.margin_bottom, Some(54.0));
         assert_eq!(document.table_style.row_height, Some(15.0));
+    }
+
+    #[test]
+    fn parses_line_height_values() {
+        use super::{parse_line_height, LineHeight};
+        assert_eq!(parse_line_height("1.5"), Some(LineHeight::Number(1.5)));
+        assert_eq!(parse_line_height("150%"), Some(LineHeight::Number(1.5)));
+        assert_eq!(parse_line_height("18pt"), Some(LineHeight::Length(18.0)));
+        assert_eq!(parse_line_height("24px"), Some(LineHeight::Length(18.0)));
+        assert_eq!(parse_line_height("normal"), None);
+        assert_eq!(parse_line_height("NORMAL"), None);
+        assert_eq!(parse_line_height("-2"), None, "negative is invalid");
+        assert_eq!(parse_line_height("bogus"), None);
+    }
+
+    #[test]
+    fn line_height_inherits_and_reaches_blocks_and_cells() {
+        let document = parse(
+            r#"
+            <style>
+            body { line-height: 1.8 }
+            td { line-height: 200% }
+            </style>
+            <body><p>flow text</p>
+            <table><tr><td>cell text</td></tr></table></body>
+            "#,
+        );
+
+        // The paragraph inherits body's line-height through the cascade.
+        fn find_paragraph(children: &[crate::box_tree::BoxChild]) -> Option<&crate::box_tree::BlockBox> {
+            for child in children {
+                if let crate::box_tree::BoxChild::Block(block) = child {
+                    if matches!(block.kind, super::BlockKind::Paragraph) {
+                        return Some(block);
+                    }
+                    if let Some(found) = find_paragraph(&block.children) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let flow = document.flow.as_ref().expect("flow content present");
+        let paragraph = find_paragraph(&flow.children).expect("paragraph block");
+        assert_eq!(paragraph.line_height, Some(super::LineHeight::Number(1.8)));
+
+        // The cell's own rule (200% -> 2.0) beats the inherited 1.8. The table
+        // renders inside the flow, so find it there.
+        fn find_table(children: &[crate::box_tree::BoxChild]) -> Option<&crate::box_tree::TableBox> {
+            for child in children {
+                match child {
+                    crate::box_tree::BoxChild::Table(table) => return Some(table),
+                    crate::box_tree::BoxChild::Block(block) => {
+                        if let Some(found) = find_table(&block.children) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        let table = find_table(&flow.children).expect("table in flow");
+        let cell = &table.rows[0].cells[0];
+        assert_eq!(cell.style.line_height, Some(super::LineHeight::Number(2.0)));
     }
 
     #[test]

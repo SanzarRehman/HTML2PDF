@@ -63,7 +63,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `overflow` | 🟡 | `visible` / `hidden`. |
 | `overflow-wrap`, `word-break` | ✅ | |
 | `display` | 🟡 | `none` and `table-*-group`; no `flex`/`grid`/`inline-block`. |
-| `line-height` | ❌ | Fixed leading (`font×1.35` flow, `×1.18` cells). |
+| `line-height` | 🟡 | Unitless number, `%`, and absolute lengths, on flow blocks and table cells; inherits; extra leading split as half-leading (Chrome-like). Defaults stay `font×1.35` flow / `×1.18` cells. No `normal` *override* of an inherited value, block-level only (no per-inline-run line-height). |
 | `font-family` | ❌ | Default base-14, or one `--font`; no per-element families. |
 | `font-style: italic` | ❌ | |
 | `letter-spacing`, `text-indent`, `text-transform`, `word-spacing` | ❌ | |

@@ -1,0 +1,30 @@
+{
+  "fixture": "line-height",
+  "layer": "features",
+  "description": "CSS line-height: unitless number, percentage, absolute length, tight spacing, and table-cell leading.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj"
+    ],
+    "must_contain_text": [
+      "height",
+      "Double-spaced",
+      "Percentage",
+      "Fixed-length",
+      "Tight",
+      "roomy"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The double-spaced paragraph has visibly wider gaps between its lines than the default paragraph.",
+    "The 160% paragraph's spacing sits between the default and double-spaced paragraphs.",
+    "The 28pt paragraph's baselines are exactly 28pt apart.",
+    "The tight paragraph's lines sit closer than default without touching its border.",
+    "The roomy table cell is taller than its default-leading sibling."
+  ]
+}

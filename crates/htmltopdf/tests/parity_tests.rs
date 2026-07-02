@@ -38,6 +38,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "grid"),
     ("features", "floats"),
     ("features", "positioning"),
+    ("features", "line-height"),
     ("combined", "invoice"),
     ("edge-cases", "unicode"),
     ("edge-cases", "long-table"),

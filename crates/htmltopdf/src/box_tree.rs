@@ -116,6 +116,9 @@ pub struct BlockBox {
     /// Cascaded CSS `width` (points), honored for floated blocks (otherwise a
     /// float is shrink-to-fit) and positioned boxes.
     pub css_width: Option<f32>,
+    /// CSS `line-height` (inherited): overrides the default leading of this
+    /// block's line boxes (`None` = UA default, `font × 1.35`).
+    pub line_height: Option<crate::html::LineHeight>,
     /// CSS `position` (static when `None`) with its box offsets in points.
     pub position: Option<PositionKind>,
     pub offset_top: Option<f32>,

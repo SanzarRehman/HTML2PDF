@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-size: 11pt; }
+  .normal   { }
+  .loose    { line-height: 2; }
+  .pct      { line-height: 160%; }
+  .fixed    { line-height: 28pt; }
+  .tight    { line-height: 1.05; border: 1pt solid; }
+  td.roomy  { line-height: 200%; }
+  h2 { font-size: 13pt; }
+</style>
+</head>
+<body>
+  <h2>Line height</h2>
+
+  <p class="normal">Default leading paragraph. The quick brown fox jumps over the lazy dog.
+  The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the
+  lazy dog so this paragraph wraps across several lines at normal spacing.</p>
+
+  <p class="loose">Double-spaced paragraph (line-height: 2). The quick brown fox jumps
+  over the lazy dog. The quick brown fox jumps over the lazy dog so this paragraph
+  wraps across several lines with clearly wider gaps between them.</p>
+
+  <p class="pct">Percentage paragraph (line-height: 160%). The quick brown fox jumps
+  over the lazy dog. The quick brown fox jumps over the lazy dog so this paragraph
+  wraps with moderately wider spacing.</p>
+
+  <p class="fixed">Fixed-length paragraph (line-height: 28pt). The quick brown fox
+  jumps over the lazy dog. The quick brown fox jumps over the lazy dog so successive
+  baselines sit exactly 28 points apart.</p>
+
+  <p class="tight">Tight paragraph (line-height: 1.05) inside a border. The quick
+  brown fox jumps over the lazy dog. Lines sit closer than the default without
+  ascenders escaping the border above.</p>
+
+  <table>
+    <tr><td>default cell leading with text long enough to wrap onto multiple lines
+      inside this table cell for comparison</td>
+      <td class="roomy">roomy cell (line-height: 200%) with text long enough to wrap
+      onto multiple lines inside this table cell</td></tr>
+  </table>
+</body>
+</html>

@@ -915,7 +915,18 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       cheaper `measureText` escape hatch if demand appears. **Not yet done:**
       `insertBefore`, `cloneNode`, `querySelector(All)`, JS-side tree traversal
       (`parentNode`/`children`), events, timers.
-- [ ] **`line-height`** (currently fixed leading `font×1.35` flow / `×1.18` cells).
+- [x] **`line-height`**: unitless numbers, percentages (both = font-size
+      multiples), and absolute lengths, applied to flow line boxes (per block,
+      inherited through the cascade) and table-cell leading (absolute lengths
+      scale with the table's shrink-to-fit paint scale, like the font). Leading
+      beyond the default line box is distributed as half-leading, so glyphs sit
+      mid-line like a browser; when unset, output is byte-identical to before
+      (`font×1.35` flow / `×1.18` cells). Guarded by a `features/line-height`
+      parity fixture (16 total). **Not yet done:** `line-height: normal`
+      *overriding* an inherited value (it currently falls through to the
+      ancestor's), per-inline-run line-height (the block's value governs the
+      whole line), and true font-metric line boxes (ascent+descent instead of
+      the 0.8 em ascent approximation).
 
 ### Features (attach after the spine)
 
