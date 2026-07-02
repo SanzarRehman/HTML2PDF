@@ -24,8 +24,9 @@ HTML -> html5ever -> arena DOM -> cssparser -> cascade
 
 Same input (`reg-2-9-1.html`, a real 1.8 MB spreadsheet export with ~22k table
 cells), rendered to PDF page 1 — left is `htmltopdf`, right is headless Chromium
-(`--print-to-pdf`). Rendered with `--font Arial --paper letter` to match
-Chromium's macOS fallback font and default paper.
+(`--print-to-pdf`). Both engines pick the font from the document's own
+`font-family: Calibri/Arial` CSS — htmltopdf resolves, embeds, and subsets the
+real Arial + Arial Bold faces itself (no `--font` flag needed).
 
 | htmltopdf | Chromium |
 | --- | --- |
@@ -36,16 +37,18 @@ per-page row counts line up closely (33 pages vs Chromium's 32).
 
 > ### ⚡ Cost of that conversion
 >
-> Full 33-page document, measured with `/usr/bin/time -l` on one machine
-> (Apple Silicon, macOS):
+> Full 33-page document (32 for Chromium), measured back-to-back with
+> `/usr/bin/time -l` on one machine (Apple Silicon, macOS), 2026-07 build with
+> real font-family resolution, shaping, and per-face subsetting enabled:
 >
 > | Metric | **htmltopdf** | Chromium (headless) | Advantage |
 > | --- | --- | --- | --- |
-> | **Wall time** | **≈ 0.35 s** | ≈ 1.7 s | **≈ 5× faster — ~80% less** |
-> | **Peak RAM** | **≈ 48 MB** | ≈ 840 MB | **≈ 17× less — ~94% less** |
+> | **Wall time** | **≈ 0.64 s** | ≈ 2.4 s | **≈ 4× faster** |
+> | **Peak RAM** | **≈ 92 MB** | ≈ 846 MB (main process alone) | **≈ 9× less** |
+> | **Output size** | 0.9 MB | 8.0 MB | ≈ 9× smaller |
 > | **Process model** | one thread, no subprocess | full browser + renderer processes | — |
 >
-> The RAM gap is the whole point: Chromium needs a browser (~840 MB) per
+> The RAM gap is the whole point: Chromium needs a browser (~850 MB) per
 > concurrent conversion, while htmltopdf renders many documents in one small
 > process — so throughput per GB of RAM is dramatically higher on a server.
 > Development measurements on one fixture/machine, not a guarantee.
@@ -307,15 +310,21 @@ future rendering targets and makes layout independent from raw PDF syntax.
 The current benchmark fixture is `reg-2-9-1.html`, a real-world 1.8 MB
 spreadsheet-like HTML file with roughly 22k table cells.
 
-Early project measurements from [IMPLEMENTATION.md](IMPLEMENTATION.md):
+Measurement history (details in [IMPLEMENTATION.md](IMPLEMENTATION.md)):
 
 | Scenario | Result |
 | --- | --- |
 | Single render, early table-aware layout | about 0.15s, about 20.6 MB peak RSS |
 | Wrapped table layout | about 189 ms average over 5 runs |
-| CSS page margins and row height | about 195 ms average over 5 runs |
 | Parsed CSS cell styles | about 218 ms average over 5 runs |
 | 16-worker benchmark | about 23-25 ms average wall time per PDF in earlier runs |
+| Full pipeline, base-14 Helvetica only (2026-07) | about 0.36 s, about 77 MB peak RSS |
+| Full pipeline + real Arial resolution/embedding (current) | about 0.64 s, about 92 MB peak RSS |
+
+The current default is doing strictly more work than the earlier rows: it
+honors the document's `font-family`, embeds and subsets real Arial + Arial
+Bold, shapes text, and reproduces kerning — the earlier builds substituted
+built-in Helvetica metrics for everything.
 
 These numbers are development baselines, not a final performance guarantee.
 Every major rendering feature should be benchmarked against fixed fixtures so
