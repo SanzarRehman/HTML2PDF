@@ -1,7 +1,7 @@
 {
   "fixture": "flexbox",
   "layer": "features",
-  "description": "First-pass flexbox (row): flex-grow equal columns, fixed flex-basis + grow, gap, justify-content.",
+  "description": "Flexbox: flex-grow equal columns, fixed basis + grow, gap, justify-content, align-items, inline span items, column direction.",
   "pdf_assertions": {
     "must_contain_operators": [
       "BT",
@@ -15,7 +15,9 @@
       "Flexbox",
       "Column",
       "Fixed",
-      "Grows"
+      "Grows",
+      "Centered",
+      "Middle"
     ],
     "min_size_bytes": 700,
     "max_size_bytes": 2000000,
@@ -25,6 +27,8 @@
     "Three equal-width cards (flex:1) sit side by side with a gap between them.",
     "A fixed 120pt column sits left of a growing column that fills the remaining width.",
     "The justify-content:flex-end row pushes its two chips to the right edge.",
-    "KNOWN LIMIT: inline (<span>) flex items are not laid out as flex items yet."
+    "In the align-items:center row, the short 'Centered' card is vertically centered against the tall card.",
+    "The three span chips (Left/Middle/Right) are separate items spread by space-between.",
+    "The column-direction section stacks two cards vertically with an 8pt gap."
   ]
 }

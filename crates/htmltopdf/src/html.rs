@@ -564,10 +564,17 @@ fn build_block(
     } else {
         0.0
     };
+    // Inline elements promoted to flex items (built via the flex-container child
+    // loop) default to zero vertical margins, like a browser's UA styles.
+    let inline_item = !is_block_tag(tag);
     let margin = crate::box_tree::Edges {
-        top: own.margin_top.unwrap_or_else(|| crate::layout::spacing_before(kind)),
+        top: own.margin_top.unwrap_or_else(|| {
+            if inline_item { 0.0 } else { crate::layout::spacing_before(kind) }
+        }),
         right: own.margin_right.unwrap_or(0.0),
-        bottom: own.margin_bottom.unwrap_or_else(|| crate::layout::spacing_after(kind)),
+        bottom: own.margin_bottom.unwrap_or_else(|| {
+            if inline_item { 0.0 } else { crate::layout::spacing_after(kind) }
+        }),
         left: own.margin_left.unwrap_or(0.0) + nesting_indent,
     };
     let padding = crate::box_tree::Edges {
@@ -595,8 +602,32 @@ fn build_block(
         let marker = li_marker(dom, id);
         acc.push_text(&marker, &child_ctx);
     }
-    for &child in &dom.node(id).children {
-        build_node(dom, child, env, child_ctx, &mut acc);
+    if own.display_flex {
+        // Every element child of a flex container becomes a flex item (per the
+        // flexbox model), so inline elements like <span> are built as blocks
+        // here instead of folding into a shared line. Bare text between them
+        // still accumulates into anonymous line items.
+        for &child in &dom.node(id).children {
+            let child_node = dom.node(child);
+            match child_node.tag() {
+                Some(child_tag)
+                    if !matches!(
+                        child_tag,
+                        "head" | "script" | "style" | "title" | "br" | "img" | "table"
+                    ) && !computed.hidden[child] =>
+                {
+                    acc.flush_line();
+                    if let Some(item) = build_block(dom, child, env, child_ctx, child_tag) {
+                        acc.children.push(crate::box_tree::BoxChild::Block(item));
+                    }
+                }
+                _ => build_node(dom, child, env, child_ctx, &mut acc),
+            }
+        }
+    } else {
+        for &child in &dom.node(id).children {
+            build_node(dom, child, env, child_ctx, &mut acc);
+        }
     }
     acc.flush_line();
 

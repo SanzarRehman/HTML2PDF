@@ -436,53 +436,51 @@ fn layout_flex_box(
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
-    use crate::html::FlexDirection;
+    use crate::html::{AlignItems, FlexDirection};
 
-    // Flex items are the block-level children. Anything else (stray inline text)
-    // is ignored in the flex row for this first pass.
-    let items: Vec<&crate::box_tree::BlockBox> = block
+    // Flex items: block children are items; contiguous inline content (a `Line`)
+    // becomes an anonymous item. Images/tables inside a flex row are still
+    // skipped (rare; documented).
+    let items: Vec<FlexItem> = block
         .children
         .iter()
         .filter_map(|child| match child {
-            BoxChild::Block(b) => Some(b),
+            BoxChild::Block(b) => Some(FlexItem::Block(b)),
+            BoxChild::Line(runs) => Some(FlexItem::Line(runs)),
             _ => None,
         })
         .collect();
-
-    // Column direction (or no real items) falls back to normal stacking.
-    if flex.direction == FlexDirection::Column || items.is_empty() {
-        let mut carried = 0.0;
-        layout_box_children(
-            &block.children,
-            inner_x,
-            inner_width,
-            block.align,
-            pages,
-            y,
-            &mut carried,
-            options,
-        );
+    if items.is_empty() {
         return;
     }
 
     let gap = flex.gap;
+
+    // Column direction: items stack vertically, separated by `gap`. Main-axis
+    // (height) grow/basis and justify-content are not applied in this pass.
+    if flex.direction == FlexDirection::Column {
+        for (index, item) in items.iter().enumerate() {
+            if index > 0 {
+                *y -= gap;
+            }
+            let mut carried = 0.0;
+            item.layout(inner_x, inner_width, pages, y, &mut carried, options);
+        }
+        return;
+    }
+
     let total_gap = gap * (items.len() as f32 - 1.0).max(0.0);
     let avail = (inner_width - total_gap).max(0.0);
 
-    // Base main size per item: flex-basis, else declared width, else content
-    // max-content (clamped to the row's available width).
+    // Base main size per item: flex-basis, else content max-content, clamped to
+    // the row's available width.
     let bases: Vec<f32> = items
         .iter()
-        .map(|item| {
-            let basis = item
-                .flex_basis
-                .unwrap_or_else(|| measure_max_content(&item.children, &options.font));
-            basis.clamp(0.0, avail)
-        })
+        .map(|item| item.basis(&options.font).clamp(0.0, avail))
         .collect();
 
     let total_base: f32 = bases.iter().sum();
-    let total_grow: f32 = items.iter().map(|i| i.flex_grow).sum();
+    let total_grow: f32 = items.iter().map(FlexItem::grow).sum();
     let free = avail - total_base;
 
     let widths: Vec<f32> = if free > 0.0 && total_grow > 0.0 {
@@ -490,7 +488,7 @@ fn layout_flex_box(
         bases
             .iter()
             .zip(&items)
-            .map(|(base, item)| base + free * (item.flex_grow / total_grow))
+            .map(|(base, item)| base + free * (item.grow() / total_grow))
             .collect()
     } else if free < 0.0 && total_base > 0.0 {
         // Overflow: shrink every item proportionally to its base so the row fits.
@@ -507,18 +505,98 @@ fn layout_flex_box(
     let (mut cursor, between) = justify_offsets(flex.justify, slack, gap, n);
     cursor += inner_x;
 
+    // Measure pass: lay each item out into scratch pages to learn its height, so
+    // align-items can offset shorter items against the tallest one.
+    let heights: Vec<f32> = items
+        .iter()
+        .zip(&widths)
+        .map(|(item, width)| item.measure_height(*width, options))
+        .collect();
+    let row_height = heights.iter().fold(0.0_f32, |a, &b| a.max(b));
+
+    // Cross-axis alignment factor: how much of the leftover height goes above
+    // the item. `stretch` behaves as `flex-start` (items are not inflated).
+    let align_factor = match flex.align {
+        AlignItems::Stretch | AlignItems::FlexStart => 0.0,
+        AlignItems::Center => 0.5,
+        AlignItems::FlexEnd => 1.0,
+    };
+
     let top = *y;
     let mut lowest = *y;
-    for (item, width) in items.iter().zip(&widths) {
-        let mut item_y = top;
+    for ((item, width), height) in items.iter().zip(&widths).zip(&heights) {
+        let mut item_y = top - (row_height - height) * align_factor;
         let mut carried = 0.0;
-        // Each item is laid out as a block within its own main-size column.
-        layout_block_box(item, cursor, *width, pages, &mut item_y, &mut carried, options);
+        item.layout(cursor, *width, pages, &mut item_y, &mut carried, options);
         lowest = lowest.min(item_y);
         cursor += width + between;
     }
 
-    *y = lowest;
+    *y = lowest.min(top - row_height);
+}
+
+/// One flex item: a block child, or an anonymous item wrapping contiguous
+/// inline content.
+enum FlexItem<'a> {
+    Block(&'a crate::box_tree::BlockBox),
+    Line(&'a [crate::box_tree::InlineRun]),
+}
+
+impl FlexItem<'_> {
+    fn grow(&self) -> f32 {
+        match self {
+            FlexItem::Block(b) => b.flex_grow,
+            FlexItem::Line(_) => 0.0,
+        }
+    }
+
+    /// Base main size: `flex-basis` when declared, else the content's
+    /// max-content width plus the item's own horizontal padding and margins
+    /// (the outer main size, so padded pills don't collapse to zero content).
+    fn basis(&self, font: &crate::font::Font) -> f32 {
+        match self {
+            FlexItem::Block(b) => b.flex_basis.unwrap_or_else(|| {
+                measure_max_content(&b.children, font)
+                    + b.padding.left
+                    + b.padding.right
+                    + b.margin.left
+                    + b.margin.right
+            }),
+            FlexItem::Line(runs) => runs
+                .iter()
+                .map(|run| estimate_text_width(&run.text, run.font_size, font))
+                .sum(),
+        }
+    }
+
+    fn layout(
+        &self,
+        x: f32,
+        width: f32,
+        pages: &mut Vec<Page>,
+        y: &mut f32,
+        carried: &mut f32,
+        options: &RenderOptions,
+    ) {
+        match self {
+            FlexItem::Block(b) => layout_block_box(b, x, width, pages, y, carried, options),
+            FlexItem::Line(runs) => {
+                layout_line_box(runs, x, width, TextAlign::Left, pages, y, options)
+            }
+        }
+    }
+
+    /// Dry-run the item into scratch pages to learn the height it will consume
+    /// at `width`. Cheap (a flex item is a small subtree) and exact, since it
+    /// runs the same layout code as the paint pass.
+    fn measure_height(&self, width: f32, options: &RenderOptions) -> f32 {
+        let mut scratch = vec![Page::new()];
+        let start = options.page_size.height - options.margin_top;
+        let mut item_y = start;
+        let mut carried = 0.0;
+        self.layout(0.0, width, &mut scratch, &mut item_y, &mut carried, options);
+        start - item_y
+    }
 }
 
 /// Return `(leading offset, gap between items)` for a `justify-content` value,
@@ -770,6 +848,11 @@ fn layout_line_box(
             TextAlign::Right => x + (width - line_width).max(0.0),
         };
 
+        // Drop the baseline below the line's top edge by the tallest run's
+        // ascent (~0.8 em), so ascenders stay inside the line box instead of
+        // overlapping the border/padding of the box above.
+        let baseline = *y - max_font * 0.8;
+
         let page = pages.last_mut().expect("at least one page exists");
         for piece in &visual {
             let piece_width = estimate_text_width(&piece.text, piece.font_size, &options.font);
@@ -777,7 +860,7 @@ fn layout_line_box(
                 Line {
                     text: piece.text.clone(),
                     x: px,
-                    y: *y,
+                    y: baseline,
                     font_size: piece.font_size,
                     leading,
                 },
@@ -786,7 +869,7 @@ fn layout_line_box(
             );
             page.push_text_decoration(
                 px,
-                *y,
+                baseline,
                 piece_width,
                 piece.font_size,
                 piece.color,

@@ -67,7 +67,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `font-family` | ❌ | Default base-14, or one `--font`; no per-element families. |
 | `font-style: italic` | ❌ | |
 | `letter-spacing`, `text-indent`, `text-transform`, `word-spacing` | ❌ | |
-| `display: flex` (+ `flex`, `flex-grow`, `flex-basis`, `justify-content`, `gap`) | 🟡 | First-pass **row** only: block children as items, grow/basis sizing, justify-content, gap. No wrap, `align-items` (items top-aligned), `column` direction (falls back to stacking), inline items, or cross-page rows. |
+| `display: flex` (+ `flex`, `flex-grow`, `flex-basis`, `justify-content`, `align-items`, `gap`, `flex-direction`) | 🟡 | Row: grow/basis sizing, justify-content, **align-items** (center/end via measure pass), inline (`span`) children promoted to items, anonymous text items. **Column**: vertical stack with `gap` (no height grow/justify). No `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, or cross-page rows. |
 | `float`, `clear` | ❌ | |
 | `position` (relative/absolute/fixed/sticky), `top`/`left`/`z-index` | ❌ | |
 | `grid*`, `columns`, `flex-wrap`, `flex-shrink` (explicit), `order` | ❌ | |

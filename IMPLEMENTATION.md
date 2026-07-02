@@ -855,10 +855,9 @@ that attach cleanly once the spine exists.
 The current front of the queue (rough value order). Details for each are in the
 feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
 
-- [ ] **Finish flexbox**: `align-items` (center/end/stretch, needs per-item
-      height measurement), `flex-direction: column`, inline flex items (wrap runs
-      into anonymous items), `flex-wrap`, explicit `flex-shrink`/`order`, and flex
-      rows that span a page break. *(First-pass row flex already shipped.)*
+- [ ] **Finish flexbox** *(phase 2 shipped — see below)*: remaining gaps are
+      `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, column-direction
+      main-axis sizing (height grow/justify), and flex rows spanning a page break.
 - [ ] **CSS grid** (`display: grid`): track sizing, spans, auto-placement.
 - [ ] **`position` / `float`**: relative/absolute positioning subset and floated
       boxes with text wrap — needed for real page layouts.
@@ -921,10 +920,17 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       (the flag propagates like `bold`, so it only ever turns decoration on).
 - [x] First-pass **flexbox** (`display: flex`): row direction with `flex`/
       `flex-grow`/`flex-basis`, `justify-content`, and `gap`, over block-level
-      flex items. Column sizing via basis → grow → uniform shrink; items are
-      top-aligned. **Not yet done:** `flex-wrap`, explicit `flex-shrink`/`order`,
-      `align-items` beyond top, `flex-direction: column` (falls back to
-      stacking), inline flex items, and flex rows spanning a page break.
+      flex items. Column sizing via basis → grow → uniform shrink.
+- [x] **Flexbox phase 2**: `align-items` center/end (per-item height via a
+      scratch-page measure pass — same code as the paint pass, so it's exact);
+      inline element children (e.g. `<span>`) promoted to real flex items with
+      zero default margins, and bare text as anonymous items; `flex-direction:
+      column` as a vertical stack with `gap`; item basis includes the item's own
+      padding/margins. Also fixed the flow first-baseline placement: baselines
+      now sit ~0.8 em below the line top, so ascenders no longer overlap the
+      border/padding of the box above (visible in bordered cards/pills).
+      **Not yet done:** `flex-wrap`, explicit `flex-shrink`/`order`,
+      `align-self`, column main-axis sizing, and flex rows spanning a page break.
 - [ ] CSS grid layout.
 - [ ] Move toward browser-complete computed values (more properties, shorthands,
       units); consider `:link` and namespace selectors. Text not yet supported
