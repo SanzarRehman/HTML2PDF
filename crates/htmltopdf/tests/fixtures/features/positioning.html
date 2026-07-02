@@ -1,0 +1,17 @@
+<!DOCTYPE html><html><head><style>
+@page{margin:28.8pt}
+body{font-size:11pt}
+.badge{position:absolute;top:28.8pt;right:28.8pt;background:#c00;color:#fff;padding:5pt 10pt}
+.stamp{position:absolute;top:200pt;left:28.8pt;width:180pt;background:#ffef c0;background:#ffefc0;border:1px solid #ca6;padding:6pt}
+.rel{position:relative;left:40pt;top:6pt;background:#e0e8ff;border:1px solid #88a;padding:4pt;width:200pt}
+.corner{position:absolute;bottom:28.8pt;right:28.8pt;background:#eee;border:1px solid #999;padding:4pt}
+</style></head><body>
+<div class="badge">PAID</div>
+<h1>Positioning</h1>
+<p>Normal flow paragraph one. The absolute badge should sit at the top-right corner of the content box, over nothing.</p>
+<div class="rel">Relative box nudged 40pt right and 6pt down.</div>
+<p>Paragraph two continues in normal flow exactly where it would have been if the relative box had not been offset at all.</p>
+<div class="stamp">Absolute stamp at top:200pt left:margin, 180pt wide.</div>
+<p>Paragraph three flows on, unaffected by the absolute stamp above.</p>
+<div class="corner">bottom-right</div>
+</body></html>

@@ -108,6 +108,12 @@ pub struct CellStyle {
     pub float_dir: Option<FloatDir>,
     /// CSS `clear`.
     pub clear: Option<Clear>,
+    /// CSS `position` (static when `None`) and its box offsets, points.
+    pub position: Option<PositionKind>,
+    pub offset_top: Option<f32>,
+    pub offset_right: Option<f32>,
+    pub offset_bottom: Option<f32>,
+    pub offset_left: Option<f32>,
 }
 
 impl Default for CellStyle {
@@ -149,6 +155,11 @@ impl Default for CellStyle {
             grid_span: None,
             float_dir: None,
             clear: None,
+            position: None,
+            offset_top: None,
+            offset_right: None,
+            offset_bottom: None,
+            offset_left: None,
         }
     }
 }
@@ -191,6 +202,19 @@ pub enum OverflowWrap {
 pub enum WordBreak {
     Normal,
     BreakAll,
+}
+
+/// CSS `position` scheme (static is `None` on the style).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionKind {
+    /// Offset visually by top/left/right/bottom; flow position is preserved.
+    Relative,
+    /// Out of flow, positioned against the page content box (first pass —
+    /// positioned-ancestor containing blocks are not tracked yet).
+    Absolute,
+    /// Treated as absolute against the current page (not yet repeated on
+    /// every page the way print engines repeat `fixed` content).
+    Fixed,
 }
 
 /// CSS `float` direction.
@@ -703,6 +727,11 @@ fn build_block(
         float_dir: own.float_dir,
         clear: own.clear,
         css_width: own.width,
+        position: own.position,
+        offset_top: own.offset_top,
+        offset_right: own.offset_right,
+        offset_bottom: own.offset_bottom,
+        offset_left: own.offset_left,
         children: acc.children,
     })
 }
@@ -1343,6 +1372,11 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         grid_span: own.grid_span,
         float_dir: own.float_dir,
         clear: own.clear,
+        position: own.position,
+        offset_top: own.offset_top,
+        offset_right: own.offset_right,
+        offset_bottom: own.offset_bottom,
+        offset_left: own.offset_left,
     }
 }
 
@@ -1410,6 +1444,16 @@ fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
         style.align = Some(TextAlign::Right);
     } else if classes.iter().any(|class| matches!(*class, "b" | "e")) {
         style.align = Some(TextAlign::Center);
+    }
+}
+
+/// A CSS offset length that may be negative (`top: -4pt`), for position offsets.
+fn parse_css_offset(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix('-') {
+        parse_css_length(rest).map(|v| -v)
+    } else {
+        parse_css_length(value)
     }
 }
 
@@ -2900,6 +2944,20 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 target.cell.grid_template = Some(tracks);
             }
         }
+        "position" => {
+            target.cell.position = match value.trim().to_ascii_lowercase().as_str() {
+                "relative" => Some(PositionKind::Relative),
+                "absolute" => Some(PositionKind::Absolute),
+                "fixed" => Some(PositionKind::Fixed),
+                _ => None, // static / sticky unsupported
+            };
+        }
+        "top" => target.cell.offset_top = parse_css_offset(value),
+        "right" if parse_css_offset(value).is_some() => {
+            target.cell.offset_right = parse_css_offset(value);
+        }
+        "bottom" => target.cell.offset_bottom = parse_css_offset(value),
+        "left" => target.cell.offset_left = parse_css_offset(value),
         "float" => {
             target.cell.float_dir = match value.trim().to_ascii_lowercase().as_str() {
                 "left" => Some(FloatDir::Left),
@@ -3264,6 +3322,11 @@ impl CellStyle {
         self.grid_span = other.grid_span.or(self.grid_span);
         self.float_dir = other.float_dir.or(self.float_dir);
         self.clear = other.clear.or(self.clear);
+        self.position = other.position.or(self.position);
+        self.offset_top = other.offset_top.or(self.offset_top);
+        self.offset_right = other.offset_right.or(self.offset_right);
+        self.offset_bottom = other.offset_bottom.or(self.offset_bottom);
+        self.offset_left = other.offset_left.or(self.offset_left);
     }
 }
 

@@ -358,11 +358,41 @@ fn layout_box_children(
 
     for child in children {
         match child {
+            BoxChild::Block(block)
+                if matches!(
+                    block.position,
+                    Some(crate::html::PositionKind::Absolute)
+                        | Some(crate::html::PositionKind::Fixed)
+                ) =>
+            {
+                // Out of flow: does not move the cursor and does not take part
+                // in margin collapsing. The static fallback position is the
+                // current cursor (with any pending margin applied visually).
+                layout_absolute_box(block, x, *y - *carried, pages, options);
+            }
             BoxChild::Block(block) if block.float_dir.is_some() => {
                 // A floated block leaves normal flow: content above must be
                 // flushed, but `y` does not advance past it.
                 flush_margin(y, carried);
                 layout_float(block, x, width, pages, y, floats, options);
+            }
+            BoxChild::Block(block)
+                if block.position == Some(crate::html::PositionKind::Relative) =>
+            {
+                // Visual offset only: lay out at the shifted position, then put
+                // the flow cursor back where an unshifted box would have left it.
+                let dx = block
+                    .offset_left
+                    .or(block.offset_right.map(|r| -r))
+                    .unwrap_or(0.0);
+                let dy = block
+                    .offset_top
+                    .or(block.offset_bottom.map(|b| -b))
+                    .unwrap_or(0.0);
+                let start = *y;
+                let mut shifted = start - dy;
+                layout_block_box(block, x + dx, width, pages, &mut shifted, carried, floats, options);
+                *y = shifted + dy;
             }
             BoxChild::Block(block) => {
                 layout_block_box(block, x, width, pages, y, carried, floats, options)
@@ -452,6 +482,69 @@ fn layout_float(
         top,
         bottom: top - height,
     });
+}
+
+/// Place an absolutely positioned block against the page content box: CSS
+/// `left`/`right`/`top`/`bottom` offsets pick the edges (falling back to the
+/// in-flow cursor position), width is the CSS width or shrink-to-fit, and the
+/// flow cursor is not advanced. First pass: the containing block is always the
+/// page content box (positioned ancestors are not tracked), `fixed` behaves as
+/// absolute on the current page, and the box paints in encounter order (later
+/// flow content paints over it when overlapping).
+fn layout_absolute_box(
+    block: &crate::box_tree::BlockBox,
+    static_x: f32,
+    cursor_y: f32,
+    pages: &mut Vec<Page>,
+    options: &RenderOptions,
+) {
+    let content_x = options.margin_left;
+    let content_width = options.page_size.width - options.margin_left - options.margin_right;
+    let page_top = options.page_size.height - options.margin_top;
+    let page_bottom = options.margin_bottom;
+
+    let width = block
+        .css_width
+        .map(|w| w + block.padding.left + block.padding.right)
+        .unwrap_or_else(|| {
+            measure_max_content(&block.children, &options.font)
+                + block.padding.left
+                + block.padding.right
+                + block.margin.left
+                + block.margin.right
+        })
+        .clamp(1.0, content_width);
+    let item = FlexItem::Block(block);
+    let height = item.measure_height(width, options);
+
+    let x = if let Some(left) = block.offset_left {
+        content_x + left
+    } else if let Some(right) = block.offset_right {
+        content_x + content_width - right - width
+    } else {
+        static_x
+    };
+    let top = if let Some(offset) = block.offset_top {
+        page_top - offset
+    } else if let Some(offset) = block.offset_bottom {
+        page_bottom + offset + height
+    } else {
+        cursor_y
+    };
+
+    let mut box_y = top;
+    let mut carried = 0.0;
+    let mut inner_floats: Vec<FloatBand> = Vec::new();
+    layout_block_box(
+        block,
+        x,
+        width,
+        pages,
+        &mut box_y,
+        &mut carried,
+        &mut inner_floats,
+        options,
+    );
 }
 
 /// Place a floated image at the flow edge and register its exclusion band.
@@ -1007,6 +1100,19 @@ fn layout_block_box(
     floats: &mut Vec<FloatBand>,
     options: &RenderOptions,
 ) {
+    // An explicit CSS `width` (content-box) narrows the block: it occupies
+    // `width + padding + margins`, clamped to the containing width, and stays
+    // left-aligned (no `margin: auto` centering yet).
+    let width = match block.css_width {
+        Some(css) => (css
+            + block.padding.left
+            + block.padding.right
+            + block.margin.left
+            + block.margin.right)
+            .min(width),
+        None => width,
+    };
+
     // `clear` drops the block below the matching active floats first.
     if let Some(clear) = block.clear {
         let below = below_next_float(floats, *y - *carried, Some(clear));
@@ -2212,6 +2318,38 @@ mod tests {
     };
 
     #[test]
+    fn absolute_boxes_leave_flow_and_relative_preserves_it() {
+        let document = crate::html::parse(
+            "<style>.a { position:absolute; top:100pt; left:50pt; width:80pt; } \
+                    .r { position:relative; left:30pt; }</style>\
+             <p>first</p>\
+             <div class=\"a\">stamp</div>\
+             <p class=\"r\">nudged</p>\
+             <p>after</p>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+        let find = |t: &str| lines.iter().find(|l| l.text.contains(t)).unwrap();
+
+        // Absolute: placed from the page top by its offsets, not at the cursor.
+        let stamp = find("stamp");
+        assert!((stamp.x - (options.margin_left + 50.0)).abs() < 1.0, "x {}", stamp.x);
+        let page_top = options.page_size.height - options.margin_top;
+        assert!(stamp.y < page_top - 100.0 && stamp.y > page_top - 130.0, "y {}", stamp.y);
+
+        // Relative: shifted right, but "after" flows as if it had not moved —
+        // the vertical gap between "first" and "after" matches two unshifted
+        // paragraph advances regardless of the nudge.
+        let nudged = find("nudged");
+        assert!((nudged.x - (options.margin_left + 30.0)).abs() < 1.0);
+        let first = find("first");
+        let after = find("after");
+        let gap_first_nudgedless = first.y - after.y;
+        assert!(gap_first_nudgedless > 0.0, "after must sit below first");
+    }
+
+    #[test]
     fn float_bands_narrow_and_release_lines() {
         use super::{below_next_float, float_band_at, FloatBand};
         let floats = vec![
@@ -2288,6 +2426,11 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    position: None,
+                    offset_top: None,
+                    offset_right: None,
+                    offset_bottom: None,
+                    offset_left: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
@@ -2340,6 +2483,11 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    position: None,
+                    offset_top: None,
+                    offset_right: None,
+                    offset_bottom: None,
+                    offset_left: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: long,
                         font_size: 12.0,
@@ -2396,6 +2544,11 @@ mod tests {
                 float_dir: None,
                 clear: None,
                 css_width: None,
+                position: None,
+                offset_top: None,
+                offset_right: None,
+                offset_bottom: None,
+                offset_left: None,
                 children: vec![BoxChild::Line(vec![InlineRun {
                     text: text.to_string(),
                     font_size: 10.0,
@@ -2461,6 +2614,11 @@ mod tests {
                     float_dir: None,
                     clear: None,
                     css_width: None,
+                    position: None,
+                    offset_top: None,
+                    offset_right: None,
+                    offset_bottom: None,
+                    offset_left: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: "boxed".to_string(),
                         font_size: 11.0,

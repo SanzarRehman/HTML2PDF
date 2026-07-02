@@ -13,8 +13,8 @@
 
 use crate::color::Color;
 use crate::html::{
-    AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent, TableCell,
-    TextAlign,
+    AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent,
+    PositionKind, TableCell, TextAlign,
 };
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
@@ -114,8 +114,14 @@ pub struct BlockBox {
     /// CSS `clear`: drop below active floats on the given side(s) first.
     pub clear: Option<Clear>,
     /// Cascaded CSS `width` (points), honored for floated blocks (otherwise a
-    /// float is shrink-to-fit).
+    /// float is shrink-to-fit) and positioned boxes.
     pub css_width: Option<f32>,
+    /// CSS `position` (static when `None`) with its box offsets in points.
+    pub position: Option<PositionKind>,
+    pub offset_top: Option<f32>,
+    pub offset_right: Option<f32>,
+    pub offset_bottom: Option<f32>,
+    pub offset_left: Option<f32>,
     pub children: Vec<BoxChild>,
 }
 

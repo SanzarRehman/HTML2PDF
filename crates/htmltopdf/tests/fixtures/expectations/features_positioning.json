@@ -1,0 +1,31 @@
+{
+  "fixture": "positioning",
+  "layer": "features",
+  "description": "position: relative (visual offset, flow preserved) and absolute (top/right/bottom/left vs the page content box); CSS width on in-flow blocks.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "re",
+      "f",
+      "rg"
+    ],
+    "must_contain_text": [
+      "Positioning",
+      "PAID",
+      "stamp",
+      "bottom-right",
+      "nudged"
+    ],
+    "min_size_bytes": 800,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The PAID badge sits at the top-right corner of the content box.",
+    "The relative box is nudged 40pt right / 6pt down, is 200pt wide, and the next paragraph flows as if it had not moved.",
+    "The absolute stamp sits at top:200pt at the left margin, 180pt wide, without affecting following paragraphs.",
+    "The bottom-right box sits at the page's bottom-right content corner."
+  ]
+}

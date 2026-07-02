@@ -879,8 +879,15 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       second band row when they don't fit side by side, `float: none`
       overriding an earlier float in the cascade, and relative/absolute
       positioning (still open, next line).
-- [ ] **`position`**: relative/absolute positioning subset — needed for real
-      page layouts (overlays, watermarks, positioned headers).
+- [x] **`position`, first pass**: `relative` (visual offset via a shifted
+      layout cursor; flow position fully preserved) and `absolute`
+      (out-of-flow against the page content box: `top`/`right`/`bottom`/`left`
+      offsets with in-flow-cursor fallback, shrink-to-fit or CSS width, no
+      cursor advance, excluded from margin collapsing). In-flow blocks now also
+      honor a content-box CSS `width` (left-aligned). **Not yet done:**
+      positioned-ancestor containing blocks, `fixed` repeated on every page
+      (currently absolute on its page), `z-index`/stacking (paint order is
+      encounter order), `%` offsets, `margin: auto`, and `sticky`.
 - [x] **Text shaping via `rustybuzz` (HarfBuzz)** for embedded fonts: layout
       measures *shaped* widths (kerning + ligatures) and the PDF writer emits the
       shaped glyph ids as `TJ` arrays whose numeric adjustments reproduce kerning
