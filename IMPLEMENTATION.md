@@ -855,9 +855,39 @@ that attach cleanly once the spine exists.
 The current front of the queue (rough value order). Details for each are in the
 feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
 
+- [ ] **Per-element `font-family` + real bold/italic faces** — the next big
+      one. The multi-font PDF plumbing (`FontPlan`, per-face subsetting,
+      mid-`BT` `Tf` switches) shipped with the fallback work; what's left is
+      the *selection* side: parse `font-family` stacks, resolve each named
+      family (and `font-weight`/`font-style` variants) through `fontdb`, carry
+      a font id on inline runs through layout → paint, and measure each run
+      with its own face. Kills faux-bold (fill+stroke) and fake italics — the
+      most visible fidelity gap vs Chromium in every render — and gives
+      monospace `<pre>`/`<code>` a real face.
+- [ ] **`%` lengths + sizing keywords**: percentage widths/heights against the
+      containing block, `max-width`/`min-width` (incl. `max-width: 100%` on
+      images), and `margin: auto` horizontal centering. Small parser+layout
+      slices, huge template coverage.
+- [ ] **Link annotations + outline**: `<a href>` → PDF `/Annots` link
+      rectangles (external URLs and `#anchor` → internal GoTo), and a document
+      outline (bookmarks) from `h1`–`h3`. Pure pdf.rs additions; the display
+      list needs a link-region command.
 - [ ] **Finish flexbox** *(phase 2 shipped — see below)*: remaining gaps are
       `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, column-direction
       main-axis sizing (height grow/justify), and flex rows spanning a page break.
+- [ ] **Grid, phase 2**: line-based placement (`grid-column: 1 / 3`),
+      `minmax()`, `grid-template-rows`, cell alignment.
+- [ ] **`text-align: justify`** — the LineBreaker already builds lines one at
+      a time; justification is distributing the slack into word-space TJ
+      adjustments (flow) once a line is known not to be the paragraph's last.
+- [ ] **`dir="rtl"` / `direction: rtl`**: RTL base paragraphs (bidi core is
+      in; this is plumbing the base level + right alignment default).
+- [ ] **Remote `http(s)` images** (opt-in flag, size/time caps, server-safe
+      fail-closed default) and inline/floated image follow-ups.
+- [ ] **Live-DOM surface on demand**: `insertBefore`, `cloneNode`,
+      `querySelector(All)`, JS-side `parentNode`/`children` traversal.
+- [ ] **Stacking contexts**: negative `z-index` painting below flow content,
+      per-context z comparison (currently global, positioned always above).
 - [x] **CSS grid, first pass** (`display: grid`): `grid-template-columns` with
       fixed lengths / `fr` / `auto` / `repeat(N, …)`, row-major auto-placement,
       `grid-column: span N`, and separate row/column gaps. Auto tracks size to

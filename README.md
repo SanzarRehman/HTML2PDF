@@ -98,6 +98,13 @@ Works today:
   `width` on in-flow blocks).
 - **Text shaping** (HarfBuzz via `rustybuzz`) for embedded fonts: kerning
   reproduced in the PDF, ligatures with extractable text, Arabic joining forms.
+- **Bidirectional text** (UAX #9): mixed LTR/RTL lines — an Arabic or Hebrew
+  phrase inside an English sentence, or a full RTL paragraph — reorder into
+  correct visual order, and the PDF text stays extractable in logical order.
+- **Font fallback chains**: characters the chosen font lacks (CJK, Hangul,
+  Cyrillic, …) automatically fall back to a covering system face, each embedded
+  as its own subset font — a Chinese/Japanese/Korean invoice renders correctly
+  with no flags at all.
 - Block-level `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded
   in-house, alpha as a soft mask), from file paths and `data:` URIs, with
   `width`/`height` sizing and aspect-ratio preservation.
@@ -125,10 +132,15 @@ Not complete yet:
   and mid-script layout reads (rejected by design — ADR 0009).
 - Inline/floated images, `object-fit`, and remote (`http`) image URLs; SVG and
   canvas.
-- `flex-wrap`, grid line-based placement/`minmax()`, `position: fixed` repeated
-  per page, `z-index` stacking.
-- Bidi paragraph reordering (UAX #9) and font fallback chains (CJK/emoji).
-- Complete CSS selector/property coverage.
+- `flex-wrap`, grid line-based placement/`minmax()`, stacking contexts
+  (`z-index` works, but compares globally and positioned content always paints
+  above the flow).
+- Per-element `font-family` and real bold/italic faces (bold is synthesized
+  today); emoji (color fonts can't embed as outlines); `dir="rtl"` /
+  `direction: rtl` base paragraphs.
+- Complete CSS selector/property coverage (`%` lengths, `calc()`, custom
+  properties are the big absences).
+- Clickable link annotations, bookmarks/outline, tagged PDF.
 - Full visual compatibility with Chromium.
 
 See [docs/COVERAGE.md](docs/COVERAGE.md) for the full ✅/🟡/❌ support matrix,
@@ -307,13 +319,14 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- `position: fixed` repeated on every page (print headers/watermarks), and
-  `z-index` stacking.
-- Bidi paragraph reordering (UAX #9) and font fallback chains.
+- Per-element `font-family` with real bold/italic faces (multi-font PDF
+  plumbing is already in place from the fallback work).
 - Deepen flexbox (`flex-wrap`) and grid (line-based placement, `minmax()`).
-- Broaden CSS properties and computed-value coverage (`%` lengths, `calc()`,
-  custom properties).
+- Broaden CSS properties and computed-value coverage (`%` lengths,
+  `max-width`/`min-width`, `margin: auto`, `calc()`, custom properties).
+- Clickable link annotations (`<a href>`) and a document outline from headings.
 - Broaden image support (inline/floated images, remote URLs) and add SVG.
+- `text-align: justify`; `dir="rtl"` base paragraphs.
 - Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
 - Harden the HTTP server for production deployment patterns.
 
