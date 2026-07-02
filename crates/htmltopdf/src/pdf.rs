@@ -30,16 +30,78 @@ pub fn write_pdf(
     options: &RenderOptions,
 ) -> Result<Vec<u8>, PdfError> {
     let page_count = pages.len();
-    let embedded = options.font.embedding();
-    // An embedded font is written as a Type0/Identity-H composite, which needs
-    // four extra objects after the pages: the descendant CIDFont, the
-    // FontDescriptor, the FontFile2 program, and the ToUnicode CMap.
-    let base_object_count = 3 + (page_count * 2);
-    let font_extra = if embedded.is_some() { 4 } else { 0 };
+
+    // Discover which fonts actually paint text: segment every painted string
+    // through the primary font's fallback chain. Each used font becomes a
+    // /Fn resource; the primary is always F1 (a page may paint no text at all,
+    // but its resources still declare F1 so the dictionary is never empty).
+    let mut used_by_font: std::collections::BTreeMap<usize, std::collections::BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
+    used_by_font.entry(0).or_default();
+    for text in pages.iter().flat_map(|page| page.commands.iter()).filter_map(|c| match c {
+        PaintCommand::Text(text) => Some(text),
+        _ => None,
+    }) {
+        match options.font.segment_by_coverage(&text.text) {
+            None => {
+                used_by_font.entry(0).or_default().insert(text.text.as_str());
+            }
+            Some(segments) => {
+                for (index, segment) in segments {
+                    used_by_font.entry(index).or_default().insert(segment);
+                }
+            }
+        }
+    }
+
+    // One plan per used font: resource name, object ids, and (for embedded
+    // faces) the shaped CID layout, subset program, and PDF names.
+    let fonts_start = 3; // catalog 1, pages tree 2
+    let first_page_id = fonts_start + used_by_font.len();
+    let extras_start = first_page_id + page_count * 2;
+    let mut next_extra = extras_start;
+    let mut font_plans: Vec<FontPlan> = Vec::with_capacity(used_by_font.len());
+    for (ordinal, (chain_index, texts)) in used_by_font.iter().enumerate() {
+        let font = options.font.chain_font(*chain_index);
+        let cid = font
+            .embedding()
+            .map(|embedded| embedded.shaped_cid_layout(texts.iter().copied()));
+        // Subset to the used glyphs when possible (retain-GIDs keeps /W,
+        // /ToUnicode, and the Identity map valid); fall back to the full
+        // program. A subset font gets the `ABCDEF+` name prefix readers expect.
+        let used_gids: Option<std::collections::BTreeSet<u16>> = cid
+            .as_ref()
+            .map(|cid| cid.widths.iter().map(|(gid, _)| *gid).collect());
+        let program = match (font.embedding(), used_gids.as_ref()) {
+            (Some(embedded), Some(gids)) => embedded.subset(gids),
+            _ => None,
+        };
+        let base_name = font.embedding().map(|embedded| match (&program, used_gids.as_ref()) {
+            (Some(_), Some(gids)) => format!("{}+{}", subset_tag(gids), embedded.postscript_name),
+            _ => embedded.postscript_name.clone(),
+        });
+        let ids = if font.embedding().is_some() {
+            let ids = [next_extra, next_extra + 1, next_extra + 2, next_extra + 3];
+            next_extra += 4;
+            Some(ids)
+        } else {
+            None
+        };
+        font_plans.push(FontPlan {
+            chain_index: *chain_index,
+            resource: format!("F{}", ordinal + 1),
+            font_id: fonts_start + ordinal,
+            font,
+            cid,
+            program,
+            base_name,
+            extra_ids: ids,
+        });
+    }
 
     // Each embedded image is one XObject, plus one more for its soft mask when
-    // it carries alpha. Assign object ids after the font block.
-    let mut next_id = base_object_count + font_extra + 1;
+    // it carries alpha. Assign object ids after the font extras.
+    let mut next_id = next_extra;
     let image_plans: Vec<ImagePlan> = images
         .iter()
         .enumerate()
@@ -66,12 +128,6 @@ pub fn write_pdf(
 
     let catalog_id = 1;
     let pages_id = 2;
-    let font_id = 3;
-    let first_page_id = 4;
-    let descendant_id = base_object_count + 1;
-    let descriptor_id = base_object_count + 2;
-    let fontfile_id = base_object_count + 3;
-    let tounicode_id = base_object_count + 4;
 
     // Every page declares all image XObjects in its resources (unused ones are
     // harmless), so a `/ImN Do` operator resolves regardless of page.
@@ -85,38 +141,11 @@ pub fn write_pdf(
             .join(" ");
         format!(" /XObject << {entries} >>")
     };
-
-    // For an embedded font, shape every unique text run this document paints
-    // (cache-assisted — layout already shaped them for measurement) to resolve
-    // the used glyph ids, their natural widths, and the Unicode mapping.
-    let cid = embedded.map(|font| {
-        let used: std::collections::BTreeSet<&str> = pages
-            .iter()
-            .flat_map(|page| page.commands.iter())
-            .filter_map(|command| match command {
-                PaintCommand::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .collect();
-        font.shaped_cid_layout(used.into_iter())
-    });
-
-    // Subset the embedded program to the used glyphs when possible (retain-GIDs,
-    // so the maps above stay valid); fall back to the full program. A subset font
-    // gets a `ABCDEF+` name prefix, as PDF readers expect.
-    let used_gids: Option<std::collections::BTreeSet<u16>> = cid
-        .as_ref()
-        .map(|cid| cid.widths.iter().map(|(gid, _)| *gid).collect());
-    let font_program: Option<Vec<u8>> = match (embedded, used_gids.as_ref()) {
-        (Some(font), Some(gids)) => font.subset(gids),
-        _ => None,
-    };
-    let base_font_name: Option<String> = embedded.map(|font| {
-        match (&font_program, used_gids.as_ref()) {
-            (Some(_), Some(gids)) => format!("{}+{}", subset_tag(gids), font.postscript_name),
-            _ => font.postscript_name.clone(),
-        }
-    });
+    let font_resources = font_plans
+        .iter()
+        .map(|plan| format!("/{} {} 0 R", plan.resource, plan.font_id))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let mut writer = PdfWriter::new();
     writer.write_header();
@@ -132,35 +161,36 @@ pub fn write_pdf(
         &format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>"),
     );
 
-    // The font object (id 3, referenced as /F1 by every page). With no embedded
-    // font it is the standard-14 Helvetica; with one it is a Type0 composite
-    // whose descendant CIDFont is written after the pages.
-    match embedded {
-        None => writer.object(
-            font_id,
-            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        ),
-        Some(_) => {
-            writer.object(
-                font_id,
-                &format!(
-                    concat!(
-                        "<< /Type /Font /Subtype /Type0 /BaseFont /{name} ",
-                        "/Encoding /Identity-H /DescendantFonts [{desc} 0 R] ",
-                        "/ToUnicode {tu} 0 R >>"
+    // The base font objects (/F1, /F2, …): standard-14 Helvetica as Type1, or
+    // a Type0 composite whose descendant objects are written after the pages.
+    for plan in &font_plans {
+        match plan.extra_ids {
+            None => writer.object(
+                plan.font_id,
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            ),
+            Some([descendant_id, _, _, tounicode_id]) => {
+                writer.object(
+                    plan.font_id,
+                    &format!(
+                        concat!(
+                            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} ",
+                            "/Encoding /Identity-H /DescendantFonts [{desc} 0 R] ",
+                            "/ToUnicode {tu} 0 R >>"
+                        ),
+                        name = plan.base_name.as_deref().unwrap_or(""),
+                        desc = descendant_id,
+                        tu = tounicode_id
                     ),
-                    name = base_font_name.as_deref().unwrap_or(""),
-                    desc = descendant_id,
-                    tu = tounicode_id
-                ),
-            );
+                );
+            }
         }
     }
 
     for (index, page) in pages.iter().enumerate() {
         let page_id = first_page_id + (index * 2);
         let content_id = page_id + 1;
-        let content = page_content(page, embedded);
+        let content = page_content(page, &options.font, &font_plans);
 
         writer.object(
             page_id,
@@ -168,11 +198,12 @@ pub fn write_pdf(
                 concat!(
                     "<< /Type /Page /Parent 2 0 R ",
                     "/MediaBox [0 0 {:.2} {:.2}] ",
-                    "/Resources << /Font << /F1 3 0 R >>{} >> ",
+                    "/Resources << /Font << {} >>{} >> ",
                     "/Contents {} 0 R >>"
                 ),
                 options.page_size.width,
                 options.page_size.height,
+                font_resources,
                 xobject_resources,
                 content_id
             ),
@@ -181,10 +212,15 @@ pub fn write_pdf(
         writer.stream_object(content_id, content.as_bytes())?;
     }
 
-    // The embedded font's descendant CIDFont, descriptor, program, and the
+    // Each embedded font's descendant CIDFont, descriptor, program, and
     // ToUnicode CMap, after the pages.
-    if let (Some(font), Some(cid)) = (embedded, cid.as_ref()) {
-        let name = base_font_name.as_deref().unwrap_or(&font.postscript_name);
+    for plan in &font_plans {
+        let (Some(font), Some(cid), Some([descendant_id, descriptor_id, fontfile_id, tounicode_id])) =
+            (plan.font.embedding(), plan.cid.as_ref(), plan.extra_ids)
+        else {
+            continue;
+        };
+        let name = plan.base_name.as_deref().unwrap_or(&font.postscript_name);
         let w_array = cid
             .widths
             .iter()
@@ -231,7 +267,7 @@ pub fn write_pdf(
         );
         // Retain-GIDs keeps the /W, /ToUnicode, and Identity map valid against the
         // (possibly subset) program.
-        let program = font_program.as_deref().unwrap_or(font.data());
+        let program = plan.program.as_deref().unwrap_or(font.data());
         writer.font_file_object(fontfile_id, program)?;
         writer.stream_object(tounicode_id, to_unicode_cmap(cid).as_bytes())?;
     }
@@ -341,7 +377,59 @@ fn compress_stream(stream: &[u8]) -> Result<Vec<u8>, PdfError> {
     encoder.finish().map_err(PdfError::Compression)
 }
 
-fn page_content(page: &Page, embedded: Option<&crate::font::TrueTypeFont>) -> String {
+/// One font resource in the output PDF: which chain slot it came from, its
+/// `/Fn` resource name and object id, and (for embedded faces) the shaped CID
+/// layout, subset program, PDF base name, and the four extra object ids
+/// (descendant, descriptor, font file, ToUnicode).
+struct FontPlan {
+    chain_index: usize,
+    resource: String,
+    font_id: usize,
+    font: std::sync::Arc<crate::font::Font>,
+    cid: Option<crate::font::CidLayout>,
+    program: Option<Vec<u8>>,
+    base_name: Option<String>,
+    extra_ids: Option<[usize; 4]>,
+}
+
+/// Append one text segment in `plan`'s font: shaped `TJ` glyph runs for an
+/// embedded face (kerning as numeric adjustments), a WinAnsi literal for the
+/// standard-14 fallback. The PDF text position advances across show operators,
+/// so consecutive segments continue on the same baseline.
+fn push_text_segment(content: &mut String, plan: &FontPlan, segment: &str) {
+    match plan.font.embedding() {
+        Some(font) => {
+            let run = font.shape(segment);
+            content.push_str("[<");
+            for glyph in &run.glyphs {
+                content.push_str(&format!("{:04X}", glyph.gid));
+                let adjust = ((glyph.natural_em - glyph.advance_em) * 1000.0).round() as i32;
+                if adjust != 0 {
+                    content.push_str(&format!("> {adjust} <"));
+                }
+            }
+            content.push_str(">] TJ\n");
+        }
+        None => {
+            content.push_str(&format!("({}) Tj\n", escape_text(segment)));
+        }
+    }
+}
+
+fn page_content(
+    page: &Page,
+    primary: &std::sync::Arc<crate::font::Font>,
+    font_plans: &[FontPlan],
+) -> String {
+    let plan_for = |chain_index: usize| -> &FontPlan {
+        font_plans
+            .iter()
+            .find(|plan| plan.chain_index == chain_index)
+            .unwrap_or(&font_plans[0])
+    };
+    // With a single font in play, skip per-command segmentation entirely.
+    let single_font = font_plans.len() == 1;
+
     let mut content = String::new();
     // Track the current fill color so faux-bold text can stroke in the same color.
     let mut fill = (0.0f32, 0.0f32, 0.0f32);
@@ -405,36 +493,43 @@ fn page_content(page: &Page, embedded: Option<&crate::font::TrueTypeFont>) -> St
             }
             PaintCommand::Text(text) => {
                 content.push_str("BT\n");
-                content.push_str(&format!("/F1 {:.2} Tf\n", text.font_size));
                 if text.bold {
                     // Faux-bold: fill + stroke the glyphs in the same color with a
                     // thin outline, since only a regular font face is embedded.
                     content.push_str(&format!("{:.4} {:.4} {:.4} RG\n", fill.0, fill.1, fill.2));
                     content.push_str(&format!("{:.3} w 2 Tr\n", text.font_size * 0.03));
                 }
-                content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
-                match embedded {
-                    // Embedded Type0/Identity-H font: write the *shaped* glyph
-                    // ids (ligatures substituted) as a TJ array whose numeric
-                    // adjustments reproduce kerning: the viewer advances each
-                    // glyph by its natural /W width, so the correction is
-                    // (natural - shaped) in 1/1000 em.
-                    Some(font) => {
-                        let run = font.shape(&text.text);
-                        content.push_str("[<");
-                        for glyph in &run.glyphs {
-                            content.push_str(&format!("{:04X}", glyph.gid));
-                            let adjust =
-                                ((glyph.natural_em - glyph.advance_em) * 1000.0).round() as i32;
-                            if adjust != 0 {
-                                content.push_str(&format!("> {adjust} <"));
-                            }
-                        }
-                        content.push_str(">] TJ\n");
-                    }
-                    // Standard-14 Helvetica: a WinAnsi literal string.
+                // Segment the string by font coverage (primary first, then the
+                // fallback chain); each segment selects its /Fn resource and the
+                // text position flows across the switches.
+                let segments = if single_font {
+                    None
+                } else {
+                    primary.segment_by_coverage(&text.text)
+                };
+                match segments {
                     None => {
-                        content.push_str(&format!("({}) Tj\n", escape_text(&text.text)));
+                        content.push_str(&format!(
+                            "/{} {:.2} Tf\n",
+                            font_plans[0].resource, text.font_size
+                        ));
+                        content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
+                        push_text_segment(&mut content, plan_for(0), &text.text);
+                    }
+                    Some(segments) => {
+                        content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
+                        let mut current = usize::MAX;
+                        for (chain_index, segment) in segments {
+                            let plan = plan_for(chain_index);
+                            if plan.chain_index != current {
+                                content.push_str(&format!(
+                                    "/{} {:.2} Tf\n",
+                                    plan.resource, text.font_size
+                                ));
+                                current = plan.chain_index;
+                            }
+                            push_text_segment(&mut content, plan, segment);
+                        }
                     }
                 }
                 if text.bold {
@@ -592,7 +687,7 @@ mod tests {
     use crate::layout::{Line, Page, RenderOptions};
     use crate::paint::{PaintCommand, RectCommand};
 
-    use super::{escape_text, page_content, to_unicode_cmap, utf16_be_hex, write_pdf};
+    use super::{escape_text, page_content, to_unicode_cmap, utf16_be_hex, write_pdf, FontPlan};
 
     #[test]
     fn utf16_be_hex_encodes_bmp_and_astral() {
@@ -708,7 +803,18 @@ mod tests {
             }));
         page.commands.push(PaintCommand::PopClip);
 
-        let content = page_content(&page, None);
+        let primary = std::sync::Arc::new(crate::font::Font::helvetica());
+        let plans = vec![FontPlan {
+            chain_index: 0,
+            resource: "F1".to_string(),
+            font_id: 3,
+            font: primary.clone(),
+            cid: None,
+            program: None,
+            base_name: None,
+            extra_ids: None,
+        }];
+        let content = page_content(&page, &primary, &plans);
 
         assert!(content.contains("q\n10.00 20.00 30.00 40.00 re W n\n"));
         assert!(content.contains("Q\n"));
@@ -722,7 +828,18 @@ mod tests {
         page.commands
             .push(PaintCommand::SetStrokeColor(Color::from_rgb_u8(0, 0, 255)));
 
-        let content = page_content(&page, None);
+        let primary = std::sync::Arc::new(crate::font::Font::helvetica());
+        let plans = vec![FontPlan {
+            chain_index: 0,
+            resource: "F1".to_string(),
+            font_id: 3,
+            font: primary.clone(),
+            cid: None,
+            program: None,
+            base_name: None,
+            extra_ids: None,
+        }];
+        let content = page_content(&page, &primary, &plans);
 
         assert!(content.contains("1.0000 0.0000 0.0000 rg\n"));
         assert!(content.contains("0.0000 0.0000 1.0000 RG\n"));

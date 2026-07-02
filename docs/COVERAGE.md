@@ -101,7 +101,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | **Text shaping (HarfBuzz via `rustybuzz`)** for embedded fonts | ✅ | Kerning (measured *and* reproduced in PDF via `TJ` adjustments), ligatures (GSUB; ToUnicode maps a ligature glyph back to all its chars), Arabic joining forms with correct in-run RTL order. Shaped-run cache keyed by string. |
 | Real glyph metrics + line breaking | ✅ | via `ttf-parser`/`fontdb`; widths are shaped widths when a face is embedded. |
 | Bidi reordering (UAX #9, mixed LTR/RTL) | 🟡 | Embedding levels vs an **LTR base**: line pieces reorder visually, and shaping itemizes each string into directional runs (joining computed on logical text, glyphs emitted visually). Works for embedded fonts (base-14 has no RTL glyphs). No `dir` attribute / `direction: rtl` (RTL base paragraphs render left-aligned like Chrome's dir-less default), no bracket mirroring. |
-| Bold/italic faces, multiple families, font fallback | ❌ | Faux-bold only; one face per document — no CJK/emoji fallback chain. |
+| **Font fallback chain** (CJK, Hangul, Cyrillic, …) | 🟡 | Characters the primary font lacks fall back to system faces (Arial Unicode MS / Noto Sans / DejaVu Sans, first that covers), each embedded as its own subset Type0 resource — works from the base-14 default *and* from an embedded `--font`. Measurement is chain-aware. Emoji excluded (color faces can't embed as outlines). Chain is fixed, not configurable; char-level line breaking still measures with the primary. |
+| Bold/italic faces, multiple families (`font-family`) | ❌ | Faux-bold only; no per-element family selection. |
 
 ## JavaScript (opt-in: `--js` / `js` feature)
 

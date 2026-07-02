@@ -151,6 +151,32 @@ mod tests {
         assert!(pdf.ends_with(b"%%EOF\n"));
     }
 
+    /// CJK with the default (base-14) font must ride the fallback chain into an
+    /// embedded Type0 face — skipped on systems with no CJK-capable fallback.
+    #[test]
+    fn cjk_renders_via_fallback_chain() {
+        let helvetica = crate::font::Font::helvetica();
+        let has_cjk = helvetica
+            .fallback_chain()
+            .iter()
+            .any(|f| f.text_width("\u{4EF7}", 10.0) > 0.0 && f.embedding().is_some());
+        if !has_cjk {
+            return;
+        }
+
+        let pdf = Engine::new()
+            .render_html("<p>Total \u{4EF7}\u{683C}: 25 USD</p>", RenderOptions::default())
+            .expect("CJK document renders");
+
+        let haystack = pdf.windows(4).any(|w| w == b"/F2 ");
+        assert!(haystack, "a second font resource must be declared");
+        let type0 = pdf.windows(12).any(|w| w == b"/Type0 /Base");
+        assert!(
+            type0 || String::from_utf8_lossy(&pdf).contains("/Subtype /Type0"),
+            "the fallback face embeds as a Type0 composite"
+        );
+    }
+
     /// A document whose *only* renderable content is script-built must render:
     /// proves createElement/appendChild feed the layout pipeline end to end.
     #[cfg(feature = "js")]

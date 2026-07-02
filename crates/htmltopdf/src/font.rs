@@ -99,12 +99,28 @@ pub enum FontSource {
 /// face and is embedded as a `FontFile2`.
 pub struct Font {
     kind: FontKind,
+    /// Lazily-built fallback chain (system faces tried for characters this
+    /// font lacks — CJK, Cyrillic, …). Built at most once per `Font`; `None`
+    /// until the first uncovered character forces it. Fallback fonts have an
+    /// empty chain of their own (one level deep, no recursion).
+    fallbacks: Mutex<Option<Arc<Vec<Arc<Font>>>>>,
 }
 
 enum FontKind {
     Helvetica,
     TrueType(Box<TrueTypeFont>),
 }
+
+/// System families tried, in order, for characters the primary font lacks.
+/// Chosen for breadth and for `glyf` outlines (subsettable): Arial Unicode MS
+/// ships with macOS and covers CJK + most BMP scripts; the Noto/DejaVu names
+/// cover common Linux installs. Missing families are skipped silently.
+const FALLBACK_FAMILIES: &[&str] = &[
+    "Arial Unicode MS",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Arial",
+];
 
 /// A parsed TrueType/OpenType font: the raw bytes for embedding plus the metrics
 /// the layout engine and PDF `FontDescriptor` need (scaled to PDF 1000-unit em),
@@ -182,6 +198,7 @@ impl Font {
     pub fn helvetica() -> Font {
         Font {
             kind: FontKind::Helvetica,
+            fallbacks: Mutex::new(None),
         }
     }
 
@@ -197,6 +214,7 @@ impl Font {
         };
         Ok(Font {
             kind: FontKind::TrueType(Box::new(TrueTypeFont::parse(data, index)?)),
+            fallbacks: Mutex::new(None),
         })
     }
 
@@ -219,12 +237,136 @@ impl Font {
         }
     }
 
+    /// Whether this face can render `c` with a real glyph. For a TrueType face
+    /// the `advances` cache only spans WinAnsi, so anything else asks the
+    /// face's cmap directly.
+    fn covers(&self, c: char) -> bool {
+        match &self.kind {
+            FontKind::Helvetica => c.is_ascii() || char_to_winansi(c).is_some(),
+            FontKind::TrueType(font) => {
+                c.is_ascii_whitespace()
+                    || font.advances.contains_key(&c)
+                    || font
+                        .face
+                        .as_ref()
+                        .is_some_and(|face| face.glyph_index(c).is_some())
+            }
+        }
+    }
+
+    /// The lazily-built fallback chain (may be empty). Loaded system faces are
+    /// cached for the lifetime of this `Font`, so the disk/parse cost is paid
+    /// once per process-shared `Arc<Font>`, and only if ever needed.
+    pub fn fallback_chain(&self) -> Arc<Vec<Arc<Font>>> {
+        let mut slot = self.fallbacks.lock().unwrap();
+        if let Some(chain) = slot.as_ref() {
+            return chain.clone();
+        }
+        let own_name = self.embedding().map(|f| f.postscript_name.clone());
+        let mut chain: Vec<Arc<Font>> = Vec::new();
+        for family in FALLBACK_FAMILIES {
+            if let Ok(font) = Font::load(&FontSource::Family(family.to_string())) {
+                let duplicate = font.embedding().map(|f| &f.postscript_name) == own_name.as_ref()
+                    || chain.iter().any(|c| {
+                        c.embedding().map(|f| &f.postscript_name)
+                            == font.embedding().map(|f| &f.postscript_name)
+                    });
+                if !duplicate {
+                    chain.push(Arc::new(font));
+                }
+            }
+        }
+        let chain = Arc::new(chain);
+        *slot = Some(chain.clone());
+        chain
+    }
+
+    /// Split `text` into runs by which font in the chain renders them: index
+    /// `0` = this font, `i > 0` = `fallback_chain()[i - 1]`. Returns `None`
+    /// when this font covers everything (the overwhelmingly common case — the
+    /// caller keeps its single-font path). Whitespace stays with the run it
+    /// follows so spacing doesn't flip fonts mid-phrase; characters no font
+    /// covers stay with the primary (rendered as `.notdef`/`?`). Emoji never
+    /// trigger a fallback (color-bitmap faces can't be embedded in our text
+    /// model).
+    pub fn segment_by_coverage<'a>(&self, text: &'a str) -> Option<Vec<(usize, &'a str)>> {
+        // ASCII never needs a fallback (any usable primary covers it) — this
+        // keeps the per-command scan in the PDF writer off the hot path.
+        if text.is_ascii() || text.chars().all(|c| self.covers(c)) {
+            return None;
+        }
+        let chain = self.fallback_chain();
+        let font_for = |c: char| -> Option<usize> {
+            if c.is_whitespace() || is_emoji(c) {
+                return None; // neutral: inherit the surrounding run's font
+            }
+            if self.covers(c) {
+                return Some(0);
+            }
+            for (i, fallback) in chain.iter().enumerate() {
+                if fallback.covers(c) {
+                    return Some(i + 1);
+                }
+            }
+            Some(0) // uncovered everywhere: primary's .notdef
+        };
+
+        let mut segments: Vec<(usize, &str)> = Vec::new();
+        let mut current: usize = 0;
+        let mut start = 0;
+        let mut assigned_leading = false;
+        for (offset, c) in text.char_indices() {
+            let Some(font) = font_for(c) else { continue };
+            if !assigned_leading {
+                // Leading neutrals join the first strong run.
+                current = font;
+                assigned_leading = true;
+                continue;
+            }
+            if font != current {
+                segments.push((current, &text[start..offset]));
+                start = offset;
+                current = font;
+            }
+        }
+        segments.push((current, &text[start..]));
+        Some(segments)
+    }
+
+    /// Resolve a chain index from [`Font::segment_by_coverage`] to its font.
+    pub fn chain_font(self: &Arc<Self>, index: usize) -> Arc<Font> {
+        if index == 0 {
+            self.clone()
+        } else {
+            self.fallback_chain()[index - 1].clone()
+        }
+    }
+
     /// Measured advance width of `text` in user-space units at `font_size`.
     ///
     /// For an embedded TrueType face this is the *shaped* width (HarfBuzz via
     /// `rustybuzz`): kerning and ligatures applied, exactly what the PDF output
     /// reproduces. The built-in Helvetica keeps the per-character AFM sum.
+    /// Characters this font lacks are measured with the fallback chain's face
+    /// that renders them (matching PDF emission).
     pub fn text_width(&self, text: &str, font_size: f32) -> f32 {
+        if !text.is_ascii() {
+            if let Some(segments) = self.segment_by_coverage(text) {
+                let chain = self.fallback_chain();
+                return segments
+                    .iter()
+                    .map(|(index, segment)| {
+                        let font: &Font = if *index == 0 { self } else { &chain[index - 1] };
+                        font.width_covered(segment, font_size)
+                    })
+                    .sum();
+            }
+        }
+        self.width_covered(text, font_size)
+    }
+
+    /// Width of text this font itself renders (no fallback consultation).
+    fn width_covered(&self, text: &str, font_size: f32) -> f32 {
         match &self.kind {
             FontKind::Helvetica => {
                 font_size * text.chars().map(|c| self.advance_em(c)).sum::<f32>()
@@ -523,6 +665,17 @@ fn load_family(name: &str) -> Result<(Vec<u8>, u32), String> {
 
 /// PostScript name (name id 6), falling back to family (id 1), sanitized to a
 /// valid PDF name (no spaces or delimiters).
+/// Emoji and pictograph ranges: excluded from fallback (color-bitmap faces
+/// can't be embedded as Type0 outlines), so they render as `.notdef` rather
+/// than dragging a 10 MB emoji font into the PDF.
+fn is_emoji(c: char) -> bool {
+    matches!(c as u32,
+        0x1F000..=0x1FAFF   // Mahjong … pictographs (incl. regional indicators)
+        | 0x2600..=0x27BF   // Misc symbols, dingbats
+        | 0xFE0E..=0xFE0F   // variation selectors
+    )
+}
+
 /// Whether `text` contains any character from a right-to-left script (Hebrew,
 /// Arabic and its extensions, Syriac, Thaana, NKo, plus the RTL presentation
 /// forms and supplementary-plane RTL blocks). A cheap pre-filter so purely-LTR
@@ -767,6 +920,43 @@ mod tests {
         assert!(pos('\u{05D1}') < pos('\u{05D0}'), "within a word, glyphs reverse: {covered:?}");
         // The surrounding Latin stays put.
         assert!(pos('a') < pos('\u{05D2}') && pos('\u{05D3}') < pos('x'), "{covered:?}");
+    }
+
+    #[test]
+    fn segments_split_by_font_coverage() {
+        let font = Font::helvetica();
+        // Covered text: no segmentation at all.
+        assert!(font.segment_by_coverage("plain ASCII, café — dashes").is_none());
+
+        // Helvetica cannot cover CJK, so the string splits; the CJK segment
+        // goes to a covering fallback when the system has one (index > 0),
+        // else stays with the primary as .notdef.
+        let segments = font
+            .segment_by_coverage("abc \u{4E2D}\u{6587} def")
+            .expect("CJK forces segmentation");
+        let texts: Vec<&str> = segments.iter().map(|(_, s)| *s).collect();
+        assert_eq!(texts, vec!["abc ", "\u{4E2D}\u{6587} ", "def"]);
+        assert_eq!(segments[0].0, 0, "ASCII stays with the primary");
+        assert_eq!(segments[2].0, 0, "ASCII stays with the primary");
+        let has_cjk_fallback = font
+            .fallback_chain()
+            .iter()
+            .any(|f| f.covers('\u{4E2D}'));
+        if has_cjk_fallback {
+            assert!(segments[1].0 > 0, "CJK goes to a fallback face");
+        }
+
+        // Chain-aware measurement: the mixed string's width is the sum of its
+        // segments measured in their own fonts.
+        let whole = font.text_width("abc \u{4E2D}\u{6587} def", 12.0);
+        let sum: f32 = segments
+            .iter()
+            .map(|(index, segment)| match index {
+                0 => Font::helvetica().text_width(segment, 12.0),
+                i => font.fallback_chain()[i - 1].text_width(segment, 12.0),
+            })
+            .sum();
+        assert!((whole - sum).abs() < 0.01, "whole {whole} vs sum {sum}");
     }
 
     #[test]

@@ -948,6 +948,29 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       currently rendered against an LTR base and left-aligned, matching
       Chrome's dir-less default), bracket mirroring, and pieces that straddle
       a direction boundary move whole (assigned by first byte).
+- [x] **Font fallback chains**: characters the primary font lacks (CJK,
+      Hangul, Cyrillic under a Latin `--font`, …) are rendered by the first
+      covering face from a system chain (Arial Unicode MS → Noto Sans → DejaVu
+      Sans → Arial), loaded lazily and cached per `Font`. `Font` is now
+      chain-aware end to end: `segment_by_coverage` splits a string into
+      per-font runs (whitespace inherits its run; ASCII binds to the primary;
+      unfixable chars stay primary `.notdef`; emoji never trigger fallback),
+      and `text_width` measures each segment with its owning face — so layout
+      code needed **zero** changes. The PDF writer generalized from one font
+      object to N `FontPlan`s (`/F1…/Fn`): each used face gets its own
+      resources, per-face glyph subsetting, `/W` widths, and ToUnicode CMap;
+      text commands re-segment at emission and switch fonts with `Tf` between
+      show operators (the text matrix carries the position). Coverage asks the
+      face's cmap directly (the WinAnsi `advances` cache was the original bug
+      — CJK read as "uncovered" even in Arial Unicode). Verified: a
+      default-font (Helvetica) render of Chinese/Japanese/Korean/Russian
+      embeds one subset Arial Unicode face (172 KB PDF), and an Arial-primary
+      render keeps Cyrillic in Arial while CJK goes to the fallback; both
+      extract correctly with `pdftotext`. ASCII fast path keeps the 22k-cell
+      fixture at identical wall/RSS. **Not yet done:** configurable chain
+      (CSS `font-family` / an options list), fallback-aware
+      `fitting_char_count` (char-level breaking measures with the primary),
+      per-fallback bold synthesis, and emoji (deliberately excluded).
 - [x] **`line-height`**: unitless numbers, percentages (both = font-size
       multiples), and absolute lengths, applied to flow line boxes (per block,
       inherited through the cascade) and table-cell leading (absolute lengths
