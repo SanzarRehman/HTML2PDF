@@ -105,6 +105,10 @@ Works today:
   Cyrillic, …) automatically fall back to a covering system face, each embedded
   as its own subset font — a Chinese/Japanese/Korean invoice renders correctly
   with no flags at all.
+- **Per-element `font-family` with real bold/italic faces**: named families
+  and CSS generics resolve to real system faces (including true bold and
+  italic variants — no more synthesized bold when a family is known), several
+  subset faces per document; `pre`/`code` default to monospace.
 - Block-level `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded
   in-house, alpha as a soft mask), from file paths and `data:` URIs, with
   `width`/`height` sizing and aspect-ratio preservation.
@@ -135,9 +139,9 @@ Not complete yet:
 - `flex-wrap`, grid line-based placement/`minmax()`, stacking contexts
   (`z-index` works, but compares globally and positioned content always paints
   above the flow).
-- Per-element `font-family` and real bold/italic faces (bold is synthesized
-  today); emoji (color fonts can't embed as outlines); `dir="rtl"` /
-  `direction: rtl` base paragraphs.
+- `@font-face` web fonts; synthetic italic when no italic face exists; emoji
+  (color fonts can't embed as outlines); `dir="rtl"` / `direction: rtl` base
+  paragraphs.
 - Complete CSS selector/property coverage (`%` lengths, `calc()`, custom
   properties are the big absences).
 - Clickable link annotations, bookmarks/outline, tagged PDF.
@@ -319,8 +323,6 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- Per-element `font-family` with real bold/italic faces (multi-font PDF
-  plumbing is already in place from the fallback work).
 - Deepen flexbox (`flex-wrap`) and grid (line-based placement, `minmax()`).
 - Broaden CSS properties and computed-value coverage (`%` lengths,
   `max-width`/`min-width`, `margin: auto`, `calc()`, custom properties).
