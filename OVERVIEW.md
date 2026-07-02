@@ -259,9 +259,12 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Inheritance (color, font-size, text-align, etc. flow from parents).
 - `display: none` (tables and flow content).
 - Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
-- `font-weight` (bold / numeric ≥ 600) — rendered as faux-bold (fill+stroke),
-  since one regular face is embedded; `text-align` (left/center/right/justify/
-  start/end), headings `h1`–`h6`.
+- `font-weight` (bold / numeric ≥ 600) — a **real bold face** when the family
+  is known (via `font-family` or a generic), synthesized fill+stroke otherwise;
+  `font-style: italic` with real italic faces; **per-element `font-family`**
+  (named families + generics resolve to system faces, several subset faces per
+  document); `text-align` (left/center/right/justify/start/end), headings
+  `h1`–`h6`.
 - Tables: rows, cells, colspans, `<thead>/<tbody>/<tfoot>`, repeated headers,
   per-cell styles, borders, backgrounds, alignment, text wrapping/clipping, and
   **browser-style automatic column layout** (min/max-content widths; declared
@@ -272,8 +275,20 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   blockquote indentation, list markers (`•` / `1.`), and per-run inline
   `color`/`font-size`/bold within a paragraph, all wrapped and aligned.
 - **CSS box model on blocks**: `margin`/`padding` (shorthands + longhands),
-  vertical margin collapse, and block `background-color` + `border` painted
-  behind content (per page fragment).
+  vertical margin collapse, block `background-color` + `border` painted behind
+  content (per page fragment), `line-height`, CSS `width`/`max-width` in points
+  or **percentages**, and **`margin: auto` centering**.
+- **Modern layout, first pass each**: flexbox (`display: flex` — grow/basis,
+  justify/align, gaps, row+column), grid (`display: grid` — `fr`/`auto`/
+  `repeat()` tracks, spans, gaps), **floats** with real text wrap and `clear`,
+  and **positioning** — `relative`, `absolute` (positioned-ancestor containing
+  blocks), `fixed` **repeated on every page** (headers/watermarks), and
+  `z-index` ordering (positioned content paints above the flow).
+- **Text shaping** (HarfBuzz via `rustybuzz`) for embedded fonts — kerning
+  reproduced in the PDF, ligatures with extractable text, Arabic joining forms —
+  plus **bidirectional text** (UAX #9 visual reordering of mixed LTR/RTL lines)
+  and **font fallback chains** (CJK/Hangul/Cyrillic fall back to covering
+  system faces automatically, each embedded as its own subset).
 - Non-ASCII text: WinAnsi/CP1252 characters render with the built-in Helvetica;
   with an embedded font (`--font`) **any Unicode** renders (Latin, CJK, …) via a
   Type0/Identity-H composite + ToUnicode CMap, and stays selectable/searchable.
@@ -283,11 +298,12 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   composite with a ToUnicode CMap, so any Unicode renders and text stays
   selectable. Glyph **subsetting** (retain-GIDs) embeds only the used glyphs
   (e.g. a CJK doc dropped from 33 MB to 0.65 MB).
-- **JavaScript (opt-in, first pass)** — with the `js` build feature, a bounded
-  pre-layout stage (Boa) runs inline `<script>`s against a minimal `document`
-  API (`getElementById`, `textContent`, `get/setAttribute`, `console.log`) and
-  mutates the DOM before layout. Enable per render via
-  `Engine::render_html_with_scripts` or the CLI `--js` flag.
+- **JavaScript (opt-in)** — with the `js` build feature, a bounded pre-layout
+  stage (Boa) runs inline `<script>`s against a live DOM: `getElementById`,
+  `textContent`, `get/setAttribute`, `innerHTML` (get/set), `createElement`/
+  `createTextNode`/`appendChild`/`removeChild`, and `document.body` — enough to
+  build a whole document from script, within node/iteration budgets. Enable per
+  render via `Engine::render_html_with_scripts` or the CLI `--js` flag.
 - **Images** — block-level `<img>` from file paths (resolved against the input's
   directory) and `data:` URIs. JPEG embeds verbatim via `DCTDecode`; PNG is
   decoded in-house (chunk parse, `flate2` inflate, unfilter, palette/alpha) with
@@ -297,15 +313,18 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 **Not yet (the honest list)**
 
 - Per-side **border** width/style/color and rounded corners (borders are a
-  uniform 1pt box today), `margin: auto` centering, and `box-sizing`.
-- Inline (text-flowed) and floated images, `object-fit`, CSS-sized images, and
-  remote (`http`) image URLs; a true text baseline model. Tables keep their own
-  specialized layout. (Over-long words now break to stay on the page; honoring
-  `overflow-wrap`/`word-break` for explicit/earlier breaks is a follow-up.)
-- Broader **JavaScript**: `innerHTML`/`createElement`, DOM traversal, events,
-  timers, and heap/wall-time limit enforcement (the loop-iteration limit is in).
+  uniform box today), and `box-sizing`.
+- Inline (text-flowed) images, `object-fit`, and remote (`http`) image URLs;
+  a true font-metric baseline model (0.8 em ascent approximation today).
+- `flex-wrap`, grid line-based placement/`minmax()`, stacking contexts
+  (`z-index` compares globally; positioned content always paints above flow).
+- Clickable link annotations, bookmarks/outline, tagged PDF.
+- `@font-face` web fonts; emoji; `dir="rtl"` base paragraphs; `%` heights/
+  margins/offsets; `calc()`/custom properties.
+- Broader **JavaScript**: DOM traversal from JS, `querySelector`, events,
+  timers (mid-script layout reads rejected by design — ADR 0009).
 - Subsetting covers `glyf`-based TrueType; CFF/OpenType-CFF fonts embed in full.
-- **SVG, flexbox, grid, absolute positioning.**
+- **SVG and canvas.**
 
 The guiding rule (from PLAN.md): build real, spec-based behavior step by step,
 and don't claim support for something until it's actually implemented and tested.
