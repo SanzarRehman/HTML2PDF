@@ -855,15 +855,31 @@ that attach cleanly once the spine exists.
 The current front of the queue (rough value order). Details for each are in the
 feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
 
-- [ ] **Per-element `font-family` + real bold/italic faces** — the next big
-      one. The multi-font PDF plumbing (`FontPlan`, per-face subsetting,
-      mid-`BT` `Tf` switches) shipped with the fallback work; what's left is
-      the *selection* side: parse `font-family` stacks, resolve each named
-      family (and `font-weight`/`font-style` variants) through `fontdb`, carry
-      a font id on inline runs through layout → paint, and measure each run
-      with its own face. Kills faux-bold (fill+stroke) and fake italics — the
-      most visible fidelity gap vs Chromium in every render — and gives
-      monospace `<pre>`/`<code>` a real face.
+- [x] **Per-element `font-family` + real bold/italic faces**: the cascade
+      carries `font-family` (first usable name in the stack, generics kept)
+      and `font-style`; the flow builder interns every distinct
+      `(family, bold, italic)` requirement into `Document::font_specs`
+      (`FontInterner`; spec 0 = default) and runs/cells store a `u16` spec
+      index; a post-pass interns table-cell fonts wherever cells live.
+      `with_document_hints` resolves specs once per render through a
+      process-wide face cache (`resolve_spec` + shared `fontdb` index scanned
+      once per process): named families and generics load real system faces —
+      including real **bold**/**italic** variants via weight/style queries —
+      and each distinct face embeds as its own subset Type0 resource
+      (deduplicated by identity). Layout measures every run with its own face
+      (`RenderOptions::run_font`), and faux-bold survives only where no real
+      bold face resolves (`run_faux_bold`). UA defaults: `pre`/`code`/`kbd`/
+      `samp` → monospace, `<i>`/`<em>`/`cite`/`var`/`dfn`/`address` → italic.
+      Verified: a Georgia/Arial/Courier document embeds 8 real subset faces
+      with **zero** faux-bold strokes; the 22k-cell Excel fixture (which asks
+      for Arial/Calibri) now renders in real Arial + Arial-Bold by default —
+      matching what the Chromium comparison previously needed `--font Arial`
+      for — at the same cost as that flag (~0.62 s / 90 MB vs 0.64 s / 95 MB).
+      **Not yet done:** walking the rest of the `font-family` stack per
+      character (the fallback chain covers missing glyphs instead),
+      `@font-face` (web fonts from CSS), synthetic italic slant when no italic
+      face exists, `font-weight` granularity beyond bold/regular (300/600/900
+      map to the nearest), and bold synthesis for fallback-chain faces.
 - [ ] **`%` lengths + sizing keywords**: percentage widths/heights against the
       containing block, `max-width`/`min-width` (incl. `max-width: 100%` on
       images), and `margin: auto` horizontal centering. Small parser+layout

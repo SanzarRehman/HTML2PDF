@@ -74,6 +74,11 @@ pub struct RenderOptions {
     pub base_dir: Option<std::path::PathBuf>,
     /// Base paper size; the document's orientation picks portrait/landscape.
     pub paper: Paper,
+    /// Faces resolved from the document's interned font specs — indexed by
+    /// `InlineRun::font` / `TableCell::font`. Empty (index 0 → `font`) when
+    /// the document never selects a family; filled per render by
+    /// [`RenderOptions::with_document_hints`].
+    pub fonts: Vec<crate::font::ResolvedFont>,
 }
 
 impl Default for RenderOptions {
@@ -92,6 +97,7 @@ impl Default for RenderOptions {
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
             base_dir: None,
             paper: Paper::A4,
+            fonts: Vec::new(),
         }
     }
 }
@@ -135,7 +141,33 @@ impl RenderOptions {
             .row_height
             .unwrap_or(options.table_row_height);
 
+        // Resolve the document's interned font specs to concrete faces (spec 0
+        // is the default and always resolves to the primary font unchanged).
+        options.fonts = document
+            .font_specs
+            .iter()
+            .map(|spec| crate::font::resolve_spec(&options.font, spec))
+            .collect();
+
         options
+    }
+
+    /// The face for an interned font-spec index (0 or out-of-range = primary).
+    pub(crate) fn run_font(&self, index: u16) -> &std::sync::Arc<crate::font::Font> {
+        self.fonts
+            .get(index as usize)
+            .map(|resolved| &resolved.font)
+            .unwrap_or(&self.font)
+    }
+
+    /// Whether a run with this font index still needs synthesized bold.
+    /// `run_bold` is the cascaded bold flag — the fallback answer when the
+    /// document carries no resolved font table (tests, hand-built box trees).
+    pub(crate) fn run_faux_bold(&self, index: u16, run_bold: bool) -> bool {
+        self.fonts
+            .get(index as usize)
+            .map(|resolved| resolved.faux_bold)
+            .unwrap_or(run_bold)
     }
 }
 
@@ -162,6 +194,7 @@ impl Page {
             x: line.x,
             y: line.y,
             font_size: line.font_size,
+            font: line.font,
             bold,
         }));
         self.lines.push(line);
@@ -259,6 +292,8 @@ pub struct Line {
     pub x: f32,
     pub y: f32,
     pub font_size: f32,
+    /// Interned font-spec index (see `Document::font_specs`; 0 = default).
+    pub font: u16,
     pub leading: f32,
 }
 
@@ -538,7 +573,7 @@ fn layout_float(
         .css_width
         .map(|w| w + block.padding.left + block.padding.right)
         .unwrap_or_else(|| {
-            measure_max_content(&block.children, &options.font)
+            measure_max_content(&block.children, options)
                 + block.padding.left
                 + block.padding.right
                 + block.margin.left
@@ -617,7 +652,7 @@ fn layout_absolute_box(
         .css_width
         .map(|w| w + block.padding.left + block.padding.right)
         .unwrap_or_else(|| {
-            measure_max_content(&block.children, &options.font)
+            measure_max_content(&block.children, options)
                 + block.padding.left
                 + block.padding.right
                 + block.margin.left
@@ -809,7 +844,7 @@ fn layout_flex_box(
     // the row's available width.
     let bases: Vec<f32> = items
         .iter()
-        .map(|item| item.basis(&options.font).clamp(0.0, avail))
+        .map(|item| item.basis(options).clamp(0.0, avail))
         .collect();
 
     let total_base: f32 = bases.iter().sum();
@@ -886,10 +921,10 @@ impl FlexItem<'_> {
     /// Base main size: `flex-basis` when declared, else the content's
     /// max-content width plus the item's own horizontal padding and margins
     /// (the outer main size, so padded pills don't collapse to zero content).
-    fn basis(&self, font: &crate::font::Font) -> f32 {
+    fn basis(&self, options: &RenderOptions) -> f32 {
         match self {
             FlexItem::Block(b) => b.flex_basis.unwrap_or_else(|| {
-                measure_max_content(&b.children, font)
+                measure_max_content(&b.children, options)
                     + b.padding.left
                     + b.padding.right
                     + b.margin.left
@@ -897,7 +932,7 @@ impl FlexItem<'_> {
             }),
             FlexItem::Line(runs) => runs
                 .iter()
-                .map(|run| estimate_text_width(&run.text, run.font_size, font))
+                .map(|run| estimate_text_width(&run.text, run.font_size, options.run_font(run.font)))
                 .sum(),
         }
     }
@@ -1019,7 +1054,7 @@ fn layout_grid_box(
     let mut auto_size = vec![0.0f32; track_count];
     for placed in &placements {
         if placed.span == 1 && matches!(tracks[placed.col], GridTrack::Auto) {
-            let basis = items[placed.item].0.basis(&options.font).min(avail);
+            let basis = items[placed.item].0.basis(options).min(avail);
             auto_size[placed.col] = auto_size[placed.col].max(basis);
         }
     }
@@ -1144,17 +1179,17 @@ fn justify_offsets(
 /// Approximate the max-content main size of a block's flow children: the widest
 /// natural (unwrapped) line, plus its own horizontal padding. Nested blocks
 /// recurse. Used as the default `flex-basis` when none is declared.
-fn measure_max_content(children: &[crate::box_tree::BoxChild], font: &crate::font::Font) -> f32 {
+fn measure_max_content(children: &[crate::box_tree::BoxChild], options: &RenderOptions) -> f32 {
     use crate::box_tree::BoxChild;
     let mut widest = 0.0_f32;
     for child in children {
         let w = match child {
             BoxChild::Line(runs) => runs
                 .iter()
-                .map(|run| estimate_text_width(&run.text, run.font_size, font))
+                .map(|run| estimate_text_width(&run.text, run.font_size, options.run_font(run.font)))
                 .sum(),
             BoxChild::Block(b) => {
-                measure_max_content(&b.children, font)
+                measure_max_content(&b.children, options)
                     + b.padding.left
                     + b.padding.right
                     + b.margin.left
@@ -1460,7 +1495,7 @@ fn layout_line_box(
         // A word that does not fit beside a float but would fit at full width
         // drops below the float instead of being broken mid-word.
         if band_width + WRAP_TOLERANCE < width {
-            if let Some(token_width) = breaker.peek_token_width(&options.font) {
+            if let Some(token_width) = breaker.peek_token_width(options) {
                 if token_width > band_width + WRAP_TOLERANCE
                     && token_width <= width + WRAP_TOLERANCE
                 {
@@ -1473,7 +1508,7 @@ fn layout_line_box(
             }
         }
 
-        let visual = breaker.next_line(band_width, &options.font);
+        let visual = breaker.next_line(band_width, options);
         if visual.is_empty() {
             break;
         }
@@ -1483,7 +1518,7 @@ fn layout_line_box(
 
         let line_width: f32 = visual
             .iter()
-            .map(|piece| estimate_text_width(&piece.text, piece.font_size, &options.font))
+            .map(|piece| estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font)))
             .sum();
         // Leading follows the tallest run on the line; an explicit `line-height`
         // overrides the UA default (×1.35).
@@ -1516,17 +1551,19 @@ fn layout_line_box(
 
         let page = pages.last_mut().expect("at least one page exists");
         for piece in &visual {
-            let piece_width = estimate_text_width(&piece.text, piece.font_size, &options.font);
+            let piece_width = estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
             page.push_colored_line(
                 Line {
                     text: piece.text.clone(),
                     x: px,
                     y: baseline,
                     font_size: piece.font_size,
+                    font: piece.font,
                     leading,
                 },
                 piece.color,
-                piece.bold,
+                // Synthesize bold only when the resolved face isn't truly bold.
+                options.run_faux_bold(piece.font, piece.bold),
             );
             page.push_text_decoration(
                 px,
@@ -1548,6 +1585,8 @@ fn layout_line_box(
 struct LinePiece {
     text: String,
     font_size: f32,
+    /// Interned font-spec index (see `Document::font_specs`).
+    font: u16,
     color: Color,
     bold: bool,
     underline: bool,
@@ -1624,19 +1663,19 @@ impl LineBreaker {
     }
 
     /// Width of the next unplaced token, if any.
-    fn peek_token_width(&self, font: &crate::font::Font) -> Option<f32> {
+    fn peek_token_width(&self, options: &RenderOptions) -> Option<f32> {
         self.tokens.front().map(|token| {
             token
                 .pieces
                 .iter()
-                .map(|piece| estimate_text_width(&piece.text, piece.font_size, font))
+                .map(|piece| estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font)))
                 .sum()
         })
     }
 
     /// Build the next visual line, at most `max_width` wide. Returns an empty
     /// vec only when all tokens are consumed.
-    fn next_line(&mut self, max_width: f32, font: &crate::font::Font) -> Vec<LinePiece> {
+    fn next_line(&mut self, max_width: f32, options: &RenderOptions) -> Vec<LinePiece> {
         let mut current: Vec<LinePiece> = Vec::new();
         let mut current_width = 0.0_f32;
 
@@ -1644,7 +1683,7 @@ impl LineBreaker {
             let token_width: f32 = token
                 .pieces
                 .iter()
-                .map(|piece| estimate_text_width(&piece.text, piece.font_size, font))
+                .map(|piece| estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font)))
                 .sum();
 
             // A token wider than the line can never fit by wrapping: fill this
@@ -1656,7 +1695,7 @@ impl LineBreaker {
                 }
                 let token = self.tokens.pop_front().expect("front token exists");
                 let leftover =
-                    fill_from_long_token(&token.pieces, max_width, font, &mut current, &mut current_width);
+                    fill_from_long_token(&token.pieces, max_width, options, &mut current, &mut current_width);
                 if !leftover.is_empty() {
                     self.tokens.push_front(Token {
                         pieces: leftover,
@@ -1669,7 +1708,7 @@ impl LineBreaker {
             let space_width = if current.is_empty() {
                 0.0
             } else {
-                estimate_text_width(" ", token.space_font_size, font)
+                estimate_text_width(" ", token.space_font_size, options.run_font(token.pieces.first().map(|p| p.font).unwrap_or(0)))
             };
             if !current.is_empty()
                 && current_width + space_width + token_width > max_width + WRAP_TOLERANCE
@@ -1683,6 +1722,7 @@ impl LineBreaker {
                 current.push(LinePiece {
                     text: " ".to_string(),
                     font_size: token.space_font_size,
+                    font: lead.map(|p| p.font).unwrap_or(0),
                     color: lead.map(|p| p.color).unwrap_or(Color::BLACK),
                     bold: lead.map(|p| p.bold).unwrap_or(false),
                     // Share the following word's decoration so a run of decorated
@@ -1693,7 +1733,7 @@ impl LineBreaker {
                 current_width += space_width;
             }
             for piece in token.pieces {
-                current_width += estimate_text_width(&piece.text, piece.font_size, font);
+                current_width += estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
                 current.push(piece);
             }
         }
@@ -1708,7 +1748,7 @@ impl LineBreaker {
 fn fill_from_long_token(
     pieces: &[LinePiece],
     max_width: f32,
-    font: &crate::font::Font,
+    options: &RenderOptions,
     current: &mut Vec<LinePiece>,
     current_width: &mut f32,
 ) -> Vec<LinePiece> {
@@ -1718,6 +1758,7 @@ fn fill_from_long_token(
     let push_merged = |list: &mut Vec<LinePiece>, piece: &LinePiece, ch: char| {
         if let Some(last) = list.last_mut() {
             if last.font_size == piece.font_size
+                && last.font == piece.font
                 && last.color == piece.color
                 && last.bold == piece.bold
                 && last.underline == piece.underline
@@ -1730,6 +1771,7 @@ fn fill_from_long_token(
         list.push(LinePiece {
             text: ch.to_string(),
             font_size: piece.font_size,
+            font: piece.font,
             color: piece.color,
             bold: piece.bold,
             underline: piece.underline,
@@ -1743,7 +1785,7 @@ fn fill_from_long_token(
                 push_merged(&mut leftover, piece, ch);
                 continue;
             }
-            let char_width = estimate_text_width(&ch.to_string(), piece.font_size, font);
+            let char_width = estimate_text_width(&ch.to_string(), piece.font_size, options.run_font(piece.font));
             if !current.is_empty() && *current_width + char_width > max_width {
                 full = true;
                 push_merged(&mut leftover, piece, ch);
@@ -1801,6 +1843,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
             // matches so adjacent same-style characters stay in one piece.
             if let Some(last) = word.last_mut() {
                 if last.font_size == run.font_size
+                    && last.font == run.font
                     && last.color == run.color
                     && last.bold == run.bold
                     && last.underline == run.underline
@@ -1813,6 +1856,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
             word.push(LinePiece {
                 text: ch.to_string(),
                 font_size: run.font_size,
+                font: run.font,
                 color: run.color,
                 bold: run.bold,
                 underline: run.underline,
@@ -1851,7 +1895,7 @@ fn layout_table_row(
     options: &RenderOptions,
     repeated_header: Option<&[TableCell]>,
 ) {
-    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height, &options.font);
+    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height, options);
     let row_height = planned_cells
         .iter()
         .map(|cell| cell.height)
@@ -1876,7 +1920,7 @@ fn render_repeated_table_header(
     y: &mut f32,
     options: &RenderOptions,
 ) {
-    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height, &options.font);
+    let planned_cells = plan_table_cells(cells, table_geometry, options.table_row_height, options);
     let row_height = planned_cells
         .iter()
         .map(|cell| cell.height)
@@ -1941,7 +1985,8 @@ fn render_planned_table_row(
         }
 
         for (line_index, line) in planned.lines.iter().enumerate() {
-            let text_width = estimate_text_width(line, planned.font_size, &options.font);
+            let text_width =
+                estimate_text_width(line, planned.font_size, options.run_font(planned.source.font));
             let text_x = match planned.source.style.align.unwrap_or(TextAlign::Left) {
                 TextAlign::Left => x + planned.padding_left,
                 TextAlign::Center => {
@@ -1965,10 +2010,11 @@ fn render_planned_table_row(
                     x: text_x,
                     y: text_y,
                     font_size: planned.font_size,
+                    font: planned.source.font,
                     leading: planned.leading,
                 },
                 text_color,
-                planned.source.style.bold,
+                options.run_faux_bold(planned.source.font, planned.source.style.bold),
             );
             page.push_text_decoration(
                 text_x,
@@ -2014,7 +2060,7 @@ fn plan_table_cells<'a>(
     cells: &'a [TableCell],
     table_geometry: &TableGeometry,
     base_row_height: f32,
-    font: &crate::font::Font,
+    options: &RenderOptions,
 ) -> Vec<PlannedCell<'a>> {
     let mut planned = Vec::with_capacity(cells.len());
     let mut column_index = 0;
@@ -2049,7 +2095,7 @@ fn plan_table_cells<'a>(
             },
             white_space,
             break_long_tokens,
-            font,
+            options.run_font(cell.font),
         );
         let line_count = lines.len().max(1);
         // A CSS-declared row height is a floor, but it shrinks with the table's
@@ -2582,6 +2628,7 @@ mod tests {
         let piece = |text: &str| LinePiece {
             text: text.to_string(),
             font_size: 10.0,
+            font: 0,
             color: Color::BLACK,
             bold: false,
             underline: false,
@@ -2774,6 +2821,7 @@ mod tests {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
                         bold: false,
+                        font: 0,
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
@@ -2786,6 +2834,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
             images: Vec::new(),
+           font_specs: Vec::new(),
             flow: Some(FlowRoot { children }),
             blocks: Vec::new(),
         };
@@ -2806,6 +2855,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
             images: Vec::new(),
+            font_specs: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
                     kind: BlockKind::Paragraph,
@@ -2833,6 +2883,7 @@ mod tests {
                         text: long,
                         font_size: 12.0,
                         bold: false,
+                        font: 0,
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
@@ -2896,6 +2947,7 @@ mod tests {
                     text: text.to_string(),
                     font_size: 10.0,
                     bold: false,
+                    font: 0,
                     underline: false,
                     line_through: false,
                     color: Color::BLACK,
@@ -2907,6 +2959,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
             images: Vec::new(),
+           font_specs: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![para("first"), para("second")],
             }),
@@ -2938,6 +2991,7 @@ mod tests {
                     text: text.to_string(),
                     font_size: 10.0,
                     bold: false,
+                    font: 0,
                     underline: false,
                     line_through: false,
                     color: Color::BLACK,
@@ -2948,6 +3002,7 @@ mod tests {
                 table_style: crate::html::TableStyle::default(),
                 table_columns: Vec::new(),
                 images: Vec::new(),
+                font_specs: Vec::new(),
                 flow: Some(FlowRoot {
                     children: vec![BoxChild::Block(BlockBox {
                         kind: BlockKind::Paragraph,
@@ -3003,6 +3058,7 @@ mod tests {
             table_style: crate::html::TableStyle::default(),
             table_columns: Vec::new(),
             images: Vec::new(),
+            font_specs: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
                     kind: BlockKind::Paragraph,
@@ -3035,6 +3091,7 @@ mod tests {
                         text: "boxed".to_string(),
                         font_size: 11.0,
                         bold: false,
+                        font: 0,
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
@@ -3077,6 +3134,7 @@ mod tests {
             flow: None,
             table_columns: vec![30.0, 70.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3085,6 +3143,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "SL".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             border: Some(true),
                             bold: true,
@@ -3095,6 +3154,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Name".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             border: Some(true),
                             bold: true,
@@ -3123,6 +3183,7 @@ mod tests {
             flow: None,
             table_columns: vec![100.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3130,6 +3191,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "Warning".to_string(),
                     colspan: 1,
+                    font: 0,
                     style: crate::html::CellStyle {
                         color: Some(Color::from_rgb_u8(0, 0, 255)),
                         background_color: Some(Color::from_rgb_u8(255, 0, 0)),
@@ -3159,6 +3221,7 @@ mod tests {
             flow: None,
             table_columns: vec![100.0, 100.0, 100.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3167,6 +3230,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Top".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             vertical_align: Some(crate::html::VerticalAlign::Top),
                             ..Default::default()
@@ -3175,6 +3239,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Middle".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             vertical_align: Some(crate::html::VerticalAlign::Middle),
                             ..Default::default()
@@ -3183,6 +3248,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Bottom".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             vertical_align: Some(crate::html::VerticalAlign::Bottom),
                             ..Default::default()
@@ -3212,6 +3278,7 @@ mod tests {
             flow: None,
             table_columns: Vec::new(),
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3225,6 +3292,7 @@ mod tests {
                            the automatic table layout has to wrap it across several lines"
                         .to_string(),
                     colspan: 1,
+                    font: 0,
                     style: crate::html::CellStyle {
                         border: Some(true),
                         bold: false,
@@ -3256,6 +3324,7 @@ mod tests {
             },
             table_columns: vec![20.0, 200.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             flow: None,
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -3264,6 +3333,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "A".to_string(),
                     colspan: 1,
+                    font: 0,
                     style: crate::html::CellStyle {
                         border: Some(true),
                         bold: false,
@@ -3294,6 +3364,7 @@ mod tests {
             flow: None,
             table_columns: Vec::new(),
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3301,6 +3372,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
+                    font: 0,
                     style: crate::html::CellStyle {
                         border: Some(true),
                         font_size: Some(10.0),
@@ -3323,6 +3395,7 @@ mod tests {
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
             base_dir: None,
             paper: crate::layout::Paper::A4,
+            fonts: Vec::new(),
         };
 
         let pages = layout_document(&document, &options);
@@ -3347,6 +3420,7 @@ mod tests {
             flow: None,
             table_columns: vec![60.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3354,6 +3428,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
+                    font: 0,
                     style: crate::html::CellStyle {
                         border: Some(true),
                         font_size: Some(10.0),
@@ -3377,6 +3452,7 @@ mod tests {
             font: std::sync::Arc::new(crate::font::Font::helvetica()),
             base_dir: None,
             paper: crate::layout::Paper::A4,
+            fonts: Vec::new(),
         };
 
         let pages = layout_document(&document, &options);
@@ -3409,6 +3485,7 @@ mod tests {
             flow: None,
             table_columns: Vec::new(),
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3416,6 +3493,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: long_word.clone(),
                     colspan: 1,
+                    font: 0,
                     style: crate::html::CellStyle {
                         font_size: Some(10.0),
                         ..Default::default()
@@ -3446,6 +3524,7 @@ mod tests {
                 font: std::sync::Arc::new(font),
                 base_dir: None,
                 paper: crate::layout::Paper::A4,
+                fonts: Vec::new(),
             },
         );
         // The painted font is the CSS size times the shrink-to-fit scale.
@@ -3463,6 +3542,7 @@ mod tests {
             flow: None,
             table_columns: vec![400.0, 400.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3471,6 +3551,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "A".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             font_size: Some(11.0),
                             ..Default::default()
@@ -3479,6 +3560,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "B".to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             font_size: Some(11.0),
                             ..Default::default()
@@ -3501,6 +3583,7 @@ mod tests {
             flow: None,
             table_columns: vec![100.0, 300.0],
             images: Vec::new(),
+            font_specs: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3508,6 +3591,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "Report title".to_string(),
                     colspan: 2,
+                    font: 0,
                     style: crate::html::CellStyle {
                         font_size: Some(12.0),
                         padding_left: Some(4.0),
@@ -3533,6 +3617,7 @@ mod tests {
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
                 base_dir: None,
                 paper: crate::layout::Paper::A4,
+                fonts: Vec::new(),
             },
         );
 
@@ -3546,6 +3631,7 @@ mod tests {
             crate::html::TableCell {
                 text: "SL".to_string(),
                 colspan: 1,
+                font: 0,
                 style: crate::html::CellStyle {
                     border: Some(true),
                     bold: true,
@@ -3555,6 +3641,7 @@ mod tests {
             crate::html::TableCell {
                 text: "Name".to_string(),
                 colspan: 1,
+                font: 0,
                 style: crate::html::CellStyle {
                     border: Some(true),
                     bold: true,
@@ -3578,6 +3665,7 @@ mod tests {
                     crate::html::TableCell {
                         text: index.to_string(),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             border: Some(true),
                             ..Default::default()
@@ -3586,6 +3674,7 @@ mod tests {
                     crate::html::TableCell {
                         text: format!("Student {index}"),
                         colspan: 1,
+                        font: 0,
                         style: crate::html::CellStyle {
                             border: Some(true),
                             ..Default::default()
@@ -3601,6 +3690,7 @@ mod tests {
             flow: None,
             table_columns: vec![20.0, 80.0],
             images: Vec::new(),
+           font_specs: Vec::new(),
             blocks,
         };
         let pages = layout_document(
@@ -3619,6 +3709,7 @@ mod tests {
                 font: std::sync::Arc::new(crate::font::Font::helvetica()),
                 base_dir: None,
                 paper: crate::layout::Paper::A4,
+                fonts: Vec::new(),
             },
         );
 

@@ -32,6 +32,8 @@ pub struct TextCommand {
     pub x: f32,
     pub y: f32,
     pub font_size: f32,
+    /// Resolved font-table index (see `RenderOptions::fonts`; 0 = default).
+    pub font: u16,
     /// Render with faux-bold (fill+stroke) when no bold font face is embedded.
     pub bold: bool,
 }

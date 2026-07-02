@@ -6,9 +6,10 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 `crates/htmltopdf/tests/fixtures/` exercise most of the ✅/🟡 rows.
 
 > **Not a browser (yet).** The goal is low-RAM, highly-concurrent, browser-free
-> HTML→PDF. Layout is block/inline flow + automatic tables. There is no flexbox,
-> grid, float, or positioning, so page layouts that depend on those will not match
-> a browser.
+> HTML→PDF. Layout covers block/inline flow, tables, and first-pass flexbox,
+> grid, floats, and positioning — deep browser features (stacking contexts,
+> `%` lengths, `calc()`, SVG) are still missing, so layouts leaning on those
+> will not match a browser yet.
 
 ## HTML elements
 
@@ -16,7 +17,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 |---|---|---|
 | `h1`–`h6`, `p`, `div`, `section`, `article`, `main`, `header`, `footer`, `nav`, `aside`, `address`, `figure`, `figcaption`, `pre` | ✅ | Block flow with margins/padding/borders. |
 | `ul`, `ol`, `li`, `dl`, `dt`, `dd`, `blockquote` | ✅ | Bullets/numbers; nesting indents. |
-| `b`, `strong`, `i`, `em` | 🟡 | Bold is faux-bold (fill+stroke); italic is **not** slanted (one font face). |
+| `b`, `strong`, `i`, `em`, `cite`, `var`, `dfn` | ✅ | Real bold/italic faces when the family is known (named `font-family` or a generic); faux-bold fill+stroke only when no bold face resolves. |
 | `u`, `ins`, `s`, `strike`, `del` | ✅ | Underline / line-through decoration. |
 | `span`, inline text | ✅ | Per-run color/size/weight/decoration. |
 | `br` | ✅ | Hard line break. |
@@ -51,7 +52,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `color` | ✅ | hex, `rgb()/rgba()`, `hsl()/hsla()`, named, `transparent` (alpha ignored). |
 | `background-color` / `background` | 🟡 | Solid color only (no images/gradients). |
 | `font-size` | ✅ | px/pt/in/cm/mm. |
-| `font-weight` | 🟡 | Bold via faux-bold; numeric ≥600 = bold. |
+| `font-weight` | 🟡 | Numeric ≥600 = bold. Real bold face when the family is known; faux-bold (fill+stroke) otherwise (e.g. the default font with no `font-family`). |
 | `text-align` | ✅ | left/center/right (no `justify`). |
 | `vertical-align` | ✅ | top/middle/bottom/baseline (table cells). |
 | `text-decoration` | 🟡 | `underline`, `line-through`, `none`; no `overline`/color/style; can't cancel an ancestor's. |
@@ -64,8 +65,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `overflow-wrap`, `word-break` | ✅ | |
 | `display` | 🟡 | `none` and `table-*-group`; no `flex`/`grid`/`inline-block`. |
 | `line-height` | 🟡 | Unitless number, `%`, and absolute lengths, on flow blocks and table cells; inherits; extra leading split as half-leading (Chrome-like). Defaults stay `font×1.35` flow / `×1.18` cells. No `normal` *override* of an inherited value, block-level only (no per-inline-run line-height). |
-| `font-family` | ❌ | Default base-14, or one `--font`; no per-element families. |
-| `font-style: italic` | ❌ | |
+| `font-family` | 🟡 | Per-element: named families resolve to real system faces (embedded + subset, several per document); generics (`serif`/`sans-serif`/`monospace`/…) map to system defaults; `pre`/`code`/`kbd`/`samp` default to monospace. First usable family in the stack wins (no per-character walk down the stack — the fallback chain handles missing glyphs). Unknown families fall back to the document font. |
+| `font-style: italic` | 🟡 | Real italic faces when the family is known (`<i>`/`<em>` + `font-style`); no synthetic slant otherwise. | |
 | `letter-spacing`, `text-indent`, `text-transform`, `word-spacing` | ❌ | |
 | `display: flex` (+ `flex`, `flex-grow`, `flex-basis`, `justify-content`, `align-items`, `gap`, `flex-direction`) | 🟡 | Row: grow/basis sizing, justify-content, **align-items** (center/end via measure pass), inline (`span`) children promoted to items, anonymous text items. **Column**: vertical stack with `gap` (no height grow/justify). No `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, or cross-page rows. |
 | `display: grid` (+ `grid-template-columns`, `gap`/`row-gap`/`column-gap`, `grid-column: span N`) | 🟡 | Tracks: fixed lengths, `fr`, `auto`, `repeat(N, …)`. Row-major auto-placement; rows sized to tallest item; page-break between rows. No line-based placement (`1 / 3`), named lines/areas, `minmax()`, `grid-template-rows`, dense packing, or cell alignment. |
@@ -97,12 +98,12 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Feature | Status | Notes |
 |---|---|---|
 | Base-14 standard PDF fonts (default) | ✅ | WinAnsi text, selectable. AFM per-char metrics (no shaping — no face to shape with). |
-| Embed one TTF via `--font` | ✅ | Type0/Identity-H, glyph subsetting, ToUnicode. |
+| Embedded TrueType faces (`--font`, `font-family`, fallback) | ✅ | Type0/Identity-H, per-face glyph subsetting, ToUnicode; several faces per document. |
 | **Text shaping (HarfBuzz via `rustybuzz`)** for embedded fonts | ✅ | Kerning (measured *and* reproduced in PDF via `TJ` adjustments), ligatures (GSUB; ToUnicode maps a ligature glyph back to all its chars), Arabic joining forms with correct in-run RTL order. Shaped-run cache keyed by string. |
 | Real glyph metrics + line breaking | ✅ | via `ttf-parser`/`fontdb`; widths are shaped widths when a face is embedded. |
 | Bidi reordering (UAX #9, mixed LTR/RTL) | 🟡 | Embedding levels vs an **LTR base**: line pieces reorder visually, and shaping itemizes each string into directional runs (joining computed on logical text, glyphs emitted visually). Works for embedded fonts (base-14 has no RTL glyphs). No `dir` attribute / `direction: rtl` (RTL base paragraphs render left-aligned like Chrome's dir-less default), no bracket mirroring. |
 | **Font fallback chain** (CJK, Hangul, Cyrillic, …) | 🟡 | Characters the primary font lacks fall back to system faces (Arial Unicode MS / Noto Sans / DejaVu Sans, first that covers), each embedded as its own subset Type0 resource — works from the base-14 default *and* from an embedded `--font`. Measurement is chain-aware. Emoji excluded (color faces can't embed as outlines). Chain is fixed, not configurable; char-level line breaking still measures with the primary. |
-| Bold/italic faces, multiple families (`font-family`) | ❌ | Faux-bold only; no per-element family selection. |
+| Bold/italic faces, multiple families per document | ✅ | Resolved per element via `fontdb` (weight/style queries), each face embedded as its own subset resource; process-wide face cache. |
 
 ## JavaScript (opt-in: `--js` / `js` feature)
 

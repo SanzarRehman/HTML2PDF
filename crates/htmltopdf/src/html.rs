@@ -20,6 +20,10 @@ pub struct Document {
     /// The document's image table, indexed by `ImageBox::image_index`. Empty
     /// until [`resolve_images`] runs.
     pub images: Vec<crate::image::DecodedImage>,
+    /// Font requirements interned while building the box tree, indexed by
+    /// `InlineRun::font` / `TableCell::font`. Index 0 is always the default
+    /// spec (document font, regular). Resolved to faces once per render.
+    pub font_specs: Vec<crate::font::FontSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +55,9 @@ pub struct TableCell {
     pub text: String,
     pub colspan: usize,
     pub style: CellStyle,
+    /// Interned font-spec index into `Document::font_specs` (0 = default),
+    /// assigned in a post-pass over the built document.
+    pub font: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +75,12 @@ pub struct CellStyle {
     pub border: Option<bool>,
     pub overflow: Option<Overflow>,
     pub font_size: Option<f32>,
+    /// First usable family from CSS `font-family` (inherited): a concrete name
+    /// or a generic keyword (`serif`, `monospace`, …). `None` = document font.
+    pub font_family: Option<String>,
+    /// CSS `font-style` (inherited): `Some(true)` = italic/oblique,
+    /// `Some(false)` = an explicit `normal` (overrides an inherited italic).
+    pub italic: Option<bool>,
     /// CSS `line-height` (inherited). `None` = `normal` (UA default leading).
     pub line_height: Option<LineHeight>,
     /// CSS `width`/`height` in points. Currently consumed only by `<img>` sizing;
@@ -131,6 +144,8 @@ impl Default for CellStyle {
             border: None,
             overflow: None,
             font_size: None,
+            font_family: None,
+            italic: None,
             line_height: None,
             width: None,
             height: None,
@@ -354,11 +369,13 @@ fn finish(dom: crate::dom::Dom) -> Document {
     let computed = compute_inherited_styles(&dom, &stylesheet);
 
     // Build the flow box tree, with any `<table>` embedded as a `Table` box.
+    let fonts = std::cell::RefCell::new(FontInterner::new());
     let env = FlowEnv {
         stylesheet: &stylesheet,
         computed: &computed,
         table_columns: &table_columns,
         row_height: table_style.row_height,
+        fonts: &fonts,
     };
     let flow = build_flow(&dom, &env);
 
@@ -366,10 +383,22 @@ fn finish(dom: crate::dom::Dom) -> Document {
     // (headings/paragraphs and tables interleaved in document order). A bare
     // table falls back to the dedicated spreadsheet path (`blocks`), preserving
     // its fast, well-tuned layout.
-    let (blocks, flow) = match flow {
+    let (mut blocks, mut flow) = match flow {
         Some(root) if root.has_nontable_content() => (Vec::new(), Some(root)),
         _ => (tables_from_dom(&dom, &stylesheet, &computed), None),
     };
+
+    // Post-pass: intern each table cell's font requirement (its computed style
+    // already carries family/bold/italic), wherever the cells live.
+    let mut fonts = fonts.into_inner();
+    for block in &mut blocks {
+        for cell in &mut block.cells {
+            intern_cell_font(cell, &mut fonts);
+        }
+    }
+    if let Some(root) = &mut flow {
+        intern_table_fonts_in(&mut root.children, &mut fonts);
+    }
 
     Document {
         blocks,
@@ -378,17 +407,101 @@ fn finish(dom: crate::dom::Dom) -> Document {
         table_style,
         table_columns,
         images: Vec::new(),
+        font_specs: fonts.into_specs(),
+    }
+}
+
+fn intern_cell_font(cell: &mut TableCell, fonts: &mut FontInterner) {
+    let family = cell
+        .style
+        .font_family
+        .clone()
+        .map(|name| fonts.family(&name));
+    cell.font = fonts.spec(family, cell.style.bold, cell.style.italic.unwrap_or(false));
+}
+
+fn intern_table_fonts_in(children: &mut [crate::box_tree::BoxChild], fonts: &mut FontInterner) {
+    for child in children {
+        match child {
+            crate::box_tree::BoxChild::Table(table) => {
+                for row in &mut table.rows {
+                    for cell in &mut row.cells {
+                        intern_cell_font(cell, fonts);
+                    }
+                }
+            }
+            crate::box_tree::BoxChild::Block(block) => {
+                intern_table_fonts_in(&mut block.children, fonts);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Interns the font requirements seen while building the box tree: family
+/// names (deduplicated) and `(family, bold, italic)` specs. Runs and cells
+/// store a `u16` spec index; the resolved face table is built per render.
+/// Spec 0 is always the default (document font, regular weight, upright).
+pub(crate) struct FontInterner {
+    families: Vec<String>,
+    family_map: std::collections::HashMap<String, u16>,
+    specs: Vec<crate::font::FontSpec>,
+    spec_map: std::collections::HashMap<(Option<u16>, bool, bool), u16>,
+}
+
+impl FontInterner {
+    fn new() -> Self {
+        let default = crate::font::FontSpec {
+            family: None,
+            bold: false,
+            italic: false,
+        };
+        Self {
+            families: Vec::new(),
+            family_map: std::collections::HashMap::new(),
+            specs: vec![default],
+            spec_map: std::collections::HashMap::from([((None, false, false), 0)]),
+        }
+    }
+
+    fn family(&mut self, name: &str) -> u16 {
+        if let Some(&index) = self.family_map.get(name) {
+            return index;
+        }
+        let index = self.families.len() as u16;
+        self.families.push(name.to_string());
+        self.family_map.insert(name.to_string(), index);
+        index
+    }
+
+    fn spec(&mut self, family: Option<u16>, bold: bool, italic: bool) -> u16 {
+        if let Some(&index) = self.spec_map.get(&(family, bold, italic)) {
+            return index;
+        }
+        let index = self.specs.len() as u16;
+        self.specs.push(crate::font::FontSpec {
+            family: family.map(|f| self.families[f as usize].clone()),
+            bold,
+            italic,
+        });
+        self.spec_map.insert((family, bold, italic), index);
+        index
+    }
+
+    fn into_specs(self) -> Vec<crate::font::FontSpec> {
+        self.specs
     }
 }
 
 /// Shared context threaded through the flow builder: the parsed stylesheet and
 /// computed styles (for table-section resolution) plus the document-level table
-/// geometry that embedded `Table` boxes inherit.
+/// geometry that embedded `Table` boxes inherit, and the font interner.
 struct FlowEnv<'a> {
     stylesheet: &'a Stylesheet,
     computed: &'a ComputedStyles,
     table_columns: &'a [f32],
     row_height: Option<f32>,
+    fonts: &'a std::cell::RefCell<FontInterner>,
 }
 
 /// Lower the DOM into the flow box tree (ADR 0002 step 8) for non-table
@@ -401,6 +514,9 @@ fn build_flow(dom: &crate::dom::Dom, env: &FlowEnv) -> Option<crate::box_tree::F
     let root_ctx = FlowCtx {
         font_size: crate::layout::font_size_for(BlockKind::Paragraph),
         bold: false,
+        italic: false,
+        family: None,
+        font: 0, // the interner's default spec
         underline: false,
         line_through: false,
         color: Color::BLACK,
@@ -481,6 +597,12 @@ fn resolve_image_box(
 struct FlowCtx {
     font_size: f32,
     bold: bool,
+    /// Cascaded `font-style: italic`.
+    italic: bool,
+    /// Interned `font-family` (index into the interner's family list).
+    family: Option<u16>,
+    /// Interned `(family, bold, italic)` spec — what runs actually store.
+    font: u16,
     underline: bool,
     line_through: bool,
     color: Color,
@@ -505,6 +627,7 @@ impl ChildAcc {
         if let Some(last) = self.pending.last_mut() {
             if last.font_size == ctx.font_size
                 && last.bold == ctx.bold
+                && last.font == ctx.font
                 && last.underline == ctx.underline
                 && last.line_through == ctx.line_through
                 && last.color == ctx.color
@@ -517,6 +640,7 @@ impl ChildAcc {
             text: text.to_string(),
             font_size: ctx.font_size,
             bold: ctx.bold,
+            font: ctx.font,
             underline: ctx.underline,
             line_through: ctx.line_through,
             color: ctx.color,
@@ -616,7 +740,7 @@ fn build_node(
             } else {
                 // Inline element: fold its computed style into the context and
                 // let its children contribute to the enclosing line.
-                let child_ctx = inline_ctx(&ctx, computed, id, tag);
+                let child_ctx = inline_ctx(&ctx, env, id, tag);
                 for &child in &node.children {
                     build_node(dom, child, env, child_ctx, acc);
                 }
@@ -674,9 +798,23 @@ fn build_block(
         .background_color
         .filter(|color| *color != Color::WHITE);
 
+    // Font selection: an own `font-family` overrides the inherited one; `<pre>`
+    // defaults to monospace (the only block-level UA family rule we apply);
+    // `<address>` is italic by UA convention.
+    let family = match &own.font_family {
+        Some(name) => Some(env.fonts.borrow_mut().family(name)),
+        None if tag == "pre" => Some(env.fonts.borrow_mut().family("monospace")),
+        None => parent.family,
+    };
+    let italic = own.italic.unwrap_or(parent.italic || tag == "address");
+    let font = env.fonts.borrow_mut().spec(family, bold, italic);
+
     let child_ctx = FlowCtx {
         font_size,
         bold,
+        italic,
+        family,
+        font,
         underline: parent.underline || own.underline,
         line_through: parent.line_through || own.line_through,
         color,
@@ -758,13 +896,29 @@ fn build_block(
 }
 
 /// Fold an inline element's computed style into the surrounding context. Block
-/// alignment is unaffected; `<b>`/`<strong>` force bold even without a rule
-/// (there is no UA stylesheet).
-fn inline_ctx(parent: &FlowCtx, computed: &ComputedStyles, id: crate::dom::NodeId, tag: &str) -> FlowCtx {
-    let own = &computed.style[id];
+/// alignment is unaffected; `<b>`/`<strong>` force bold, `<i>`/`<em>` (and
+/// citation-family tags) force italic, and `<code>`-family tags default to
+/// monospace, even without a rule (there is no UA stylesheet).
+fn inline_ctx(parent: &FlowCtx, env: &FlowEnv, id: crate::dom::NodeId, tag: &str) -> FlowCtx {
+    let own = &env.computed.style[id];
+    let bold = parent.bold || own.bold || matches!(tag, "b" | "strong");
+    let italic = own
+        .italic
+        .unwrap_or(parent.italic || matches!(tag, "i" | "em" | "cite" | "var" | "dfn"));
+    let family = match &own.font_family {
+        Some(name) => Some(env.fonts.borrow_mut().family(name)),
+        None if matches!(tag, "code" | "tt" | "kbd" | "samp") => {
+            Some(env.fonts.borrow_mut().family("monospace"))
+        }
+        None => parent.family,
+    };
+    let font = env.fonts.borrow_mut().spec(family, bold, italic);
     FlowCtx {
         font_size: own.font_size.unwrap_or(parent.font_size),
-        bold: parent.bold || own.bold || matches!(tag, "b" | "strong"),
+        bold,
+        italic,
+        family,
+        font,
         underline: parent.underline || own.underline || matches!(tag, "u" | "ins"),
         line_through: parent.line_through || own.line_through || matches!(tag, "s" | "strike" | "del"),
         color: own.color.unwrap_or(parent.color),
@@ -1272,6 +1426,7 @@ fn cells_from_row(
             text,
             colspan,
             style,
+            font: 0, // interned in the post-pass over the finished document
         });
     }
 
@@ -1356,6 +1511,8 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         // Inheritable: the element's own value wins, else the parent's.
         align: own.align.or(parent.align),
         font_size: own.font_size.or(parent.font_size),
+        font_family: own.font_family.clone().or_else(|| parent.font_family.clone()),
+        italic: own.italic.or(parent.italic),
         line_height: own.line_height.or(parent.line_height),
         color: own.color.or(parent.color),
         white_space: own.white_space.or(parent.white_space),
@@ -1478,6 +1635,19 @@ fn parse_css_offset(value: &str) -> Option<f32> {
     } else {
         parse_css_length(value)
     }
+}
+
+/// First usable family from a CSS `font-family` stack: quotes stripped,
+/// generic keywords kept (resolved at render time). `inherit`/empty → `None`.
+fn parse_font_family(value: &str) -> Option<String> {
+    for raw in value.split(',') {
+        let name = raw.trim().trim_matches('"').trim_matches('\'').trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("inherit") {
+            continue;
+        }
+        return Some(name.to_string());
+    }
+    None
 }
 
 /// Parse a CSS `line-height` value. `normal` (and anything invalid or negative)
@@ -3081,6 +3251,14 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             }
         }
         "font-size" => target.cell.font_size = parse_css_length(value),
+        "font-family" => target.cell.font_family = parse_font_family(value),
+        "font-style" => {
+            target.cell.italic = match value.trim().to_ascii_lowercase().as_str() {
+                "italic" | "oblique" => Some(true),
+                "normal" => Some(false),
+                _ => None,
+            };
+        }
         "line-height" => target.cell.line_height = parse_line_height(value),
         "width" => target.cell.width = parse_css_length(value),
         "height" => target.cell.height = parse_css_length(value),
@@ -3344,6 +3522,8 @@ impl CellStyle {
         self.border = other.border.or(self.border);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
+        self.font_family = other.font_family.or(self.font_family.take());
+        self.italic = other.italic.or(self.italic);
         self.line_height = other.line_height.or(self.line_height);
         self.width = other.width.or(self.width);
         self.height = other.height.or(self.height);
@@ -4041,6 +4221,55 @@ mod tests {
         assert_eq!(document.page_style.margin_top, Some(54.0));
         assert_eq!(document.page_style.margin_bottom, Some(54.0));
         assert_eq!(document.table_style.row_height, Some(15.0));
+    }
+
+    #[test]
+    fn interns_font_specs_from_families_and_tags() {
+        let document = parse(
+            r#"
+            <style>body { font-family: "Georgia", serif } .m { font-family: monospace }</style>
+            <p>plain <b>bold</b> and <i>italic</i></p>
+            <pre>preformatted</pre>
+            <p class="m">mono</p>
+            "#,
+        );
+        let specs = &document.font_specs;
+
+        // Spec 0 is always the default (no family, regular).
+        assert_eq!(specs[0].family, None);
+        assert!(!specs[0].bold && !specs[0].italic);
+        // The first family in the stack wins; bold/italic runs get variant specs.
+        let georgia = |bold: bool, italic: bool| {
+            specs.iter().any(|s| {
+                s.family.as_deref() == Some("Georgia") && s.bold == bold && s.italic == italic
+            })
+        };
+        assert!(georgia(false, false), "{specs:?}");
+        assert!(georgia(true, false), "<b> inside Georgia body");
+        assert!(georgia(false, true), "<i> inside Georgia body");
+        // <pre> defaults to monospace; the .m class names it explicitly.
+        assert!(
+            specs.iter().any(|s| s.family.as_deref() == Some("monospace")),
+            "{specs:?}"
+        );
+
+        // Runs actually reference distinct specs.
+        fn collect_fonts(children: &[crate::box_tree::BoxChild], out: &mut Vec<u16>) {
+            for child in children {
+                match child {
+                    crate::box_tree::BoxChild::Line(runs) => {
+                        out.extend(runs.iter().map(|r| r.font))
+                    }
+                    crate::box_tree::BoxChild::Block(b) => collect_fonts(&b.children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut fonts = Vec::new();
+        collect_fonts(&document.flow.as_ref().unwrap().children, &mut fonts);
+        fonts.sort_unstable();
+        fonts.dedup();
+        assert!(fonts.len() >= 4, "regular/bold/italic/monospace runs: {fonts:?}");
     }
 
     #[test]

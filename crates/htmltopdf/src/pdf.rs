@@ -31,38 +31,57 @@ pub fn write_pdf(
 ) -> Result<Vec<u8>, PdfError> {
     let page_count = pages.len();
 
-    // Discover which fonts actually paint text: segment every painted string
-    // through the primary font's fallback chain. Each used font becomes a
-    // /Fn resource; the primary is always F1 (a page may paint no text at all,
-    // but its resources still declare F1 so the dictionary is never empty).
-    let mut used_by_font: std::collections::BTreeMap<usize, std::collections::BTreeSet<&str>> =
-        std::collections::BTreeMap::new();
-    used_by_font.entry(0).or_default();
+    // Discover which faces actually paint text: each text command's run font
+    // (per-element `font-family`/bold/italic resolution), further split by its
+    // fallback chain for characters it lacks. Faces are deduplicated by
+    // identity in first-use order (deterministic), so two specs resolving to
+    // the same file share one /Fn resource. The primary is always F1 (a page
+    // may paint no text at all, but resources still declare F1).
+    let mut face_order: Vec<std::sync::Arc<crate::font::Font>> = Vec::new();
+    let mut face_index: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut used_texts: Vec<std::collections::BTreeSet<&str>> = Vec::new();
+    let mut slot = |font: &std::sync::Arc<crate::font::Font>,
+                    face_order: &mut Vec<std::sync::Arc<crate::font::Font>>,
+                    used_texts: &mut Vec<std::collections::BTreeSet<&str>>|
+     -> usize {
+        let key = std::sync::Arc::as_ptr(font) as usize;
+        *face_index.entry(key).or_insert_with(|| {
+            face_order.push(font.clone());
+            used_texts.push(std::collections::BTreeSet::new());
+            face_order.len() - 1
+        })
+    };
+    slot(&options.font, &mut face_order, &mut used_texts);
     for text in pages.iter().flat_map(|page| page.commands.iter()).filter_map(|c| match c {
         PaintCommand::Text(text) => Some(text),
         _ => None,
     }) {
-        match options.font.segment_by_coverage(&text.text) {
+        let base = options.run_font(text.font);
+        match base.segment_by_coverage(&text.text) {
             None => {
-                used_by_font.entry(0).or_default().insert(text.text.as_str());
+                let index = slot(base, &mut face_order, &mut used_texts);
+                used_texts[index].insert(text.text.as_str());
             }
             Some(segments) => {
-                for (index, segment) in segments {
-                    used_by_font.entry(index).or_default().insert(segment);
+                let chain = base.fallback_chain();
+                for (chain_index, segment) in segments {
+                    let face = if chain_index == 0 { base } else { &chain[chain_index - 1] };
+                    let index = slot(face, &mut face_order, &mut used_texts);
+                    used_texts[index].insert(segment);
                 }
             }
         }
     }
 
-    // One plan per used font: resource name, object ids, and (for embedded
+    // One plan per used face: resource name, object ids, and (for embedded
     // faces) the shaped CID layout, subset program, and PDF names.
     let fonts_start = 3; // catalog 1, pages tree 2
-    let first_page_id = fonts_start + used_by_font.len();
+    let first_page_id = fonts_start + face_order.len();
     let extras_start = first_page_id + page_count * 2;
     let mut next_extra = extras_start;
-    let mut font_plans: Vec<FontPlan> = Vec::with_capacity(used_by_font.len());
-    for (ordinal, (chain_index, texts)) in used_by_font.iter().enumerate() {
-        let font = options.font.chain_font(*chain_index);
+    let mut font_plans: Vec<FontPlan> = Vec::with_capacity(face_order.len());
+    for (ordinal, (font, texts)) in face_order.iter().zip(&used_texts).enumerate() {
+        let font = font.clone();
         let cid = font
             .embedding()
             .map(|embedded| embedded.shaped_cid_layout(texts.iter().copied()));
@@ -88,7 +107,6 @@ pub fn write_pdf(
             None
         };
         font_plans.push(FontPlan {
-            chain_index: *chain_index,
             resource: format!("F{}", ordinal + 1),
             font_id: fonts_start + ordinal,
             font,
@@ -190,7 +208,7 @@ pub fn write_pdf(
     for (index, page) in pages.iter().enumerate() {
         let page_id = first_page_id + (index * 2);
         let content_id = page_id + 1;
-        let content = page_content(page, &options.font, &font_plans);
+        let content = page_content(page, options, &font_plans);
 
         writer.object(
             page_id,
@@ -382,7 +400,6 @@ fn compress_stream(stream: &[u8]) -> Result<Vec<u8>, PdfError> {
 /// layout, subset program, PDF base name, and the four extra object ids
 /// (descendant, descriptor, font file, ToUnicode).
 struct FontPlan {
-    chain_index: usize,
     resource: String,
     font_id: usize,
     font: std::sync::Arc<crate::font::Font>,
@@ -416,15 +433,14 @@ fn push_text_segment(content: &mut String, plan: &FontPlan, segment: &str) {
     }
 }
 
-fn page_content(
-    page: &Page,
-    primary: &std::sync::Arc<crate::font::Font>,
-    font_plans: &[FontPlan],
-) -> String {
-    let plan_for = |chain_index: usize| -> &FontPlan {
+fn page_content(page: &Page, options: &RenderOptions, font_plans: &[FontPlan]) -> String {
+    // Faces are deduplicated by identity when plans are built, so a linear
+    // identity scan (over a handful of plans) resolves any face to its plan.
+    let plan_of = |font: &std::sync::Arc<crate::font::Font>| -> &FontPlan {
+        let key = std::sync::Arc::as_ptr(font) as usize;
         font_plans
             .iter()
-            .find(|plan| plan.chain_index == chain_index)
+            .find(|plan| std::sync::Arc::as_ptr(&plan.font) as usize == key)
             .unwrap_or(&font_plans[0])
     };
     // With a single font in play, skip per-command segmentation entirely.
@@ -499,34 +515,35 @@ fn page_content(
                     content.push_str(&format!("{:.4} {:.4} {:.4} RG\n", fill.0, fill.1, fill.2));
                     content.push_str(&format!("{:.3} w 2 Tr\n", text.font_size * 0.03));
                 }
-                // Segment the string by font coverage (primary first, then the
-                // fallback chain); each segment selects its /Fn resource and the
-                // text position flows across the switches.
+                // Segment the string by font coverage (the run's own face
+                // first, then its fallback chain); each segment selects its
+                // /Fn resource and the text position flows across switches.
+                let base = options.run_font(text.font);
                 let segments = if single_font {
                     None
                 } else {
-                    primary.segment_by_coverage(&text.text)
+                    base.segment_by_coverage(&text.text)
                 };
                 match segments {
                     None => {
-                        content.push_str(&format!(
-                            "/{} {:.2} Tf\n",
-                            font_plans[0].resource, text.font_size
-                        ));
+                        let plan = plan_of(base);
+                        content.push_str(&format!("/{} {:.2} Tf\n", plan.resource, text.font_size));
                         content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
-                        push_text_segment(&mut content, plan_for(0), &text.text);
+                        push_text_segment(&mut content, plan, &text.text);
                     }
                     Some(segments) => {
                         content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
+                        let chain = base.fallback_chain();
                         let mut current = usize::MAX;
                         for (chain_index, segment) in segments {
-                            let plan = plan_for(chain_index);
-                            if plan.chain_index != current {
+                            let face = if chain_index == 0 { base } else { &chain[chain_index - 1] };
+                            let plan = plan_of(face);
+                            if plan.font_id != current {
                                 content.push_str(&format!(
                                     "/{} {:.2} Tf\n",
                                     plan.resource, text.font_size
                                 ));
-                                current = plan.chain_index;
+                                current = plan.font_id;
                             }
                             push_text_segment(&mut content, plan, segment);
                         }
@@ -737,6 +754,7 @@ mod tests {
                 x: 48.0,
                 y: 700.0,
                 font_size: 12.0,
+                font: 0,
                 leading: 16.0,
             },
             Color::BLACK, false,
@@ -760,6 +778,7 @@ mod tests {
                 x: 48.0,
                 y: 700.0,
                 font_size: 12.0,
+                font: 0,
                 leading: 16.0,
             },
             Color::BLACK, false,
@@ -799,13 +818,13 @@ mod tests {
                 x: 12.0,
                 y: 45.0,
                 font_size: 10.0,
+                font: 0,
                 bold: false,
             }));
         page.commands.push(PaintCommand::PopClip);
 
         let primary = std::sync::Arc::new(crate::font::Font::helvetica());
         let plans = vec![FontPlan {
-            chain_index: 0,
             resource: "F1".to_string(),
             font_id: 3,
             font: primary.clone(),
@@ -814,7 +833,11 @@ mod tests {
             base_name: None,
             extra_ids: None,
         }];
-        let content = page_content(&page, &primary, &plans);
+        let options = RenderOptions {
+            font: primary.clone(),
+            ..RenderOptions::default()
+        };
+        let content = page_content(&page, &options, &plans);
 
         assert!(content.contains("q\n10.00 20.00 30.00 40.00 re W n\n"));
         assert!(content.contains("Q\n"));
@@ -830,7 +853,6 @@ mod tests {
 
         let primary = std::sync::Arc::new(crate::font::Font::helvetica());
         let plans = vec![FontPlan {
-            chain_index: 0,
             resource: "F1".to_string(),
             font_id: 3,
             font: primary.clone(),
@@ -839,7 +861,11 @@ mod tests {
             base_name: None,
             extra_ids: None,
         }];
-        let content = page_content(&page, &primary, &plans);
+        let options = RenderOptions {
+            font: primary.clone(),
+            ..RenderOptions::default()
+        };
+        let content = page_content(&page, &options, &plans);
 
         assert!(content.contains("1.0000 0.0000 0.0000 rg\n"));
         assert!(content.contains("0.0000 0.0000 1.0000 RG\n"));

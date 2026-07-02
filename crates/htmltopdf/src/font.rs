@@ -650,9 +650,20 @@ impl TrueTypeFont {
     }
 }
 
+/// The process-wide system font index, scanned once. Immutable after init, so
+/// it does not compromise the no-shared-mutable-state render model — it plays
+/// the same role as the OS font directory itself.
+fn system_font_db() -> &'static fontdb::Database {
+    static DB: std::sync::OnceLock<fontdb::Database> = std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
 fn load_family(name: &str) -> Result<(Vec<u8>, u32), String> {
-    let mut db = fontdb::Database::new();
-    db.load_system_fonts();
+    let db = system_font_db();
     let id = db
         .query(&fontdb::Query {
             families: &[fontdb::Family::Name(name)],
@@ -661,6 +672,100 @@ fn load_family(name: &str) -> Result<(Vec<u8>, u32), String> {
         .ok_or_else(|| format!("font family '{name}' not found in system fonts"))?;
     db.with_face_data(id, |data, index| (data.to_vec(), index))
         .ok_or_else(|| "failed to load font face data".to_string())
+}
+
+/// A font requirement cascaded from CSS: an optional first `font-family` (or a
+/// generic keyword; `None` = the document's default font) plus weight/style.
+/// Interned per document during box-tree building; resolved once per render.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontSpec {
+    pub family: Option<String>,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// A resolved [`FontSpec`]: the face to measure/shape/embed with, and whether
+/// bold still needs to be synthesized (fill+stroke) because no real bold face
+/// was found for the request.
+#[derive(Debug, Clone)]
+pub struct ResolvedFont {
+    pub font: Arc<Font>,
+    pub faux_bold: bool,
+}
+
+/// Resolve a spec against the document's primary font. Named families (and the
+/// CSS generic keywords) load real system faces — including real bold/italic
+/// variants — through a process-wide cache, so a family is read from disk once
+/// per process, not once per render. A spec with no family keeps the primary
+/// font (bold stays synthesized: a path-loaded primary has no reliable family
+/// to find a bold sibling in). Unresolvable families fall back the same way.
+pub fn resolve_spec(primary: &Arc<Font>, spec: &FontSpec) -> ResolvedFont {
+    let Some(family) = &spec.family else {
+        return ResolvedFont {
+            font: primary.clone(),
+            faux_bold: spec.bold,
+        };
+    };
+
+    type CacheKey = (String, bool, bool);
+    type CacheValue = Option<(Arc<Font>, bool)>; // (face, is real bold); None = lookup failed
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<CacheKey, CacheValue>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let key = (family.to_ascii_lowercase(), spec.bold, spec.italic);
+    let cached = cache.lock().unwrap().get(&key).cloned();
+    let loaded = match cached {
+        Some(hit) => hit,
+        None => {
+            let loaded = load_family_variant(family, spec.bold, spec.italic);
+            cache.lock().unwrap().insert(key, loaded.clone());
+            loaded
+        }
+    };
+    match loaded {
+        Some((font, real_bold)) => ResolvedFont {
+            faux_bold: spec.bold && !real_bold,
+            font,
+        },
+        None => ResolvedFont {
+            font: primary.clone(),
+            faux_bold: spec.bold,
+        },
+    }
+}
+
+/// Load the best system face for `(family, bold, italic)`. Returns the parsed
+/// font and whether the matched face is genuinely bold (weight ≥ 600) when
+/// bold was requested — the caller synthesizes bold otherwise. An italic
+/// request that only matches an upright face is accepted upright (no faux
+/// italic). Generic CSS keywords map to `fontdb`'s generic families.
+fn load_family_variant(name: &str, bold: bool, italic: bool) -> Option<(Arc<Font>, bool)> {
+    let family = match name.to_ascii_lowercase().as_str() {
+        "serif" => fontdb::Family::Serif,
+        "sans-serif" => fontdb::Family::SansSerif,
+        "monospace" => fontdb::Family::Monospace,
+        "cursive" => fontdb::Family::Cursive,
+        "fantasy" => fontdb::Family::Fantasy,
+        _ => fontdb::Family::Name(name),
+    };
+    let db = system_font_db();
+    let id = db.query(&fontdb::Query {
+        families: &[family],
+        weight: if bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL },
+        style: if italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
+        ..Default::default()
+    })?;
+    let real_bold = db
+        .face(id)
+        .map(|info| info.weight.0 >= 600)
+        .unwrap_or(false);
+    let (data, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
+    let font = Font {
+        kind: FontKind::TrueType(Box::new(TrueTypeFont::parse(data, index).ok()?)),
+        fallbacks: Mutex::new(None),
+    };
+    Some((Arc::new(font), real_bold))
 }
 
 /// PostScript name (name id 6), falling back to family (id 1), sanitized to a
@@ -957,6 +1062,63 @@ mod tests {
             })
             .sum();
         assert!((whole - sum).abs() < 0.01, "whole {whole} vs sum {sum}");
+    }
+
+    #[test]
+    fn resolve_spec_keeps_primary_and_finds_real_variants() {
+        use super::{resolve_spec, FontSpec};
+        let primary = std::sync::Arc::new(Font::helvetica());
+
+        // No family: the primary stays, bold stays synthesized.
+        let default_bold = resolve_spec(
+            &primary,
+            &FontSpec { family: None, bold: true, italic: false },
+        );
+        assert!(std::sync::Arc::ptr_eq(&default_bold.font, &primary));
+        assert!(default_bold.faux_bold);
+
+        // Unknown family: fall back to the primary, keep faux bold.
+        let missing = resolve_spec(
+            &primary,
+            &FontSpec { family: Some("NoSuchFamily".into()), bold: true, italic: false },
+        );
+        assert!(std::sync::Arc::ptr_eq(&missing.font, &primary));
+        assert!(missing.faux_bold);
+
+        // A real family (system-dependent; skip without Arial): the bold and
+        // italic variants resolve to real faces, killing bold synthesis.
+        let arial = resolve_spec(
+            &primary,
+            &FontSpec { family: Some("Arial".into()), bold: false, italic: false },
+        );
+        let Some(regular) = arial.font.embedding() else { return };
+        assert!(regular.postscript_name.contains("Arial"));
+
+        let bold = resolve_spec(
+            &primary,
+            &FontSpec { family: Some("Arial".into()), bold: true, italic: false },
+        );
+        let bold_face = bold.font.embedding().expect("bold face resolves");
+        assert!(bold_face.postscript_name.contains("Bold"), "{}", bold_face.postscript_name);
+        assert!(!bold.faux_bold, "real bold face needs no synthesis");
+
+        let italic = resolve_spec(
+            &primary,
+            &FontSpec { family: Some("Arial".into()), bold: false, italic: true },
+        );
+        let italic_face = italic.font.embedding().expect("italic face resolves");
+        assert!(
+            italic_face.postscript_name.contains("Italic"),
+            "{}",
+            italic_face.postscript_name
+        );
+
+        // The cache hands back the same face for a repeated spec.
+        let again = resolve_spec(
+            &primary,
+            &FontSpec { family: Some("Arial".into()), bold: true, italic: false },
+        );
+        assert!(std::sync::Arc::ptr_eq(&again.font, &bold.font));
     }
 
     #[test]

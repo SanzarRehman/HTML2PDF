@@ -1,0 +1,26 @@
+{
+  "fixture": "font-family",
+  "layer": "features",
+  "description": "Per-element font-family (named, generic monospace/sans-serif) with real bold/italic faces; pre/code UA monospace. Assertions use embedded face names: glyph ids in the content streams are not searchable as text.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "TJ",
+      "Georgia",
+      "Georgia-Bold",
+      "Georgia-Italic",
+      "Arial",
+      "Courier"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The body renders in Georgia (serif) while the h1 is sans-serif.",
+    "Bold and italic words use real bold/italic faces, not synthesized strokes.",
+    "code, kbd, and pre content renders in a monospace face.",
+    "The courier table cell uses Courier New."
+  ]
+}

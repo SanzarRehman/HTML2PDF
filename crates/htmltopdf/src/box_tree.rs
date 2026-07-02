@@ -166,6 +166,8 @@ pub struct InlineRun {
     pub text: String,
     pub font_size: f32,
     pub bold: bool,
+    /// Interned font-spec index into `Document::font_specs` (0 = default).
+    pub font: u16,
     /// `text-decoration: underline` (also `<u>`/`<ins>`), stroked below the baseline.
     pub underline: bool,
     /// `text-decoration: line-through` (also `<s>`/`<strike>`/`<del>`).
