@@ -26,7 +26,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `rowspan` | ❌ | Ignored. |
 | `caption`, nested tables | ❌ | |
 | `img` | 🟡 | Block-level only (see Images). |
-| `a` | 🟡 | Text renders; **no clickable link annotation**. |
+| `a` | 🟡 | Clickable `/Link` annotations: external URIs and `mailto:` as URI actions, `#fragment` as in-document jumps to `id` anchors (dead fragments annotate nothing). UA style applied (blue + underline; author `color` and `text-decoration: none` win). Adjacent words merge into one clickable rect per line. Not yet: links inside table cells (cell text is flattened). |
 | `form`, `fieldset`, `input`, `select`, `textarea`, `button` | ❌ | Containers may render text; no form controls. |
 | `svg`, `canvas`, `video`, `audio`, `iframe`, `object` | ❌ | |
 | `script`, `style`, `head`, `title` | ✅ | Consumed (CSS parsed; scripts only with `--js`), not rendered. |
@@ -126,4 +126,6 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Image XObjects, per-page backgrounds/borders | ✅ | |
 | Multi-page pagination, repeated table headers | ✅ | |
 | Configurable page size (A4/Letter, portrait/landscape), margins | ✅ | `--paper`, `@page`. |
-| Bookmarks/outline, link annotations, headers/footers, tagged PDF, encryption | ❌ | |
+| Link annotations (`/Annots`) | 🟡 | URI actions + in-document `/Dest` (`#fragment` → `id` anchor); one merged rect per link per line. Not in table cells yet. |
+| Document outline (`/Outlines`) | ✅ | Built from `h1`–`h6` in document order; deeper levels nest under the closest shallower heading; non-ASCII titles as UTF-16BE. |
+| Headers/footers, tagged PDF, encryption | ❌ | |

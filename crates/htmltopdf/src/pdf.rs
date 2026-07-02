@@ -138,6 +138,82 @@ pub fn write_pdf(
             }
         })
         .collect();
+
+    // Interactive features. Named destinations (HTML `id` anchors) resolve
+    // `#fragment` links; every laid-out link area becomes a /Link annotation
+    // (URI action for external targets, an in-document /Dest for fragments);
+    // headings become the /Outlines bookmark tree.
+    let mut named_dests: std::collections::HashMap<&str, (usize, f32)> =
+        std::collections::HashMap::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        for anchor in &page.anchors {
+            if let Some(name) = &anchor.name {
+                named_dests.entry(name.as_str()).or_insert((page_index, anchor.y));
+            }
+        }
+    }
+    let page_object_id = |page_index: usize| first_page_id + page_index * 2;
+    let mut annots_per_page: Vec<Vec<AnnotPlan>> = Vec::with_capacity(page_count);
+    for page in pages {
+        let mut annots = Vec::new();
+        for area in &page.link_areas {
+            let Some(target) = (area.link as usize)
+                .checked_sub(1)
+                .and_then(|index| options.links.get(index))
+            else {
+                continue;
+            };
+            let target = match target.strip_prefix('#') {
+                Some(fragment) => match named_dests.get(fragment) {
+                    // Fragment links only annotate when the anchor exists.
+                    Some(&(page_index, y)) => LinkTarget::Dest {
+                        page_object: page_object_id(page_index),
+                        y,
+                    },
+                    None => continue,
+                },
+                None if target.is_empty() => continue,
+                None => LinkTarget::Uri(target),
+            };
+            annots.push(AnnotPlan {
+                object_id: next_id,
+                rect: [area.x, area.y, area.x + area.width, area.y + area.height],
+                target,
+            });
+            next_id += 1;
+        }
+        annots_per_page.push(annots);
+    }
+
+    // Outline entries in document order, with each entry's parent being the
+    // closest preceding entry of a shallower level (h2 nests under h1, …).
+    let entries: Vec<OutlineEntry> = pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page_index, page)| {
+            page.anchors
+                .iter()
+                .filter(|anchor| anchor.level > 0 && !anchor.title.is_empty())
+                .map(move |anchor| (page_index, anchor))
+        })
+        .map(|(page_index, anchor)| OutlineEntry {
+            level: anchor.level,
+            title: anchor.title.clone(),
+            page_object: page_object_id(page_index),
+            y: anchor.y,
+            parent: None,
+            children: Vec::new(),
+        })
+        .collect();
+    let outline = build_outline_tree(entries);
+    let outline_root_id = if outline.is_empty() {
+        None
+    } else {
+        let id = next_id;
+        next_id += 1 + outline.len();
+        Some(id)
+    };
+
     let object_count = next_id - 1;
 
     if object_count > u16::MAX as usize {
@@ -168,7 +244,13 @@ pub fn write_pdf(
     let mut writer = PdfWriter::new();
     writer.write_header();
 
-    writer.object(catalog_id, "<< /Type /Catalog /Pages 2 0 R >>");
+    match outline_root_id {
+        Some(root) => writer.object(
+            catalog_id,
+            &format!("<< /Type /Catalog /Pages 2 0 R /Outlines {root} 0 R >>"),
+        ),
+        None => writer.object(catalog_id, "<< /Type /Catalog /Pages 2 0 R >>"),
+    }
 
     let kids = (0..page_count)
         .map(|index| format!("{} 0 R", first_page_id + (index * 2)))
@@ -210,6 +292,17 @@ pub fn write_pdf(
         let content_id = page_id + 1;
         let content = page_content(page, options, &font_plans);
 
+        let annots = if annots_per_page[index].is_empty() {
+            String::new()
+        } else {
+            let ids = annots_per_page[index]
+                .iter()
+                .map(|plan| format!("{} 0 R", plan.object_id))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("/Annots [{ids}] ")
+        };
+
         writer.object(
             page_id,
             &format!(
@@ -217,12 +310,13 @@ pub fn write_pdf(
                     "<< /Type /Page /Parent 2 0 R ",
                     "/MediaBox [0 0 {:.2} {:.2}] ",
                     "/Resources << /Font << {} >>{} >> ",
-                    "/Contents {} 0 R >>"
+                    "{}/Contents {} 0 R >>"
                 ),
                 options.page_size.width,
                 options.page_size.height,
                 font_resources,
                 xobject_resources,
+                annots,
                 content_id
             ),
         );
@@ -322,8 +416,166 @@ pub fn write_pdf(
         writer.stream_with_dict(plan.object_id, &dict, &body);
     }
 
+    // Link annotations, page by page.
+    for plans in &annots_per_page {
+        for plan in plans {
+            let rect = format!(
+                "[{:.2} {:.2} {:.2} {:.2}]",
+                plan.rect[0], plan.rect[1], plan.rect[2], plan.rect[3]
+            );
+            let body = match &plan.target {
+                LinkTarget::Uri(uri) => format!(
+                    "<< /Type /Annot /Subtype /Link /Rect {rect} /Border [0 0 0] \
+                     /A << /S /URI /URI ({}) >> >>",
+                    escape_string_bytes(uri)
+                ),
+                LinkTarget::Dest { page_object, y } => format!(
+                    "<< /Type /Annot /Subtype /Link /Rect {rect} /Border [0 0 0] \
+                     /Dest [{page_object} 0 R /XYZ null {y:.2} null] >>"
+                ),
+            };
+            writer.object(plan.object_id, &body);
+        }
+    }
+
+    // The outline (bookmark) tree: a root plus one item per heading, all open.
+    if let Some(root_id) = outline_root_id {
+        let item_id = |index: usize| root_id + 1 + index;
+        let top: Vec<usize> = (0..outline.len()).filter(|&i| outline[i].parent.is_none()).collect();
+        writer.object(
+            root_id,
+            &format!(
+                "<< /Type /Outlines /First {} 0 R /Last {} 0 R /Count {} >>",
+                item_id(*top.first().expect("outline is non-empty")),
+                item_id(*top.last().expect("outline is non-empty")),
+                outline.len()
+            ),
+        );
+        for (index, entry) in outline.iter().enumerate() {
+            let siblings: Vec<usize> = (0..outline.len())
+                .filter(|&i| outline[i].parent == entry.parent)
+                .collect();
+            let position = siblings.iter().position(|&i| i == index).expect("entry is its own sibling");
+            let mut body = format!(
+                "<< /Title {} /Parent {} 0 R",
+                pdf_text_string(&entry.title),
+                entry.parent.map(item_id).unwrap_or(root_id)
+            );
+            if position > 0 {
+                body.push_str(&format!(" /Prev {} 0 R", item_id(siblings[position - 1])));
+            }
+            if position + 1 < siblings.len() {
+                body.push_str(&format!(" /Next {} 0 R", item_id(siblings[position + 1])));
+            }
+            if let (Some(&first), Some(&last)) = (entry.children.first(), entry.children.last()) {
+                body.push_str(&format!(
+                    " /First {} 0 R /Last {} 0 R /Count {}",
+                    item_id(first),
+                    item_id(last),
+                    descendant_count(&outline, index)
+                ));
+            }
+            body.push_str(&format!(
+                " /Dest [{} 0 R /XYZ null {:.2} null] >>",
+                entry.page_object, entry.y
+            ));
+            writer.object(item_id(index), &body);
+        }
+    }
+
     writer.finish(catalog_id, object_count);
     Ok(writer.into_bytes())
+}
+
+/// One planned `/Link` annotation: its object id, rectangle (PDF page space),
+/// and resolved target.
+struct AnnotPlan<'a> {
+    object_id: usize,
+    rect: [f32; 4],
+    target: LinkTarget<'a>,
+}
+
+enum LinkTarget<'a> {
+    /// An external URI action.
+    Uri(&'a str),
+    /// An in-document destination (a resolved `#fragment`).
+    Dest { page_object: usize, y: f32 },
+}
+
+/// One outline (bookmark) item: a heading with its destination, linked into
+/// the tree by `build_outline_tree`.
+struct OutlineEntry {
+    level: u8,
+    title: String,
+    page_object: usize,
+    y: f32,
+    /// Index of the parent entry (`None` = a top-level item under the root).
+    parent: Option<usize>,
+    /// Indices of direct children, in document order.
+    children: Vec<usize>,
+}
+
+/// Link the flat, document-ordered heading list into a tree: each entry nests
+/// under the closest preceding entry with a shallower level (an `<h3>` after
+/// an `<h1>` nests directly under it; a skipped level doesn't break nesting).
+fn build_outline_tree(mut entries: Vec<OutlineEntry>) -> Vec<OutlineEntry> {
+    let mut stack: Vec<usize> = Vec::new();
+    for index in 0..entries.len() {
+        while let Some(&top) = stack.last() {
+            if entries[top].level >= entries[index].level {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(&parent) = stack.last() {
+            entries[index].parent = Some(parent);
+            entries[parent].children.push(index);
+        }
+        stack.push(index);
+    }
+    entries
+}
+
+/// Total descendants of an outline entry (its open `/Count`).
+fn descendant_count(entries: &[OutlineEntry], index: usize) -> usize {
+    entries[index]
+        .children
+        .iter()
+        .map(|&child| 1 + descendant_count(entries, child))
+        .sum()
+}
+
+/// Encode a human-readable string for a PDF text-string context (`/Title`):
+/// ASCII goes out as an escaped literal, anything else as UTF-16BE hex with a
+/// byte-order mark.
+fn pdf_text_string(text: &str) -> String {
+    if text.is_ascii() {
+        format!("({})", escape_string_bytes(text))
+    } else {
+        let hex: String = std::iter::once('\u{FEFF}')
+            .chain(text.chars())
+            .map(utf16_be_hex)
+            .collect();
+        format!("<{hex}>")
+    }
+}
+
+/// Escape a string for a PDF literal `(...)`, passing its UTF-8 bytes through
+/// verbatim (no WinAnsi mapping — used for URIs and ASCII titles).
+fn escape_string_bytes(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '(' => output.push_str("\\("),
+            ')' => output.push_str("\\)"),
+            '\\' => output.push_str("\\\\"),
+            '\r' => output.push_str("\\r"),
+            '\n' => output.push_str("\\n"),
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 /// Object ids assigned to one embedded image and its optional soft mask.
@@ -767,6 +1019,60 @@ mod tests {
         assert!(text.contains("/Subtype /CIDFontType2"));
         assert!(text.contains("/CIDToGIDMap /Identity"));
         assert!(text.contains("/ToUnicode"));
+    }
+
+    #[test]
+    fn writes_link_annotations_and_outline() {
+        use crate::layout::{AnchorMark, LinkArea};
+
+        let mut first = Page::new();
+        first.anchors.push(AnchorMark {
+            name: Some("top".to_string()),
+            level: 1,
+            title: "Chapter One".to_string(),
+            y: 780.0,
+        });
+        first.anchors.push(AnchorMark {
+            name: None,
+            level: 2,
+            title: "Sección Única".to_string(), // non-ASCII → UTF-16BE title
+            y: 700.0,
+        });
+        let mut second = Page::new();
+        // One external link, one live fragment, one dead fragment (dropped).
+        for (index, link) in [1u16, 2, 3].into_iter().enumerate() {
+            second.link_areas.push(LinkArea {
+                x: 48.0,
+                y: 600.0 - 20.0 * index as f32,
+                width: 90.0,
+                height: 12.0,
+                link,
+            });
+        }
+        let options = RenderOptions {
+            links: vec![
+                "https://example.com/x".to_string(),
+                "#top".to_string(),
+                "#missing".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let pdf = write_pdf(&[first, second], &[], &options).expect("render");
+        let text = String::from_utf8_lossy(&pdf);
+
+        // Two annotations on page 2 (the dead fragment gets none).
+        assert!(text.contains("/Subtype /Link"));
+        assert!(text.contains("/A << /S /URI /URI (https://example.com/x) >>"));
+        // Page 1 is object 3 (no fonts beyond F1 at id 3 → first page id).
+        assert!(text.contains("/XYZ null 780.00 null"));
+        assert_eq!(text.matches("/Subtype /Link").count(), 2);
+
+        // The outline: root in the catalog, h2 nested under h1, UTF-16 title.
+        assert!(text.contains("/Outlines"));
+        assert!(text.contains("/Title (Chapter One)"));
+        assert!(text.contains("/Count 1"));
+        assert!(text.contains("/Title <FEFF")); // Sección Única
     }
 
     #[test]

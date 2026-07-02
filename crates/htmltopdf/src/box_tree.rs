@@ -139,6 +139,8 @@ pub struct BlockBox {
     pub offset_right: Option<f32>,
     pub offset_bottom: Option<f32>,
     pub offset_left: Option<f32>,
+    /// The element's HTML `id`, kept as a destination for `#fragment` links.
+    pub anchor: Option<String>,
     pub children: Vec<BoxChild>,
 }
 
@@ -180,6 +182,8 @@ pub struct InlineRun {
     pub bold: bool,
     /// Interned font-spec index into `Document::font_specs` (0 = default).
     pub font: u16,
+    /// Interned link target: `Document::links[link - 1]` (0 = not a link).
+    pub link: u16,
     /// `text-decoration: underline` (also `<u>`/`<ins>`), stroked below the baseline.
     pub underline: bool,
     /// `text-decoration: line-through` (also `<s>`/`<strike>`/`<del>`).

@@ -79,6 +79,9 @@ pub struct RenderOptions {
     /// the document never selects a family; filled per render by
     /// [`RenderOptions::with_document_hints`].
     pub fonts: Vec<crate::font::ResolvedFont>,
+    /// The document's interned link targets (`<a href>` values), indexed by
+    /// `LinkArea::link - 1`; filled per render by `with_document_hints`.
+    pub links: Vec<String>,
 }
 
 impl Default for RenderOptions {
@@ -98,6 +101,7 @@ impl Default for RenderOptions {
             base_dir: None,
             paper: Paper::A4,
             fonts: Vec::new(),
+            links: Vec::new(),
         }
     }
 }
@@ -148,6 +152,7 @@ impl RenderOptions {
             .iter()
             .map(|spec| crate::font::resolve_spec(&options.font, spec))
             .collect();
+        options.links = document.links.clone();
 
         options
     }
@@ -176,6 +181,33 @@ pub struct Page {
     pub lines: Vec<Line>,
     pub rects: Vec<Rect>,
     pub commands: Vec<PaintCommand>,
+    /// Clickable regions from `<a href>` text, turned into `/Annots` links.
+    pub link_areas: Vec<LinkArea>,
+    /// Destinations recorded on this page: headings (for the PDF outline) and
+    /// elements with an HTML `id` (for `#fragment` links).
+    pub anchors: Vec<AnchorMark>,
+}
+
+/// The clickable rectangle of one laid-out link piece, in PDF page space.
+/// `link` is a 1-based index into the document's interned targets
+/// (`RenderOptions::links`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkArea {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub link: u16,
+}
+
+/// A named or heading destination: where a block landed on its page. `level`
+/// is 1–6 for `<h1>`–`<h6>` (outline entries), 0 for a plain `id` anchor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorMark {
+    pub name: Option<String>,
+    pub level: u8,
+    pub title: String,
+    pub y: f32,
 }
 
 impl Page {
@@ -184,6 +216,8 @@ impl Page {
             lines: Vec::new(),
             rects: Vec::new(),
             commands: Vec::new(),
+            link_areas: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 
@@ -351,6 +385,7 @@ struct Overlay {
     commands: Vec<PaintCommand>,
     lines: Vec<Line>,
     rects: Vec<Rect>,
+    links: Vec<LinkArea>,
 }
 
 /// The containing block established by the nearest positioned ancestor, for
@@ -376,12 +411,14 @@ fn apply_overlays(pages: &mut [Page], mut overlays: Vec<Overlay>) {
                 page.commands.extend(overlay.commands);
                 page.lines.extend(overlay.lines);
                 page.rects.extend(overlay.rects);
+                page.link_areas.extend(overlay.links);
             }
             None => {
                 for page in pages.iter_mut() {
                     page.commands.extend(overlay.commands.iter().cloned());
                     page.lines.extend(overlay.lines.iter().cloned());
                     page.rects.extend(overlay.rects.iter().cloned());
+                    page.link_areas.extend(overlay.links.iter().cloned());
                 }
             }
         }
@@ -490,6 +527,7 @@ fn layout_box_children(
                         captured.commands.extend(inner.commands);
                         captured.lines.extend(inner.lines);
                         captured.rects.extend(inner.rects);
+                        captured.link_areas.extend(inner.links);
                     }
                 }
                 overlays.push(Overlay {
@@ -498,6 +536,7 @@ fn layout_box_children(
                     commands: captured.commands,
                     lines: captured.lines,
                     rects: captured.rects,
+                    links: captured.link_areas,
                 });
             }
             BoxChild::Block(block) if block.float_dir.is_some() => {
@@ -1402,8 +1441,65 @@ fn layout_block_box(
         );
     }
 
+    // Record this block as a destination: headings feed the PDF outline, an
+    // HTML `id` serves `#fragment` links. If the block's first content moved to
+    // a fresh page (nothing painted where it started), anchor there instead.
+    let heading_level = heading_level(block.kind);
+    if heading_level > 0 || block.anchor.is_some() {
+        let (anchor_page, anchor_y) =
+            if pages.len() - 1 > start_page && pages[start_page].commands.len() == start_index {
+                (start_page + 1, options.page_size.height - options.margin_top)
+            } else {
+                (start_page, start_y)
+            };
+        let title = if heading_level > 0 { first_line_text(&block.children) } else { String::new() };
+        pages[anchor_page].anchors.push(AnchorMark {
+            name: block.anchor.clone(),
+            level: heading_level,
+            title,
+            y: anchor_y,
+        });
+    }
+
     // This block's bottom margin collapses with whatever is carried out of it.
     *carried = carried.max(block.margin.bottom);
+}
+
+/// The outline level of a block: 1–6 for headings, 0 otherwise.
+fn heading_level(kind: crate::html::BlockKind) -> u8 {
+    match kind {
+        crate::html::BlockKind::Heading1 => 1,
+        crate::html::BlockKind::Heading2 => 2,
+        crate::html::BlockKind::Heading3 => 3,
+        crate::html::BlockKind::Heading4 => 4,
+        crate::html::BlockKind::Heading5 => 5,
+        crate::html::BlockKind::Heading6 => 6,
+        _ => 0,
+    }
+}
+
+/// A block's leading inline text (its first line box), whitespace-collapsed
+/// and capped — used as the outline title for headings.
+fn first_line_text(children: &[crate::box_tree::BoxChild]) -> String {
+    for child in children {
+        if let crate::box_tree::BoxChild::Line(runs) = child {
+            let joined: String = runs.iter().map(|run| run.text.as_str()).collect();
+            let mut title = String::new();
+            for word in joined.split_whitespace() {
+                if !title.is_empty() {
+                    title.push(' ');
+                }
+                title.push_str(word);
+                if title.len() > 200 {
+                    break;
+                }
+            }
+            if !title.is_empty() {
+                return title;
+            }
+        }
+    }
+    String::new()
 }
 
 /// Paint a decorated block's background and border, one rectangle per page the
@@ -1611,6 +1707,29 @@ fn layout_line_box(
                 piece.underline,
                 piece.line_through,
             );
+            if piece.link != 0 && piece_width > 0.0 {
+                // Clickable rect around the glyphs: descent below the baseline
+                // to roughly the cap height above it. Abutting pieces of the
+                // same link (words and the spaces between them) merge into one
+                // rectangle per line.
+                let area = LinkArea {
+                    x: px,
+                    y: baseline - piece.font_size * 0.25,
+                    width: piece_width,
+                    height: piece.font_size * 1.1,
+                    link: piece.link,
+                };
+                match page.link_areas.last_mut() {
+                    Some(last)
+                        if last.link == area.link
+                            && last.y == area.y
+                            && (last.x + last.width - area.x).abs() < 0.05 =>
+                    {
+                        last.width += area.width;
+                    }
+                    _ => page.link_areas.push(area),
+                }
+            }
             px += piece_width;
         }
 
@@ -1628,6 +1747,8 @@ struct LinePiece {
     bold: bool,
     underline: bool,
     line_through: bool,
+    /// Interned link target (see `Document::links`; 0 = not a link).
+    link: u16,
 }
 
 /// Reorder one visual line's pieces per UAX #9 so mixed LTR/RTL text reads
@@ -1756,16 +1877,29 @@ impl LineBreaker {
             let token = self.tokens.pop_front().expect("front token exists");
             if !current.is_empty() {
                 let lead = token.pieces.first();
+                let prev = current.last();
+                // A space carries a decoration (or link) only when the words on
+                // *both* sides share it, so a run of decorated words gets a
+                // continuous underline/strike without bleeding one space past
+                // either end of the run.
+                let both = |get: fn(&LinePiece) -> bool| {
+                    prev.map(get).unwrap_or(false) && lead.map(get).unwrap_or(false)
+                };
+                let underline = both(|p| p.underline);
+                let line_through = both(|p| p.line_through);
+                let link = match (prev, lead) {
+                    (Some(a), Some(b)) if a.link == b.link => a.link,
+                    _ => 0,
+                };
                 current.push(LinePiece {
                     text: " ".to_string(),
                     font_size: token.space_font_size,
                     font: lead.map(|p| p.font).unwrap_or(0),
                     color: lead.map(|p| p.color).unwrap_or(Color::BLACK),
                     bold: lead.map(|p| p.bold).unwrap_or(false),
-                    // Share the following word's decoration so a run of decorated
-                    // words gets a continuous underline/strike across the spaces.
-                    underline: lead.map(|p| p.underline).unwrap_or(false),
-                    line_through: lead.map(|p| p.line_through).unwrap_or(false),
+                    underline,
+                    line_through,
+                    link,
                 });
                 current_width += space_width;
             }
@@ -1800,6 +1934,7 @@ fn fill_from_long_token(
                 && last.bold == piece.bold
                 && last.underline == piece.underline
                 && last.line_through == piece.line_through
+                && last.link == piece.link
             {
                 last.text.push(ch);
                 return;
@@ -1813,6 +1948,7 @@ fn fill_from_long_token(
             bold: piece.bold,
             underline: piece.underline,
             line_through: piece.line_through,
+            link: piece.link,
         });
     };
 
@@ -1885,6 +2021,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                     && last.bold == run.bold
                     && last.underline == run.underline
                     && last.line_through == run.line_through
+                    && last.link == run.link
                 {
                     last.text.push(ch);
                     continue;
@@ -1898,6 +2035,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 bold: run.bold,
                 underline: run.underline,
                 line_through: run.line_through,
+                link: run.link,
             });
         }
     }
@@ -2628,6 +2766,36 @@ mod tests {
     };
 
     #[test]
+    fn links_produce_merged_areas_and_headings_produce_anchors() {
+        let document = crate::html::parse(
+            "<h1 id=\"top\">The Report Title</h1>\
+             <p>visit <a href=\"https://x.test/docs\">the docs pages</a> today</p>\
+             <h2>Details</h2>",
+        );
+        let options = RenderOptions::default().with_document_hints(&document);
+        assert_eq!(options.links, vec!["https://x.test/docs".to_string()]);
+
+        let pages = layout_document(&document, &options);
+        // The three linked words (and the spaces between them) merge into one
+        // clickable rectangle on one line.
+        assert_eq!(pages[0].link_areas.len(), 1);
+        let area = &pages[0].link_areas[0];
+        assert_eq!(area.link, 1);
+        assert!(area.width > 0.0 && area.height > 0.0);
+
+        // Both headings are anchored, in document order, with their text as the
+        // outline title; the h1 also carries its HTML id.
+        let anchors = &pages[0].anchors;
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0].level, 1);
+        assert_eq!(anchors[0].title, "The Report Title");
+        assert_eq!(anchors[0].name.as_deref(), Some("top"));
+        assert_eq!(anchors[1].level, 2);
+        assert_eq!(anchors[1].title, "Details");
+        assert!(anchors[0].y > anchors[1].y, "anchors descend down the page");
+    }
+
+    #[test]
     fn absolute_boxes_leave_flow_and_relative_preserves_it() {
         let document = crate::html::parse(
             "<style>.a { position:absolute; top:100pt; left:50pt; width:80pt; } \
@@ -2670,6 +2838,7 @@ mod tests {
             bold: false,
             underline: false,
             line_through: false,
+            link: 0,
         };
         // Logical: abc · אבג · space · דהו · xyz. The two Hebrew words and the
         // space between them form one RTL run, so they swap; Latin stays put.
@@ -2910,11 +3079,13 @@ mod tests {
                     offset_right: None,
                     offset_bottom: None,
                     offset_left: None,
+                    anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
                         bold: false,
                         font: 0,
+                        link: 0,
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
@@ -2928,6 +3099,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
            font_specs: Vec::new(),
+           links: Vec::new(),
             flow: Some(FlowRoot { children }),
             blocks: Vec::new(),
         };
@@ -2949,6 +3121,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
                     kind: BlockKind::Paragraph,
@@ -2976,11 +3149,13 @@ mod tests {
                     offset_right: None,
                     offset_bottom: None,
                     offset_left: None,
+                    anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: long,
                         font_size: 12.0,
                         bold: false,
                         font: 0,
+                        link: 0,
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
@@ -3044,11 +3219,13 @@ mod tests {
                 offset_right: None,
                 offset_bottom: None,
                 offset_left: None,
+                anchor: None,
                 children: vec![BoxChild::Line(vec![InlineRun {
                     text: text.to_string(),
                     font_size: 10.0,
                     bold: false,
                     font: 0,
+                    link: 0,
                     underline: false,
                     line_through: false,
                     color: Color::BLACK,
@@ -3061,6 +3238,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
            font_specs: Vec::new(),
+           links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![para("first"), para("second")],
             }),
@@ -3093,6 +3271,7 @@ mod tests {
                     font_size: 10.0,
                     bold: false,
                     font: 0,
+                    link: 0,
                     underline: false,
                     line_through: false,
                     color: Color::BLACK,
@@ -3104,6 +3283,7 @@ mod tests {
                 table_columns: Vec::new(),
                 images: Vec::new(),
                 font_specs: Vec::new(),
+                links: Vec::new(),
                 flow: Some(FlowRoot {
                     children: vec![BoxChild::Block(BlockBox {
                         kind: BlockKind::Paragraph,
@@ -3131,6 +3311,7 @@ mod tests {
                         offset_right: None,
                         offset_bottom: None,
                         offset_left: None,
+                        anchor: None,
                         children: vec![line("one"), line("two")],
                     })],
                 }),
@@ -3164,6 +3345,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
                     kind: BlockKind::Paragraph,
@@ -3196,11 +3378,13 @@ mod tests {
                     offset_right: None,
                     offset_bottom: None,
                     offset_left: None,
+                    anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: "boxed".to_string(),
                         font_size: 11.0,
                         bold: false,
                         font: 0,
+                        link: 0,
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
@@ -3244,6 +3428,7 @@ mod tests {
             table_columns: vec![30.0, 70.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3293,6 +3478,7 @@ mod tests {
             table_columns: vec![100.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3331,6 +3517,7 @@ mod tests {
             table_columns: vec![100.0, 100.0, 100.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3388,6 +3575,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3434,6 +3622,7 @@ mod tests {
             table_columns: vec![20.0, 200.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             flow: None,
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -3474,6 +3663,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3505,6 +3695,7 @@ mod tests {
             base_dir: None,
             paper: crate::layout::Paper::A4,
             fonts: Vec::new(),
+            links: Vec::new(),
         };
 
         let pages = layout_document(&document, &options);
@@ -3530,6 +3721,7 @@ mod tests {
             table_columns: vec![60.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3562,6 +3754,7 @@ mod tests {
             base_dir: None,
             paper: crate::layout::Paper::A4,
             fonts: Vec::new(),
+            links: Vec::new(),
         };
 
         let pages = layout_document(&document, &options);
@@ -3595,6 +3788,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3634,6 +3828,7 @@ mod tests {
                 base_dir: None,
                 paper: crate::layout::Paper::A4,
                 fonts: Vec::new(),
+                links: Vec::new(),
             },
         );
         // The painted font is the CSS size times the shrink-to-fit scale.
@@ -3652,6 +3847,7 @@ mod tests {
             table_columns: vec![400.0, 400.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3693,6 +3889,7 @@ mod tests {
             table_columns: vec![100.0, 300.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
                 style: Default::default(),
@@ -3727,6 +3924,7 @@ mod tests {
                 base_dir: None,
                 paper: crate::layout::Paper::A4,
                 fonts: Vec::new(),
+                links: Vec::new(),
             },
         );
 
@@ -3800,6 +3998,7 @@ mod tests {
             table_columns: vec![20.0, 80.0],
             images: Vec::new(),
            font_specs: Vec::new(),
+           links: Vec::new(),
             blocks,
         };
         let pages = layout_document(
@@ -3819,6 +4018,7 @@ mod tests {
                 base_dir: None,
                 paper: crate::layout::Paper::A4,
                 fonts: Vec::new(),
+                links: Vec::new(),
             },
         );
 

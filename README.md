@@ -112,6 +112,11 @@ Works today:
   and CSS generics resolve to real system faces (including true bold and
   italic variants — no more synthesized bold when a family is known), several
   subset faces per document; `pre`/`code` default to monospace.
+- **Clickable links and a document outline**: `<a href>` becomes a real PDF
+  link annotation — external URIs, `mailto:`, and in-document `#fragment`
+  jumps to `id` anchors — styled with browser UA defaults (blue, underlined;
+  `text-decoration: none` and author colors respected). Headings build the
+  PDF bookmark sidebar (`h2` nests under `h1`, and so on).
 - Block-level `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded
   in-house, alpha as a soft mask), from file paths and `data:` URIs, with
   `width`/`height` sizing and aspect-ratio preservation.
@@ -145,9 +150,10 @@ Not complete yet:
 - `@font-face` web fonts; synthetic italic when no italic face exists; emoji
   (color fonts can't embed as outlines); `dir="rtl"` / `direction: rtl` base
   paragraphs.
-- Complete CSS selector/property coverage (`%` lengths, `calc()`, custom
-  properties are the big absences).
-- Clickable link annotations, bookmarks/outline, tagged PDF.
+- Complete CSS selector/property coverage (`%` heights/margins, `calc()`,
+  custom properties are the big absences).
+- Links inside table cells (cell text is flattened, so an `<a>` in a `<td>`
+  renders as plain text); tagged PDF.
 - Full visual compatibility with Chromium.
 
 See [docs/COVERAGE.md](docs/COVERAGE.md) for the full ✅/🟡/❌ support matrix,
@@ -338,9 +344,8 @@ speed and memory stay visible as fidelity improves.
 ## Roadmap
 
 - Deepen flexbox (`flex-wrap`) and grid (line-based placement, `minmax()`).
-- Broaden CSS properties and computed-value coverage (`%` lengths,
-  `max-width`/`min-width`, `margin: auto`, `calc()`, custom properties).
-- Clickable link annotations (`<a href>`) and a document outline from headings.
+- Broaden CSS properties and computed-value coverage (`%` heights/margins,
+  `min-width`, `calc()`, custom properties).
 - Broaden image support (inline/floated images, remote URLs) and add SVG.
 - `text-align: justify`; `dir="rtl"` base paragraphs.
 - Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.

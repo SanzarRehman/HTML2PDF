@@ -24,6 +24,9 @@ pub struct Document {
     /// `InlineRun::font` / `TableCell::font`. Index 0 is always the default
     /// spec (document font, regular). Resolved to faces once per render.
     pub font_specs: Vec<crate::font::FontSpec>,
+    /// Link targets (`<a href>` values) interned while building the box tree;
+    /// `InlineRun::link` is a 1-based index into this list (0 = no link).
+    pub links: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +73,9 @@ pub struct CellStyle {
     /// them (matching how a browser paints it over inline descendants).
     pub underline: bool,
     pub line_through: bool,
+    /// An explicit `text-decoration: none`, remembered so UA defaults that
+    /// would decorate (the `<a href>` underline) know the author opted out.
+    pub decoration_none: bool,
     /// Whether the box draws a border. `None` means unset (so a more specific
     /// `border: none` can override a less specific border rule in the cascade).
     pub border: Option<bool>,
@@ -151,6 +157,7 @@ impl Default for CellStyle {
             bold: false,
             underline: false,
             line_through: false,
+            decoration_none: false,
             border: None,
             overflow: None,
             font_size: None,
@@ -385,12 +392,14 @@ fn finish(dom: crate::dom::Dom) -> Document {
 
     // Build the flow box tree, with any `<table>` embedded as a `Table` box.
     let fonts = std::cell::RefCell::new(FontInterner::new());
+    let links = std::cell::RefCell::new(LinkInterner::new());
     let env = FlowEnv {
         stylesheet: &stylesheet,
         computed: &computed,
         table_columns: &table_columns,
         row_height: table_style.row_height,
         fonts: &fonts,
+        links: &links,
     };
     let flow = build_flow(&dom, &env);
 
@@ -423,6 +432,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
         table_columns,
         images: Vec::new(),
         font_specs: fonts.into_specs(),
+        links: links.into_inner().into_targets(),
     }
 }
 
@@ -508,6 +518,41 @@ impl FontInterner {
     }
 }
 
+/// Interns `<a href>` targets seen while building the box tree. Runs store a
+/// 1-based `u16` index (0 = not a link); the target list lands on the document
+/// and is carried into `RenderOptions` for the PDF writer.
+pub(crate) struct LinkInterner {
+    targets: Vec<String>,
+    map: std::collections::HashMap<String, u16>,
+}
+
+impl LinkInterner {
+    fn new() -> Self {
+        Self {
+            targets: Vec::new(),
+            map: std::collections::HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, target: &str) -> u16 {
+        if let Some(&index) = self.map.get(target) {
+            return index;
+        }
+        // 1-based; saturate (drop to "no link") past the u16 range.
+        if self.targets.len() >= u16::MAX as usize - 1 {
+            return 0;
+        }
+        self.targets.push(target.to_string());
+        let index = self.targets.len() as u16;
+        self.map.insert(target.to_string(), index);
+        index
+    }
+
+    fn into_targets(self) -> Vec<String> {
+        self.targets
+    }
+}
+
 /// Shared context threaded through the flow builder: the parsed stylesheet and
 /// computed styles (for table-section resolution) plus the document-level table
 /// geometry that embedded `Table` boxes inherit, and the font interner.
@@ -517,6 +562,7 @@ struct FlowEnv<'a> {
     table_columns: &'a [f32],
     row_height: Option<f32>,
     fonts: &'a std::cell::RefCell<FontInterner>,
+    links: &'a std::cell::RefCell<LinkInterner>,
 }
 
 /// Lower the DOM into the flow box tree (ADR 0002 step 8) for non-table
@@ -536,6 +582,7 @@ fn build_flow(dom: &crate::dom::Dom, env: &FlowEnv) -> Option<crate::box_tree::F
         line_through: false,
         color: Color::BLACK,
         align: TextAlign::Left,
+        link: 0,
     };
     let mut acc = ChildAcc::default();
     build_node(dom, dom.root(), env, root_ctx, &mut acc);
@@ -622,6 +669,8 @@ struct FlowCtx {
     line_through: bool,
     color: Color,
     align: TextAlign,
+    /// Interned link target the content sits inside (0 = none).
+    link: u16,
 }
 
 /// Accumulates one block's children, buffering inline text into a pending line
@@ -646,6 +695,7 @@ impl ChildAcc {
                 && last.underline == ctx.underline
                 && last.line_through == ctx.line_through
                 && last.color == ctx.color
+                && last.link == ctx.link
             {
                 last.text.push_str(text);
                 return;
@@ -656,6 +706,7 @@ impl ChildAcc {
             font_size: ctx.font_size,
             bold: ctx.bold,
             font: ctx.font,
+            link: ctx.link,
             underline: ctx.underline,
             line_through: ctx.line_through,
             color: ctx.color,
@@ -758,7 +809,7 @@ fn build_node(
             } else {
                 // Inline element: fold its computed style into the context and
                 // let its children contribute to the enclosing line.
-                let child_ctx = inline_ctx(&ctx, env, id, tag);
+                let child_ctx = inline_ctx(&ctx, env, dom, id, tag);
                 for &child in &node.children {
                     build_node(dom, child, env, child_ctx, acc);
                 }
@@ -837,6 +888,7 @@ fn build_block(
         line_through: parent.line_through || own.line_through,
         color,
         align,
+        link: parent.link,
     };
 
     let mut acc = ChildAcc::default();
@@ -913,6 +965,11 @@ fn build_block(
         offset_right: own.offset_right,
         offset_bottom: own.offset_bottom,
         offset_left: own.offset_left,
+        anchor: dom
+            .node(id)
+            .attr("id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         children: acc.children,
     })
 }
@@ -921,8 +978,25 @@ fn build_block(
 /// alignment is unaffected; `<b>`/`<strong>` force bold, `<i>`/`<em>` (and
 /// citation-family tags) force italic, and `<code>`-family tags default to
 /// monospace, even without a rule (there is no UA stylesheet).
-fn inline_ctx(parent: &FlowCtx, env: &FlowEnv, id: crate::dom::NodeId, tag: &str) -> FlowCtx {
+fn inline_ctx(
+    parent: &FlowCtx,
+    env: &FlowEnv,
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    tag: &str,
+) -> FlowCtx {
     let own = &env.computed.style[id];
+    // An `<a href>` interns its target and gets the UA link style (blue,
+    // underlined) unless the author overrides color / opts out of decoration.
+    let href = if tag == "a" {
+        dom.node(id).attr("href").filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let link = match href {
+        Some(target) => env.links.borrow_mut().intern(target),
+        None => parent.link,
+    };
     let bold = parent.bold || own.bold || matches!(tag, "b" | "strong");
     let italic = own
         .italic
@@ -941,12 +1015,23 @@ fn inline_ctx(parent: &FlowCtx, env: &FlowEnv, id: crate::dom::NodeId, tag: &str
         italic,
         family,
         font,
-        underline: parent.underline || own.underline || matches!(tag, "u" | "ins"),
+        underline: parent.underline
+            || own.underline
+            || matches!(tag, "u" | "ins")
+            || (href.is_some() && !own.decoration_none),
         line_through: parent.line_through || own.line_through || matches!(tag, "s" | "strike" | "del"),
-        color: own.color.unwrap_or(parent.color),
+        color: own.color.unwrap_or(if href.is_some() { LINK_COLOR } else { parent.color }),
         align: parent.align,
+        link,
     }
 }
+
+/// The UA default link color (`#0000EE`, matching browser stylesheets).
+const LINK_COLOR: Color = Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.93,
+};
 
 /// The list marker for an `<li>`: a bullet for `<ul>` (or a bare item), or a
 /// 1-based number for `<ol>`.
@@ -1544,6 +1629,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         // Text decoration propagates to descendant inline content (see field docs).
         underline: own.underline || parent.underline,
         line_through: own.line_through || parent.line_through,
+        decoration_none: own.decoration_none,
         // Non-inheritable: the element's own value only.
         vertical_align: own.vertical_align,
         border: own.border,
@@ -3279,6 +3365,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             if v.contains("none") {
                 target.cell.underline = false;
                 target.cell.line_through = false;
+                target.cell.decoration_none = true;
             } else {
                 if v.contains("underline") {
                     target.cell.underline = true;
@@ -3583,6 +3670,7 @@ impl CellStyle {
         self.bold |= other.bold;
         self.underline |= other.underline;
         self.line_through |= other.line_through;
+        self.decoration_none |= other.decoration_none;
         self.border = other.border.or(self.border);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
@@ -3743,6 +3831,51 @@ mod tests {
         assert!(find("under").underline && !find("under").line_through);
         assert!(find("struck").line_through && !find("struck").underline);
         assert!(find("both").underline && find("both").line_through);
+    }
+
+    #[test]
+    fn anchor_hrefs_intern_links_and_get_ua_link_style() {
+        let document = parse(
+            "<p>go <a href=\"https://x.test/a\">there now</a> and \
+             <a href=\"https://x.test/a\">again</a> or \
+             <a href=\"#frag\" style=\"text-decoration: none\">quietly</a> or \
+             <a href=\"https://x.test/b\" style=\"color: #ff0000\">redly</a></p>\
+             <h2 id=\"frag\">Target</h2>",
+        );
+        // Duplicate hrefs intern once; document order is preserved.
+        assert_eq!(
+            document.links,
+            vec!["https://x.test/a".to_string(), "#frag".to_string(), "https://x.test/b".to_string()]
+        );
+
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let runs = match &blocks[0].children[0] {
+            BoxChild::Line(runs) => runs,
+            _ => panic!("expected an inline line"),
+        };
+        let find = |needle: &str| runs.iter().find(|r| r.text.contains(needle)).unwrap();
+
+        // Plain text is not a link; linked text points at the interned target
+        // and gets the UA style (blue + underline).
+        assert_eq!(find("go").link, 0);
+        let there = find("there");
+        assert_eq!(there.link, 1);
+        assert!(there.underline);
+        assert!(there.color.b > 0.5 && there.color.r == 0.0);
+        assert_eq!(find("again").link, 1);
+        // `text-decoration: none` keeps the link but drops the underline.
+        let quiet = find("quietly");
+        assert_eq!(quiet.link, 2);
+        assert!(!quiet.underline);
+        // An author color wins over the UA blue.
+        let red = find("redly");
+        assert_eq!(red.link, 3);
+        assert!(red.color.r > 0.9 && red.color.b == 0.0);
+
+        // The h2 keeps its id as an anchor for the #frag destination.
+        let target = blocks.iter().find(|b| b.kind == BlockKind::Heading2).unwrap();
+        assert_eq!(target.anchor.as_deref(), Some("frag"));
     }
 
     #[test]

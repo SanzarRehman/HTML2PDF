@@ -292,6 +292,11 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Non-ASCII text: WinAnsi/CP1252 characters render with the built-in Helvetica;
   with an embedded font (`--font`) **any Unicode** renders (Latin, CJK, …) via a
   Type0/Identity-H composite + ToUnicode CMap, and stays selectable/searchable.
+- **Clickable links + document outline** — `<a href>` becomes a `/Link`
+  annotation (URI actions, `mailto:`, in-document `#fragment` jumps to `id`
+  anchors) with UA styling (blue + underline; author color and
+  `text-decoration: none` respected); headings (`h1`–`h6`) build the PDF
+  bookmark tree, nested by level.
 - Pagination, landscape, page margins, PDF compression, selectable text.
 - **Font embedding** — `--font <path|family>` embeds a TrueType/OpenType font
   (real metrics via ttf-parser, family lookup via fontdb) as a Type0/Identity-H
@@ -318,7 +323,7 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   a true font-metric baseline model (0.8 em ascent approximation today).
 - `flex-wrap`, grid line-based placement/`minmax()`, stacking contexts
   (`z-index` compares globally; positioned content always paints above flow).
-- Clickable link annotations, bookmarks/outline, tagged PDF.
+- Links inside table cells (cell text is flattened); tagged PDF.
 - `@font-face` web fonts; emoji; `dir="rtl"` base paragraphs; `%` heights/
   margins/offsets; `calc()`/custom properties.
 - Broader **JavaScript**: DOM traversal from JS, `querySelector`, events,

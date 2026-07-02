@@ -891,10 +891,23 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       (19 total). **Not yet done:** `%` heights/margins/padding/offsets,
       `min-width`, `max-height`, `height` on blocks, and `auto` margins
       combined with a single `auto` side (off-center distribution).
-- [ ] **Link annotations + outline**: `<a href>` → PDF `/Annots` link
-      rectangles (external URLs and `#anchor` → internal GoTo), and a document
-      outline (bookmarks) from `h1`–`h3`. Pure pdf.rs additions; the display
-      list needs a link-region command.
+- [x] **Link annotations + outline**: `<a href>` targets are interned on the
+      document (`Document::links`, 1-based `u16` on `InlineRun`/`LinePiece`)
+      and each laid-out link piece records a `LinkArea` on its `Page`
+      (abutting same-link pieces merge into one rect per line); pdf.rs turns
+      them into `/Annots` — URI actions for external targets and `mailto:`,
+      `/Dest [page /XYZ]` for `#fragment` links resolved against `id` anchors
+      (`BlockBox::anchor` → `AnchorMark`; dead fragments annotate nothing).
+      Headings (`h1`–`h6`) record level + first-line title and become the
+      `/Outlines` tree (nesting under the closest shallower level; UTF-16BE
+      titles for non-ASCII). UA link style: blue `#0000EE` + underline, author
+      `color` overrides, `text-decoration: none` opts out (new
+      `decoration_none` flag distinguishes explicit none from unset). Spaces
+      between words now carry decoration/link only when *both* neighbors share
+      it (no more underline bleeding one space before a link). `features/links`
+      parity fixture (20 total). **Not yet done:** links inside table cells
+      (cell text is flattened to a `String`), `<a name>` legacy anchors, ids
+      on inline elements (block-level only), `PageMode /UseOutlines`.
 - [ ] **Finish flexbox** *(phase 2 shipped — see below)*: remaining gaps are
       `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, column-direction
       main-axis sizing (height grow/justify), and flex rows spanning a page break.
