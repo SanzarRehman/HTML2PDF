@@ -321,8 +321,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   uniform box today), and `box-sizing`.
 - Inline (text-flowed) images, `object-fit`, and remote (`http`) image URLs;
   a true font-metric baseline model (0.8 em ascent approximation today).
-- `flex-wrap`, grid line-based placement/`minmax()`, stacking contexts
-  (`z-index` compares globally; positioned content always paints above flow).
+- Stacking contexts (`z-index` compares globally; positioned content always
+  paints above flow); `flex-shrink`/`order`/`align-self`; grid named
+  lines/areas and `grid-template-rows`.
 - Links inside table cells (cell text is flattened); tagged PDF.
 - `@font-face` web fonts; emoji; `dir="rtl"` base paragraphs; `%` heights/
   margins/offsets; `calc()`/custom properties.

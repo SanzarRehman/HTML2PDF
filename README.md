@@ -91,11 +91,13 @@ Works today:
 - Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
   alignment, wrapping, clipping, and repeated table headers.
 - CSS colors, font sizes, bold text (rendered as faux-bold fill+stroke), text
-  alignment, text decoration (underline/line-through), margins, padding (with
-  vertical margin collapse), `line-height`, block backgrounds, and basic borders.
+  alignment (including `text-align: justify`), text decoration
+  (underline/line-through), margins, padding (with vertical margin collapse),
+  `line-height`, block backgrounds, and basic borders.
 - Modern layout, first pass each: **flexbox** (`display: flex` — grow/basis,
-  `justify-content`, `align-items`, gaps, row and column), **grid**
-  (`display: grid` — fixed/`fr`/`auto`/`repeat()` tracks, `span`, gaps),
+  `flex-wrap`, `justify-content`, `align-items`, gaps, row and column), **grid**
+  (`display: grid` — fixed/`fr`/`auto`/`repeat()`/`minmax()` tracks, `span N`
+  and line-based `grid-column: A / B` placement, gaps),
   **floats** with real text wrap (`float: left/right`, `clear`, stacked floats),
   and **positioning** (`position: relative/absolute` with box offsets, CSS
   `width` on in-flow blocks).
@@ -144,9 +146,9 @@ Not complete yet:
   and mid-script layout reads (rejected by design — ADR 0009).
 - Inline/floated images, `object-fit`, and remote (`http`) image URLs; SVG and
   canvas.
-- `flex-wrap`, grid line-based placement/`minmax()`, stacking contexts
-  (`z-index` works, but compares globally and positioned content always paints
-  above the flow).
+- Stacking contexts (`z-index` works, but compares globally and positioned
+  content always paints above the flow); `flex-shrink`/`order`/`align-self`;
+  grid named lines/areas and `grid-template-rows`.
 - `@font-face` web fonts; synthetic italic when no italic face exists; emoji
   (color fonts can't embed as outlines); `dir="rtl"` / `direction: rtl` base
   paragraphs.
@@ -343,11 +345,10 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- Deepen flexbox (`flex-wrap`) and grid (line-based placement, `minmax()`).
 - Broaden CSS properties and computed-value coverage (`%` heights/margins,
   `min-width`, `calc()`, custom properties).
 - Broaden image support (inline/floated images, remote URLs) and add SVG.
-- `text-align: justify`; `dir="rtl"` base paragraphs.
+- `dir="rtl"` base paragraphs; stacking contexts.
 - Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
 - Harden the HTTP server for production deployment patterns.
 

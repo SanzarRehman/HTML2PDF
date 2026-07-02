@@ -1,0 +1,27 @@
+<html><head><style>
+  .cards { display: flex; flex-wrap: wrap; gap: 10pt; }
+  .card { flex-basis: 150pt; background: #e8eef7; padding: 8pt; }
+  .grid { display: grid; grid-template-columns: 100pt minmax(120pt, 1fr) 2fr; gap: 8pt; }
+  .cell { background: #efe8f7; padding: 6pt; }
+  .header { grid-column: 1 / -1; background: #d0e0d0; padding: 6pt; }
+  .wide { grid-column: 2 / 4; background: #f7ecd8; padding: 6pt; }
+  .just { text-align: justify; }
+</style></head><body>
+<h2>Flex wrap</h2>
+<div class="cards">
+  <div class="card">Card one</div><div class="card">Card two</div>
+  <div class="card">Card three</div><div class="card">Card four</div>
+  <div class="card">Card five</div><div class="card">Card six</div>
+</div>
+<h2>Grid lines + minmax</h2>
+<div class="grid">
+  <div class="header">Full-width header (1 / -1)</div>
+  <div class="cell">A</div><div class="cell">B minmax</div><div class="cell">C 2fr</div>
+  <div class="wide">Wide cell (2 / 4)</div>
+</div>
+<h2>Justify</h2>
+<p class="just">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
+incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation
+ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit
+in voluptate velit esse cillum dolore eu fugiat nulla pariatur. The last line stays ragged.</p>
+</body></html>

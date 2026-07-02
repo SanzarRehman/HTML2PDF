@@ -1,0 +1,18 @@
+{
+  "fixture": "flex-wrap",
+  "layer": "features",
+  "description": "flex-wrap: wrap (items break onto flex lines), grid line-based placement (grid-column: 1 / -1 and 2 / 4) with minmax() tracks, and text-align: justify (inter-word spaces stretch on every line but the paragraph's last).",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "re", "f"],
+    "must_contain_text": ["Card", "six", "header", "Wide", "minmax", "ragged"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Six 150pt cards wrap into two flex lines of three, separated by the gap.",
+    "The grid header spans all three tracks (1 / -1); the wide cell spans tracks 2-3.",
+    "The minmax(120pt, 1fr) track is at least 120pt wide; the 2fr track is twice the 1fr share.",
+    "The justified paragraph's lines end flush at the right margin except the last."
+  ]
+}

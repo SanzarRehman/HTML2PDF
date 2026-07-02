@@ -113,6 +113,10 @@ pub struct BlockBox {
     pub grid: Option<GridContainer>,
     /// `grid-column: span N` when this block is a grid item (1 = one track).
     pub grid_span: usize,
+    /// Line-based `grid-column: start / end` (1-based; negative from the end),
+    /// resolved against the track count at layout time.
+    pub grid_col_start: Option<i32>,
+    pub grid_col_end: Option<i32>,
     /// CSS `float`: the block is taken out of normal flow and placed at the
     /// left/right edge; following line boxes shorten around it.
     pub float_dir: Option<FloatDir>,
@@ -151,6 +155,8 @@ pub struct FlexContainer {
     pub justify: JustifyContent,
     pub align: AlignItems,
     pub gap: f32,
+    /// `flex-wrap: wrap` — items break onto additional flex lines.
+    pub wrap: bool,
 }
 
 /// Grid container parameters resolved from the cascade. An empty `columns`

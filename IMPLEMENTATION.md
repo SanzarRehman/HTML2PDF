@@ -908,14 +908,29 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       parity fixture (20 total). **Not yet done:** links inside table cells
       (cell text is flattened to a `String`), `<a name>` legacy anchors, ids
       on inline elements (block-level only), `PageMode /UseOutlines`.
-- [ ] **Finish flexbox** *(phase 2 shipped — see below)*: remaining gaps are
-      `flex-wrap`, explicit `flex-shrink`/`order`, `align-self`, column-direction
-      main-axis sizing (height grow/justify), and flex rows spanning a page break.
-- [ ] **Grid, phase 2**: line-based placement (`grid-column: 1 / 3`),
-      `minmax()`, `grid-template-rows`, cell alignment.
-- [ ] **`text-align: justify`** — the LineBreaker already builds lines one at
-      a time; justification is distributing the slack into word-space TJ
-      adjustments (flow) once a line is known not to be the paragraph's last.
+- [x] **`flex-wrap: wrap`** (+ the `flex-flow` shorthand): `layout_flex_box`
+      partitions items into flex lines greedily by base size, then the
+      extracted `layout_flex_line` runs the existing grow/shrink/justify/align
+      algorithm per line; `gap` doubles as the cross-axis gap between lines.
+      **Not yet done:** `wrap-reverse`, `align-content` (line distribution),
+      explicit `flex-shrink`/`order`/`align-self`, column-direction main-axis
+      sizing, flex rows spanning a page break.
+- [x] **Grid, phase 2 (partial)**: `minmax(min, max)` tracks (`MinTrack`
+      pt/auto floors × `MaxTrack` pt/fr/auto ceilings; a `minmax(min, fr)`
+      whose floor exceeds its fr share is pinned and the pool redistributes
+      iteratively) and **line-based `grid-column: A / B`** with negative lines
+      (`1 / -1` spans the row; an explicit start pins the column, wrapping to
+      the next row when the cursor is already past it; an end line overrides
+      the span). Track parsing is now paren-aware (`minmax` inside `repeat`
+      works). **Not yet done:** named lines/areas, `grid-template-rows`,
+      dense packing, collision-aware placement, cell alignment.
+- [x] **`text-align: justify`**: a new `TextAlign::Justify` variant; the line
+      painter stretches the width of inter-word space pieces by the line's
+      slack (skipping the paragraph's last line — `LineBreaker::is_done` —
+      and lines without spaces). Underlines/links widen with their spaces.
+      Table cells treat justify as left. **Not yet done:** justification via
+      per-glyph `TJ`/`Tw` adjustments (spaces only today), `text-justify`,
+      justified table cells.
 - [ ] **`dir="rtl"` / `direction: rtl`**: RTL base paragraphs (bidi core is
       in; this is plumbing the base level + right alignment default).
 - [ ] **Remote `http(s)` images** (opt-in flag, size/time caps, server-safe

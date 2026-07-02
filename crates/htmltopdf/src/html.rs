@@ -127,6 +127,8 @@ pub struct CellStyle {
     pub flex_grow: Option<f32>,
     /// `flex-basis` in points; `None` = `auto` (use the item's content size).
     pub flex_basis: Option<f32>,
+    /// `flex-wrap: wrap` (or a wrapping `flex-flow`) on a flex container.
+    pub flex_wrap: Option<bool>,
     /// `display: grid` — this element establishes a grid container.
     pub display_grid: bool,
     /// `grid-template-columns` track list (`None` = single auto column).
@@ -135,6 +137,10 @@ pub struct CellStyle {
     pub row_gap: Option<f32>,
     /// `grid-column: span N` on a grid item.
     pub grid_span: Option<usize>,
+    /// Line-based `grid-column: start [/ end]` (1-based; negative counts from
+    /// the end, so `1 / -1` spans the full row).
+    pub grid_col_start: Option<i32>,
+    pub grid_col_end: Option<i32>,
     /// CSS `float` (left/right); `None` = not floated.
     pub float_dir: Option<FloatDir>,
     /// CSS `clear`.
@@ -191,10 +197,13 @@ impl Default for CellStyle {
             gap: None,
             flex_grow: None,
             flex_basis: None,
+            flex_wrap: None,
             display_grid: false,
             grid_template: None,
             row_gap: None,
             grid_span: None,
+            grid_col_start: None,
+            grid_col_end: None,
             float_dir: None,
             clear: None,
             position: None,
@@ -225,6 +234,9 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+    /// `text-align: justify` — inter-word spaces stretch so every line but the
+    /// paragraph's last fills the measure.
+    Justify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +304,25 @@ pub enum Clear {
 /// fraction of the free space (`fr`), or content-sized (`auto`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridTrack {
+    Pt(f32),
+    Fr(f32),
+    Auto,
+    /// `minmax(min, max)`: the track is at least `min` (points, or content
+    /// size for `auto`) and grows toward `max` (points, an `fr` share, or
+    /// content size).
+    MinMax(MinTrack, MaxTrack),
+}
+
+/// The `min` component of `minmax()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MinTrack {
+    Pt(f32),
+    Auto,
+}
+
+/// The `max` component of `minmax()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MaxTrack {
     Pt(f32),
     Fr(f32),
     Auto,
@@ -933,6 +964,7 @@ fn build_block(
         justify: own.justify_content.unwrap_or(JustifyContent::FlexStart),
         align: own.align_items.unwrap_or(AlignItems::Stretch),
         gap: own.gap.unwrap_or(0.0),
+        wrap: own.flex_wrap.unwrap_or(false),
     });
     let grid = own.display_grid.then(|| crate::box_tree::GridContainer {
         columns: own.grid_template.clone().unwrap_or_default(),
@@ -951,6 +983,8 @@ fn build_block(
         flex_basis: own.flex_basis,
         grid,
         grid_span: own.grid_span.unwrap_or(1),
+        grid_col_start: own.grid_col_start,
+        grid_col_end: own.grid_col_end,
         float_dir: own.float_dir,
         clear: own.clear,
         css_width: own.width,
@@ -1658,10 +1692,13 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         gap: own.gap,
         flex_grow: own.flex_grow,
         flex_basis: own.flex_basis,
+        flex_wrap: own.flex_wrap,
         display_grid: own.display_grid,
         grid_template: own.grid_template.clone(),
         row_gap: own.row_gap,
         grid_span: own.grid_span,
+        grid_col_start: own.grid_col_start,
+        grid_col_end: own.grid_col_end,
         float_dir: own.float_dir,
         clear: own.clear,
         position: own.position,
@@ -3177,37 +3214,76 @@ fn parse_grid_tracks(value: &str) -> Vec<GridTrack> {
         if token.eq_ignore_ascii_case("auto") {
             return Some(GridTrack::Auto);
         }
+        if let Some(inner) = token
+            .strip_prefix("minmax(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            let (min, max) = inner.split_once(',')?;
+            let min = match min.trim() {
+                m if m.eq_ignore_ascii_case("auto") || m.eq_ignore_ascii_case("min-content") => {
+                    MinTrack::Auto
+                }
+                m => MinTrack::Pt(parse_css_length(m)?),
+            };
+            let max = match max.trim() {
+                m if m.eq_ignore_ascii_case("auto") || m.eq_ignore_ascii_case("max-content") => {
+                    MaxTrack::Auto
+                }
+                m => match m.strip_suffix("fr") {
+                    Some(fr) => MaxTrack::Fr(fr.trim().parse::<f32>().ok()?),
+                    None => MaxTrack::Pt(parse_css_length(m)?),
+                },
+            };
+            return Some(GridTrack::MinMax(min, max));
+        }
         if let Some(fr) = token.strip_suffix("fr") {
             return fr.trim().parse::<f32>().ok().map(GridTrack::Fr);
         }
         parse_css_length(token).map(GridTrack::Pt)
     }
 
+    // Split into function-aware tokens: whitespace separates tracks, but
+    // whitespace inside `repeat(...)` / `minmax(...)` stays in the token.
+    fn split_tokens(value: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let (mut depth, mut start) = (0usize, None::<usize>);
+        for (index, ch) in value.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                c if c.is_whitespace() && depth == 0 => {
+                    if let Some(s) = start.take() {
+                        out.push(&value[s..index]);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            start.get_or_insert(index);
+        }
+        if let Some(s) = start {
+            out.push(&value[s..]);
+        }
+        out
+    }
+
     let mut out = Vec::new();
-    let mut rest = value.trim();
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        if let Some(after) = rest.strip_prefix("repeat(") {
-            let Some(close) = after.find(')') else { break };
-            let inner = &after[..close];
+    for token in split_tokens(value.trim()) {
+        if let Some(inner) = token
+            .strip_prefix("repeat(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
             if let Some((count, tracks)) = inner.split_once(',') {
                 if let Ok(count) = count.trim().parse::<usize>() {
-                    let unit: Vec<GridTrack> = tracks
-                        .split_whitespace()
-                        .filter_map(parse_token)
-                        .collect();
+                    let unit: Vec<GridTrack> =
+                        split_tokens(tracks).into_iter().filter_map(parse_token).collect();
                     for _ in 0..count.min(100) {
                         out.extend(unit.iter().copied());
                     }
                 }
             }
-            rest = &after[close + 1..];
-        } else {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            if let Some(track) = parse_token(&rest[..end]) {
-                out.push(track);
-            }
-            rest = &rest[end..];
+        } else if let Some(track) = parse_token(token) {
+            out.push(track);
         }
     }
     out
@@ -3235,6 +3311,25 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 "column" | "column-reverse" => Some(FlexDirection::Column),
                 _ => Some(FlexDirection::Row),
             };
+        }
+        "flex-wrap" => {
+            let v = value.trim().to_ascii_lowercase();
+            target.cell.flex_wrap = Some(v == "wrap" || v == "wrap-reverse");
+        }
+        "flex-flow" => {
+            // Shorthand: any order of a direction keyword and a wrap keyword.
+            let v = value.to_ascii_lowercase();
+            for word in v.split_whitespace() {
+                match word {
+                    "column" | "column-reverse" => {
+                        target.cell.flex_direction = Some(FlexDirection::Column)
+                    }
+                    "row" | "row-reverse" => target.cell.flex_direction = Some(FlexDirection::Row),
+                    "wrap" | "wrap-reverse" => target.cell.flex_wrap = Some(true),
+                    "nowrap" => target.cell.flex_wrap = Some(false),
+                    _ => {}
+                }
+            }
         }
         "justify-content" => {
             target.cell.justify_content = match value.to_ascii_lowercase().as_str() {
@@ -3317,11 +3412,27 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             };
         }
         "grid-column" => {
-            // Only the `span N` form is supported; line-based placement is not.
+            // `span N`, `A`, `A / B`, `A / span N`, `A / -1` (negative lines
+            // count from the end). Named lines and `dense` are not supported.
             let v = value.trim().to_ascii_lowercase();
-            if let Some(rest) = v.strip_prefix("span") {
+            let (start, end) = match v.split_once('/') {
+                Some((a, b)) => (a.trim(), Some(b.trim())),
+                None => (v.as_str(), None),
+            };
+            if let Some(rest) = start.strip_prefix("span") {
                 if let Ok(n) = rest.trim().parse::<usize>() {
                     target.cell.grid_span = Some(n.max(1));
+                }
+            } else if let Ok(line) = start.parse::<i32>() {
+                target.cell.grid_col_start = Some(line);
+            }
+            if let Some(end) = end {
+                if let Some(rest) = end.strip_prefix("span") {
+                    if let Ok(n) = rest.trim().parse::<usize>() {
+                        target.cell.grid_span = Some(n.max(1));
+                    }
+                } else if let Ok(line) = end.parse::<i32>() {
+                    target.cell.grid_col_end = Some(line);
                 }
             }
         }
@@ -3335,12 +3446,12 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         }
         "flex" => apply_flex_shorthand(target, value),
         "text-align" => {
-            // `justify` maps to left until real justification exists; `start`/
-            // `end` assume left-to-right text.
+            // `start`/`end` assume left-to-right text.
             target.cell.align = match value.to_ascii_lowercase().as_str() {
                 "right" | "end" => Some(TextAlign::Right),
                 "center" => Some(TextAlign::Center),
-                "left" | "start" | "justify" => Some(TextAlign::Left),
+                "justify" => Some(TextAlign::Justify),
+                "left" | "start" => Some(TextAlign::Left),
                 _ => target.cell.align,
             };
         }
@@ -3704,10 +3815,13 @@ impl CellStyle {
         self.gap = other.gap.or(self.gap);
         self.flex_grow = other.flex_grow.or(self.flex_grow);
         self.flex_basis = other.flex_basis.or(self.flex_basis);
+        self.flex_wrap = other.flex_wrap.or(self.flex_wrap);
         self.display_grid |= other.display_grid;
         self.grid_template = other.grid_template.or(self.grid_template.take());
         self.row_gap = other.row_gap.or(self.row_gap);
         self.grid_span = other.grid_span.or(self.grid_span);
+        self.grid_col_start = other.grid_col_start.or(self.grid_col_start);
+        self.grid_col_end = other.grid_col_end.or(self.grid_col_end);
         self.float_dir = other.float_dir.or(self.float_dir);
         self.clear = other.clear.or(self.clear);
         self.position = other.position.or(self.position);
@@ -3879,6 +3993,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_flex_wrap_and_grid_column_lines() {
+        let document = parse(
+            "<style>\
+             .w { display: flex; flex-wrap: wrap; }\
+             .f { display: flex; flex-flow: row wrap; }\
+             .g { display: grid; grid-template-columns: 1fr 1fr 1fr; }\
+             .full { grid-column: 1 / -1; }\
+             .mid { grid-column: 2 / 4; }\
+             .sp { grid-column: span 2; }\
+             </style>\
+             <div class=\"w\"><span>a</span></div>\
+             <div class=\"f\"><span>b</span></div>\
+             <div class=\"g\">\
+               <div class=\"full\">header</div>\
+               <div class=\"mid\">mid</div>\
+               <div class=\"sp\">spanner</div>\
+             </div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+
+        let wrap_boxes: Vec<bool> = blocks
+            .iter()
+            .filter_map(|b| b.flex.as_ref().map(|f| f.wrap))
+            .collect();
+        assert_eq!(wrap_boxes, vec![true, true], "flex-wrap and flex-flow both wrap");
+
+        let full = blocks.iter().find(|b| block_text(b) == "header").unwrap();
+        assert_eq!((full.grid_col_start, full.grid_col_end), (Some(1), Some(-1)));
+        let mid = blocks.iter().find(|b| block_text(b) == "mid").unwrap();
+        assert_eq!((mid.grid_col_start, mid.grid_col_end), (Some(2), Some(4)));
+        let sp = blocks.iter().find(|b| block_text(b) == "spanner").unwrap();
+        assert_eq!(sp.grid_span, 2);
+        assert_eq!(sp.grid_col_start, None);
+    }
+
+    #[test]
     fn parses_grid_template_columns() {
         use super::{parse_grid_tracks, GridTrack};
         assert_eq!(
@@ -3886,6 +4037,22 @@ mod tests {
             vec![GridTrack::Pt(120.0), GridTrack::Auto, GridTrack::Fr(1.0)]
         );
         assert_eq!(parse_grid_tracks("repeat(3, 1fr)"), vec![GridTrack::Fr(1.0); 3]);
+        // minmax(): point/auto floors with point/fr/auto ceilings, including
+        // inside repeat() (the tokenizer keeps the inner comma+space intact).
+        {
+            use super::{MaxTrack, MinTrack};
+            assert_eq!(
+                parse_grid_tracks("minmax(120pt, 1fr) minmax(auto, 200pt)"),
+                vec![
+                    GridTrack::MinMax(MinTrack::Pt(120.0), MaxTrack::Fr(1.0)),
+                    GridTrack::MinMax(MinTrack::Auto, MaxTrack::Pt(200.0)),
+                ]
+            );
+            assert_eq!(
+                parse_grid_tracks("repeat(2, minmax(50pt, 1fr))"),
+                vec![GridTrack::MinMax(MinTrack::Pt(50.0), MaxTrack::Fr(1.0)); 2]
+            );
+        }
         assert_eq!(
             parse_grid_tracks("repeat(2, 50pt 2fr) auto"),
             vec![
@@ -4596,7 +4763,7 @@ mod tests {
         let cells = &document.blocks[0].cells;
 
         assert!(cells[0].style.bold, "font-weight:800 should be bold");
-        assert_eq!(cells[1].style.align, Some(super::TextAlign::Left)); // justify -> left
+        assert_eq!(cells[1].style.align, Some(super::TextAlign::Justify));
         assert_eq!(cells[2].style.align, Some(super::TextAlign::Right)); // end -> right
     }
 

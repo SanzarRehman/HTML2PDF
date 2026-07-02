@@ -854,7 +854,7 @@ fn layout_flex_box(
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
-    use crate::html::{AlignItems, FlexDirection};
+    use crate::html::FlexDirection;
 
     // Flex items: block children are items; contiguous inline content (a `Line`)
     // becomes an anonymous item. Images/tables inside a flex row are still
@@ -887,11 +887,70 @@ fn layout_flex_box(
         return;
     }
 
+    // `flex-wrap: wrap` partitions the items into flex lines greedily by base
+    // size; without it every item shares the single line (shrinking to fit).
+    let lines: Vec<std::ops::Range<usize>> = if flex.wrap {
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        let mut used = 0.0f32;
+        for (index, item) in items.iter().enumerate() {
+            let base = item.basis(options).clamp(0.0, inner_width);
+            let lead_gap = if index > start { gap } else { 0.0 };
+            if index > start && used + lead_gap + base > inner_width + WRAP_TOLERANCE {
+                lines.push(start..index);
+                start = index;
+                used = base;
+            } else {
+                used += lead_gap + base;
+            }
+        }
+        lines.push(start..items.len());
+        lines
+    } else {
+        vec![0..items.len()]
+    };
+
+    for (line_index, range) in lines.iter().enumerate() {
+        if line_index > 0 {
+            *y -= gap; // cross-axis gap between flex lines
+        }
+        layout_flex_line(
+            &items[range.clone()],
+            flex,
+            inner_x,
+            inner_width,
+            pages,
+            y,
+            overlays,
+            containing,
+            options,
+        );
+    }
+}
+
+/// Lay out one flex line (the whole container when not wrapping): distribute
+/// the main axis by flex-grow / proportional shrink, apply `justify-content`
+/// and `align-items` within the line, and advance `y` past its tallest item.
+#[allow(clippy::too_many_arguments)]
+fn layout_flex_line(
+    items: &[FlexItem],
+    flex: &crate::box_tree::FlexContainer,
+    inner_x: f32,
+    inner_width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    overlays: &mut Vec<Overlay>,
+    containing: Option<ContainingBlock>,
+    options: &RenderOptions,
+) {
+    use crate::html::AlignItems;
+
+    let gap = flex.gap;
     let total_gap = gap * (items.len() as f32 - 1.0).max(0.0);
     let avail = (inner_width - total_gap).max(0.0);
 
     // Base main size per item: flex-basis, else content max-content, clamped to
-    // the row's available width.
+    // the line's available width.
     let bases: Vec<f32> = items
         .iter()
         .map(|item| item.basis(options).clamp(0.0, avail))
@@ -905,11 +964,11 @@ fn layout_flex_box(
         // Distribute free space by flex-grow.
         bases
             .iter()
-            .zip(&items)
+            .zip(items)
             .map(|(base, item)| base + free * (item.grow() / total_grow))
             .collect()
     } else if free < 0.0 && total_base > 0.0 {
-        // Overflow: shrink every item proportionally to its base so the row fits.
+        // Overflow: shrink every item proportionally to its base so the line fits.
         let scale = avail / total_base;
         bases.iter().map(|base| base * scale).collect()
     } else {
@@ -1050,13 +1109,18 @@ fn layout_grid_box(
     use crate::box_tree::BoxChild;
     use crate::html::GridTrack;
 
-    // Grid items, with their column span. Anonymous inline content spans 1.
-    let items: Vec<(FlexItem, usize)> = block
+    use crate::html::{MaxTrack, MinTrack};
+
+    // Grid items with their column span and any line-based `grid-column`
+    // placement. Anonymous inline content spans 1, auto-placed.
+    let items: Vec<(FlexItem, usize, Option<i32>, Option<i32>)> = block
         .children
         .iter()
         .filter_map(|child| match child {
-            BoxChild::Block(b) => Some((FlexItem::Block(b), b.grid_span.max(1))),
-            BoxChild::Line(runs) => Some((FlexItem::Line(runs), 1)),
+            BoxChild::Block(b) => {
+                Some((FlexItem::Block(b), b.grid_span.max(1), b.grid_col_start, b.grid_col_end))
+            }
+            BoxChild::Line(runs) => Some((FlexItem::Line(runs), 1, None, None)),
             _ => None,
         })
         .collect();
@@ -1071,8 +1135,18 @@ fn layout_grid_box(
     };
     let track_count = tracks.len();
 
-    // Auto-placement, row-major: each item takes the next `span` tracks,
-    // wrapping to a fresh row when it does not fit on the current one.
+    // A 1-based grid line (negative = from the end) as a 0-based line index,
+    // clamped to the explicit grid (`-1` → line `track_count`, the last).
+    let resolve_line = |line: i32| -> usize {
+        let lines = track_count as i32 + 1;
+        let zero_based = if line < 0 { lines + line } else { line - 1 };
+        zero_based.clamp(0, track_count as i32) as usize
+    };
+
+    // Placement, row-major: auto-placed items take the next `span` tracks,
+    // wrapping to a fresh row when they don't fit; an explicit `grid-column`
+    // start pins the column (moving to the next row if the cursor is already
+    // past it), and an end line overrides the span (`1 / -1` = full row).
     struct Placed {
         item: usize,
         row: usize,
@@ -1081,14 +1155,30 @@ fn layout_grid_box(
     }
     let mut placements = Vec::with_capacity(items.len());
     let (mut row, mut col) = (0usize, 0usize);
-    for (index, (_, span)) in items.iter().enumerate() {
-        let span = (*span).min(track_count);
-        if col + span > track_count {
-            row += 1;
-            col = 0;
+    for (index, (_, span, col_start, col_end)) in items.iter().enumerate() {
+        match col_start.map(|line| resolve_line(line).min(track_count - 1)) {
+            Some(start) => {
+                let span = match col_end {
+                    Some(end) => resolve_line(*end).saturating_sub(start).max(1),
+                    None => *span,
+                }
+                .min(track_count - start);
+                if col > start {
+                    row += 1;
+                }
+                placements.push(Placed { item: index, row, col: start, span });
+                col = start + span;
+            }
+            None => {
+                let span = (*span).min(track_count);
+                if col + span > track_count {
+                    row += 1;
+                    col = 0;
+                }
+                placements.push(Placed { item: index, row, col, span });
+                col += span;
+            }
         }
-        placements.push(Placed { item: index, row, col, span });
-        col += span;
         if col >= track_count {
             row += 1;
             col = 0;
@@ -1103,42 +1193,92 @@ fn layout_grid_box(
 
     let mut auto_size = vec![0.0f32; track_count];
     for placed in &placements {
-        if placed.span == 1 && matches!(tracks[placed.col], GridTrack::Auto) {
+        let content_sized = matches!(
+            tracks[placed.col],
+            GridTrack::Auto
+                | GridTrack::MinMax(MinTrack::Auto, _)
+                | GridTrack::MinMax(_, MaxTrack::Auto)
+        );
+        if placed.span == 1 && content_sized {
             let basis = items[placed.item].0.basis(options).min(avail);
             auto_size[placed.col] = auto_size[placed.col].max(basis);
         }
     }
 
-    let non_fr: f32 = tracks
+    // A minmax() floor: explicit points, or the content size for `auto`.
+    let min_of = |track: &GridTrack, index: usize| -> f32 {
+        match track {
+            GridTrack::MinMax(MinTrack::Pt(min), _) => *min,
+            GridTrack::MinMax(MinTrack::Auto, _) => auto_size[index],
+            _ => 0.0,
+        }
+    };
+    // Tracks with a definite (non-fr) size; `None` = participates in the fr
+    // distribution (plain `fr`, or `minmax(min, fr)` with its floor).
+    let fixed: Vec<Option<f32>> = tracks
         .iter()
         .enumerate()
         .map(|(index, track)| match track {
-            GridTrack::Pt(width) => *width,
-            GridTrack::Auto => auto_size[index],
-            GridTrack::Fr(_) => 0.0,
-        })
-        .sum();
-    let fr_total: f32 = tracks
-        .iter()
-        .map(|track| if let GridTrack::Fr(weight) = track { *weight } else { 0.0 })
-        .sum();
-    let remaining = (avail - non_fr).max(0.0);
-
-    let mut widths: Vec<f32> = tracks
-        .iter()
-        .enumerate()
-        .map(|(index, track)| match track {
-            GridTrack::Pt(width) => *width,
-            GridTrack::Auto => auto_size[index],
-            GridTrack::Fr(weight) => {
-                if fr_total > 0.0 {
-                    remaining * weight / fr_total
-                } else {
-                    0.0
-                }
+            GridTrack::Pt(width) => Some(*width),
+            GridTrack::Auto => Some(auto_size[index]),
+            GridTrack::Fr(_) => None,
+            GridTrack::MinMax(_, MaxTrack::Pt(max)) => Some(max.max(min_of(track, index))),
+            GridTrack::MinMax(_, MaxTrack::Auto) => {
+                Some(auto_size[index].max(min_of(track, index)))
             }
+            GridTrack::MinMax(_, MaxTrack::Fr(_)) => None,
         })
         .collect();
+    let fr_weight = |track: &GridTrack| match track {
+        GridTrack::Fr(weight) => *weight,
+        GridTrack::MinMax(_, MaxTrack::Fr(weight)) => *weight,
+        _ => 0.0,
+    };
+    let non_fr: f32 = fixed.iter().flatten().sum();
+
+    // Distribute the remainder among fr tracks; a `minmax(min, fr)` track whose
+    // floor exceeds its share is pinned at the floor and leaves the pool
+    // (iterate until stable, so the rest re-share what's left).
+    let mut widths: Vec<f32> = vec![0.0; track_count];
+    let mut pinned = vec![false; track_count];
+    loop {
+        let pool: f32 = (0..track_count)
+            .filter(|&index| fixed[index].is_none() && !pinned[index])
+            .map(|index| fr_weight(&tracks[index]))
+            .sum();
+        let pinned_sum: f32 = (0..track_count)
+            .filter(|&index| fixed[index].is_none() && pinned[index])
+            .map(|index| widths[index])
+            .sum();
+        let remaining = (avail - non_fr - pinned_sum).max(0.0);
+        let mut changed = false;
+        for index in 0..track_count {
+            if fixed[index].is_some() || pinned[index] {
+                continue;
+            }
+            let share = if pool > 0.0 {
+                remaining * fr_weight(&tracks[index]) / pool
+            } else {
+                0.0
+            };
+            let floor = min_of(&tracks[index], index);
+            if floor > share + 0.01 {
+                widths[index] = floor;
+                pinned[index] = true;
+                changed = true;
+            } else {
+                widths[index] = share;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for (index, width) in fixed.iter().enumerate() {
+        if let Some(width) = width {
+            widths[index] = *width;
+        }
+    }
 
     // Over-wide fixed/auto tracks: shrink everything proportionally to fit.
     let used: f32 = widths.iter().sum();
@@ -1671,8 +1811,21 @@ fn layout_line_box(
             floats.clear();
         }
 
+        // Justification stretches the spaces of every line except the
+        // paragraph's last (and lines with no spaces to stretch).
+        let justify_bonus = if align == TextAlign::Justify && !breaker.is_done() {
+            let spaces = visual.iter().filter(|piece| piece.text == " ").count();
+            if spaces > 0 {
+                ((band_width - line_width) / spaces as f32).max(0.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
         let mut px = match align {
-            TextAlign::Left => band_x,
+            TextAlign::Left | TextAlign::Justify => band_x,
             TextAlign::Center => band_x + ((band_width - line_width) / 2.0).max(0.0),
             TextAlign::Right => band_x + (band_width - line_width).max(0.0),
         };
@@ -1684,7 +1837,11 @@ fn layout_line_box(
 
         let page = pages.last_mut().expect("at least one page exists");
         for piece in &visual {
-            let piece_width = estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
+            let mut piece_width =
+                estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
+            if piece.text == " " {
+                piece_width += justify_bonus;
+            }
             page.push_colored_line(
                 Line {
                     text: piece.text.clone(),
@@ -2163,7 +2320,8 @@ fn render_planned_table_row(
             let text_width =
                 estimate_text_width(line, planned.font_size, options.run_font(planned.source.font));
             let text_x = match planned.source.style.align.unwrap_or(TextAlign::Left) {
-                TextAlign::Left => x + planned.padding_left,
+                // Table cells don't justify; treat it as left.
+                TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
                 TextAlign::Center => {
                     x + ((planned.width - text_width) / 2.0).max(planned.padding_left)
                 }
@@ -2766,6 +2924,92 @@ mod tests {
     };
 
     #[test]
+    fn flex_wrap_breaks_items_onto_new_lines() {
+        let document = crate::html::parse(
+            "<style>.row { display: flex; flex-wrap: wrap; gap: 10pt; } \
+                    .card { flex-basis: 200pt; }</style>\
+             <div class=\"row\">\
+               <div class=\"card\">one</div><div class=\"card\">two</div>\
+               <div class=\"card\">three</div><div class=\"card\">four</div>\
+             </div>",
+        );
+        // A4 content width ~499pt fits two 200pt cards + one gap per line, so
+        // four cards make two flex lines: two distinct baselines, and the
+        // third card starts back at the left content edge.
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+        assert_eq!(lines.len(), 4);
+        let mut ys: Vec<f32> = lines.iter().map(|l| l.y).collect();
+        ys.dedup();
+        assert_eq!(ys.len(), 2, "two flex lines: {ys:?}");
+        let three = lines.iter().find(|l| l.text == "three").unwrap();
+        let one = lines.iter().find(|l| l.text == "one").unwrap();
+        assert_eq!(three.x, one.x, "second line restarts at the left edge");
+        assert!(three.y < one.y);
+    }
+
+    #[test]
+    fn grid_line_placement_and_minmax_size_tracks() {
+        let document = crate::html::parse(
+            "<style>.g { display: grid; grid-template-columns: 100pt minmax(150pt, 1fr) 1fr; } \
+                    .full { grid-column: 1 / -1; } .b { grid-column: 2; }</style>\
+             <div class=\"g\">\
+               <div class=\"full\">header</div>\
+               <div class=\"b\">second</div>\
+               <div>third</div>\
+             </div>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let find = |t: &str| pages[0].lines.iter().find(|l| l.text == t).unwrap();
+
+        // A4 content: 595.28 - 96 = 499.28pt. Track 1 = 100, remainder 399.28
+        // split between minmax(150,1fr) and 1fr = ~199.6 each (the floor does
+        // not bind), so column 2 starts at 48 + 100 = 148.
+        let header = find("header");
+        let second = find("second");
+        let third = find("third");
+        assert_eq!(header.x, 48.0, "full-row item starts at track 1");
+        assert!((second.x - 148.0).abs() < 0.5, "explicit column 2: {}", second.x);
+        assert!(third.x > second.x + 150.0, "auto-placed after the pinned item");
+        assert!(second.y < header.y, "explicit placement moved below the full-row header");
+        assert_eq!(second.y, third.y, "second and third share a row");
+    }
+
+    #[test]
+    fn justify_stretches_all_lines_but_the_last() {
+        let words = "alpha beta gamma delta ".repeat(12);
+        let document = crate::html::parse(&format!(
+            "<p style=\"text-align: justify\">{words}end</p>"
+        ));
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+
+        // Right edge of each painted piece; group by baseline.
+        let mut rows: std::collections::BTreeMap<i64, f32> = std::collections::BTreeMap::new();
+        for line in lines {
+            let right = line.x
+                + estimate_text_width(&line.text, line.font_size, options.run_font(line.font));
+            let key = (line.y * 100.0) as i64;
+            let entry = rows.entry(key).or_insert(right);
+            *entry = entry.max(right);
+        }
+        let mut rights: Vec<f32> = rows.into_iter().rev().map(|(_, r)| r).collect();
+        assert!(rights.len() >= 3, "need several lines: {}", rights.len());
+        let last = rights.pop().unwrap();
+        let margin_right_edge = options.page_size.width - options.margin_right;
+        for right in &rights {
+            assert!(
+                (right - margin_right_edge).abs() < 1.0,
+                "justified line should end flush at {margin_right_edge}, got {right}"
+            );
+        }
+        assert!(last < margin_right_edge - 20.0, "last line stays ragged: {last}");
+    }
+
+    #[test]
     fn links_produce_merged_areas_and_headings_produce_anchors() {
         let document = crate::html::parse(
             "<h1 id=\"top\">The Report Title</h1>\
@@ -3065,6 +3309,8 @@ mod tests {
                     flex_basis: None,
                     grid: None,
                     grid_span: 1,
+                    grid_col_start: None,
+                    grid_col_end: None,
                     float_dir: None,
                     clear: None,
                     css_width: None,
@@ -3135,6 +3381,8 @@ mod tests {
                     flex_basis: None,
                     grid: None,
                     grid_span: 1,
+                    grid_col_start: None,
+                    grid_col_end: None,
                     float_dir: None,
                     clear: None,
                     css_width: None,
@@ -3205,6 +3453,8 @@ mod tests {
                 flex_basis: None,
                 grid: None,
                 grid_span: 1,
+                grid_col_start: None,
+                grid_col_end: None,
                 float_dir: None,
                 clear: None,
                 css_width: None,
@@ -3297,6 +3547,8 @@ mod tests {
                         flex_basis: None,
                         grid: None,
                         grid_span: 1,
+                        grid_col_start: None,
+                        grid_col_end: None,
                         float_dir: None,
                         clear: None,
                         css_width: None,
@@ -3364,6 +3616,8 @@ mod tests {
                     flex_basis: None,
                     grid: None,
                     grid_span: 1,
+                    grid_col_start: None,
+                    grid_col_end: None,
                     float_dir: None,
                     clear: None,
                     css_width: None,
