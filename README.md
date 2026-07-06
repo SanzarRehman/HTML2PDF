@@ -130,7 +130,7 @@ Works today:
   formats that cannot be subset yet.
 - CLI, Rust library API, and lightweight HTTP API.
 
-Opt-in (behind the `js` build feature):
+Opt-in (behind build features):
 
 - A bounded pre-layout **JavaScript** stage (Boa) that runs inline `<script>`s
   against a live DOM and mutates it before layout: `getElementById`,
@@ -139,6 +139,13 @@ Opt-in (behind the `js` build feature):
   to build a whole document from script. Every run is capped by node/iteration
   budgets. Enable with `--features js` and pass `--js` (CLI) or use
   `Engine::render_html_with_scripts`.
+- **Remote `http(s)` images** (`--features remote-images`, blocking `ureq`): a
+  synchronous fetch for `<img>` URLs, **fail-closed** by design — nothing is
+  fetched unless the caller opts in per render (`--remote-images` on the CLI, or
+  `RemoteImagePolicy { enabled: true }`). Even when enabled it enforces a byte
+  cap, a timeout, and an SSRF guard that rejects loopback/private/link-local
+  hosts and refuses redirects. Off by default so the base engine pulls no
+  networking or TLS stack.
 
 Not complete yet:
 
@@ -146,8 +153,9 @@ Not complete yet:
   (`::before`) — dropped, since they do not apply to static print output.
 - Broader JavaScript: DOM traversal from JS, `querySelector`, events, timers,
   and mid-script layout reads (rejected by design — ADR 0009).
-- Inline/floated images, `object-fit`, and remote (`http`) image URLs; SVG and
-  canvas.
+- Inline/floated images and `object-fit`; SVG and canvas. (Remote `http(s)`
+  image URLs are supported behind the opt-in `remote-images` feature — see
+  below.)
 - Stacking contexts (`z-index` works, but compares globally and positioned
   content always paints above the flow); `flex-shrink`/`order`/`align-self`;
   grid named lines/areas and `grid-template-rows`.
@@ -349,7 +357,7 @@ speed and memory stay visible as fidelity improves.
 
 - Broaden CSS properties and computed-value coverage (`%` heights/margins,
   `min-width`, `calc()`, custom properties).
-- Broaden image support (inline/floated images, remote URLs) and add SVG.
+- Broaden image support (inline/floated images) and add SVG.
 - Stacking contexts (negative z-index below flow); RTL table cells.
 - Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
 - Harden the HTTP server for production deployment patterns.

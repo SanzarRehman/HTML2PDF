@@ -32,6 +32,7 @@ fn run() -> Result<(), String> {
     let mut positionals: Vec<std::ffi::OsString> = Vec::new();
     let mut font: Option<String> = None;
     let mut scripting = false;
+    let mut remote_images = false;
     let mut paper: Option<String> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -47,6 +48,8 @@ fn run() -> Result<(), String> {
             paper = Some(value.to_string_lossy().to_ascii_lowercase());
         } else if arg == "--js" {
             scripting = true;
+        } else if arg == "--remote-images" {
+            remote_images = true;
         } else {
             positionals.push(arg);
         }
@@ -55,7 +58,7 @@ fn run() -> Result<(), String> {
     if positionals.len() != 2 {
         return Err(
             concat!(
-                "usage: htmltopdf [--font <path|family>] [--paper a4|letter] [--js] <input.html> <output.pdf>\n",
+                "usage: htmltopdf [--font <path|family>] [--paper a4|letter] [--js] [--remote-images] <input.html> <output.pdf>\n",
                 "       htmltopdf bench <input.html> <output-dir> [runs]\n",
                 "       htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>"
             )
@@ -79,6 +82,16 @@ fn run() -> Result<(), String> {
         if !parent.as_os_str().is_empty() {
             options = options.with_base_dir(parent);
         }
+    }
+    if remote_images {
+        // Opt in to fetching http(s) <img> URLs (private/loopback hosts stay
+        // blocked). Needs a build with `--features remote-images` to have any
+        // effect; otherwise it stays fail-closed.
+        let policy = htmltopdf::RemoteImagePolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        options = options.with_remote_images(policy);
     }
     let pdf = render(&html, options, scripting)
         .map_err(|error| format!("failed to render {}: {error}", input_path.display()))?;

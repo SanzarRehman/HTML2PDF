@@ -947,8 +947,21 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       within its string but stays left-aligned), and threading the base level
       into per-piece shaping (individual word pieces are uni-directional, so
       this only matters for a single token straddling a direction change).
-- [ ] **Remote `http(s)` images** (opt-in flag, size/time caps, server-safe
-      fail-closed default) and inline/floated image follow-ups.
+- [x] **Remote `http(s)` images**: `image::RemoteImagePolicy` on
+      `RenderOptions` (`enabled`, `max_bytes`, `timeout`, `block_private_hosts`)
+      threads through `resolve_images` → `load_image`. **Fail-closed** by
+      default (`enabled: false`) *and* gated behind the `remote-images` cargo
+      feature (blocking `ureq`; off by default so base builds pull no
+      TLS/networking stack). When both are on, `fetch_remote_impl` resolves the
+      host, rejects any loopback/private/link-local/CGNAT/ULA address
+      (`is_blocked_ip`; SSRF guard), disables redirects, caps the body at
+      `max_bytes`, and times out. CLI `--remote-images` flag; server left
+      unwired (fetching from untrusted HTML is the SSRF footgun). Verified
+      end-to-end: default build ignores the flag; feature build blocks a
+      loopback server and successfully fetches a public HTTPS PNG. **Not yet
+      done:** DNS-rebinding pin (re-resolve/connect race), redirect following
+      with per-hop host checks, response caching, `Content-Type` sniffing,
+      inline/floated image follow-ups, and a server opt-in path.
 - [ ] **Live-DOM surface on demand**: `insertBefore`, `cloneNode`,
       `querySelector(All)`, JS-side `parentNode`/`children` traversal.
 - [ ] **Stacking contexts**: negative `z-index` painting below flow content,
@@ -1116,7 +1129,9 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
   - [ ] `max-width`/`min-width`/`max-height`/`min-height` clamping (e.g. the
         common `img { max-width: 100% }`); only plain `width`/`height` are read.
   - [ ] Percentage image dimensions (resolved against the containing block).
-  - [ ] Remote (`http`/`https`) image URLs — only local paths and `data:` URIs.
+  - [x] Remote (`http`/`https`) image URLs — behind the `remote-images` feature
+        + a per-render opt-in (`RemoteImagePolicy`); fail-closed, capped, and
+        SSRF-guarded. Local paths and `data:` URIs need no opt-in.
   - [ ] Sub-byte-depth (1/2/4-bit) and interlaced (Adam7) PNG; 16-bit PNG.
   - [ ] GIF, WebP, SVG, and BMP decoding.
   - [ ] `srcset`/responsive selection and `<picture>`.

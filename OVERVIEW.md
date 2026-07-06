@@ -315,13 +315,16 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   decoded in-house (chunk parse, `flate2` inflate, unfilter, palette/alpha) with
   its alpha channel emitted as a PDF soft mask. Sized by `width`/`height` with
   aspect-ratio preservation, scaled to fit the page, and page-broken as a unit.
+  **Remote `http(s)` images** are opt-in behind the `remote-images` feature: a
+  fail-closed, capped, SSRF-guarded blocking fetch (see status section).
 
 **Not yet (the honest list)**
 
 - Per-side **border** width/style/color and rounded corners (borders are a
   uniform box today), and `box-sizing`.
-- Inline (text-flowed) images, `object-fit`, and remote (`http`) image URLs;
-  a true font-metric baseline model (0.8 em ascent approximation today).
+- Inline (text-flowed) images and `object-fit`; remote images need the opt-in
+  `remote-images` feature (not in default builds); a true font-metric baseline
+  model (0.8 em ascent approximation today).
 - Stacking contexts (`z-index` compares globally; positioned content always
   paints above flow); `flex-shrink`/`order`/`align-self`; grid named
   lines/areas and `grid-template-rows`.

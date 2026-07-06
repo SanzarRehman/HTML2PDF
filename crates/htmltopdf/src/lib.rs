@@ -13,6 +13,7 @@ mod subset;
 use std::fmt;
 
 pub use font::FontSource;
+pub use image::RemoteImagePolicy;
 pub use layout::{PageSize, Paper, RenderOptions};
 pub use script::{NoopScriptEngine, ScriptEngine, ScriptLimits, ScriptReport};
 #[cfg(feature = "js")]
@@ -75,7 +76,7 @@ impl Engine {
     ) -> Result<Vec<u8>> {
         // Load and measure `<img>` content before the emptiness check so an
         // image-only document counts as renderable.
-        html::resolve_images(&mut document, options.base_dir.as_deref());
+        html::resolve_images(&mut document, options.base_dir.as_deref(), &options.remote_images);
 
         let has_flow = document.flow.as_ref().is_some_and(|flow| flow.has_text());
         if document.blocks.is_empty() && !has_flow {

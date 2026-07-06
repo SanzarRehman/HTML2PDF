@@ -82,6 +82,9 @@ pub struct RenderOptions {
     /// The document's interned link targets (`<a href>` values), indexed by
     /// `LinkArea::link - 1`; filled per render by `with_document_hints`.
     pub links: Vec<String>,
+    /// Whether/how remote `http(s)` `<img>` URLs may be fetched. Fail-closed by
+    /// default (disabled); see [`crate::image::RemoteImagePolicy`].
+    pub remote_images: crate::image::RemoteImagePolicy,
 }
 
 impl Default for RenderOptions {
@@ -102,6 +105,7 @@ impl Default for RenderOptions {
             paper: Paper::A4,
             fonts: Vec::new(),
             links: Vec::new(),
+            remote_images: crate::image::RemoteImagePolicy::default(),
         }
     }
 }
@@ -117,6 +121,15 @@ impl RenderOptions {
     /// (typically the input HTML file's directory).
     pub fn with_base_dir(mut self, base_dir: impl Into<std::path::PathBuf>) -> Self {
         self.base_dir = Some(base_dir.into());
+        self
+    }
+
+    /// Enable (or configure) remote `http(s)` image fetching. Off by default;
+    /// passing a policy with `enabled = true` opts in. Actual network access
+    /// additionally requires the crate's `remote-images` feature — without it,
+    /// enabling has no effect (stays fail-closed).
+    pub fn with_remote_images(mut self, policy: crate::image::RemoteImagePolicy) -> Self {
+        self.remote_images = policy;
         self
     }
 
@@ -3999,6 +4012,7 @@ mod tests {
             paper: crate::layout::Paper::A4,
             fonts: Vec::new(),
             links: Vec::new(),
+            remote_images: crate::image::RemoteImagePolicy::default(),
         };
 
         let pages = layout_document(&document, &options);
@@ -4058,6 +4072,7 @@ mod tests {
             paper: crate::layout::Paper::A4,
             fonts: Vec::new(),
             links: Vec::new(),
+            remote_images: crate::image::RemoteImagePolicy::default(),
         };
 
         let pages = layout_document(&document, &options);
@@ -4132,6 +4147,7 @@ mod tests {
                 paper: crate::layout::Paper::A4,
                 fonts: Vec::new(),
                 links: Vec::new(),
+                remote_images: crate::image::RemoteImagePolicy::default(),
             },
         );
         // The painted font is the CSS size times the shrink-to-fit scale.
@@ -4228,6 +4244,7 @@ mod tests {
                 paper: crate::layout::Paper::A4,
                 fonts: Vec::new(),
                 links: Vec::new(),
+                remote_images: crate::image::RemoteImagePolicy::default(),
             },
         );
 
@@ -4322,6 +4339,7 @@ mod tests {
                 paper: crate::layout::Paper::A4,
                 fonts: Vec::new(),
                 links: Vec::new(),
+                remote_images: crate::image::RemoteImagePolicy::default(),
             },
         );
 

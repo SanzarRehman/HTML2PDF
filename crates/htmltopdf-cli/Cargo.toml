@@ -12,6 +12,9 @@ path = "src/main.rs"
 [features]
 # Enable the bounded pre-layout JavaScript stage (forwards to htmltopdf/js).
 js = ["htmltopdf/js"]
+# Enable remote http(s) <img> fetching for `--remote-images` (forwards to the
+# engine feature). Without it, `--remote-images` is accepted but stays no-op.
+remote-images = ["htmltopdf/remote-images"]
 
 [dependencies]
 htmltopdf = { path = "../htmltopdf" }

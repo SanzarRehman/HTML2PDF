@@ -89,7 +89,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Block-level placement, CSS `width`/`height` (aspect-preserving) | ✅ | |
 | PNG alpha → `/SMask` | ✅ | |
 | Inline/floated images | ❌ | Always breaks to its own line. |
-| Remote `http(s)` URLs | ❌ | |
+| Remote `http(s)` URLs | 🟡 | Opt-in behind the `remote-images` cargo feature *and* a per-render flag (`RemoteImagePolicy { enabled: true }`); **fail-closed** otherwise. Byte + timeout caps; blocks loopback/private/link-local/CGNAT hosts (SSRF guard); no redirects. Not in default builds (keeps the base engine free of a TLS/networking stack). No DNS-rebinding pin, no redirect following, no on-disk cache. |
 | CSS `%` width / `max-width` (incl. `max-width:100%`) | ✅ | Percent of the containing block; `%` may scale up, `max-width` clamps. |
 | `object-fit` | ❌ | |
 | Sub-byte / interlaced / 16-bit PNG; GIF, WebP, SVG, BMP | ❌ | |

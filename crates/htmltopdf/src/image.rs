@@ -63,16 +63,193 @@ impl ImageFilter {
     }
 }
 
+/// Whether (and how) `http(s)` image URLs may be fetched. The default is
+/// **fail-closed**: `enabled = false`, so a remote `<img>` is never fetched
+/// (it renders as a broken image) unless a caller explicitly opts in. This
+/// keeps the default safe on servers that render untrusted HTML — an attacker
+/// cannot use `<img src="http://internal/...">` to probe the network (SSRF).
+#[derive(Debug, Clone)]
+pub struct RemoteImagePolicy {
+    /// Master switch. `false` (default) → remote URLs are never fetched.
+    pub enabled: bool,
+    /// Hard cap on the downloaded byte count; a larger body is rejected.
+    pub max_bytes: usize,
+    /// Per-connection connect and read timeout.
+    pub timeout: std::time::Duration,
+    /// When `true` (default), reject URLs whose host resolves to a loopback,
+    /// private, link-local, or otherwise non-public address — the second line
+    /// of SSRF defense after `enabled`.
+    pub block_private_hosts: bool,
+}
+
+impl Default for RemoteImagePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_bytes: 8 * 1024 * 1024,
+            timeout: std::time::Duration::from_secs(10),
+            block_private_hosts: true,
+        }
+    }
+}
+
 /// Resolve and decode an image `src`. Returns `None` on any failure (missing
-/// file, unsupported format, malformed data), so a broken `<img>` is simply not
-/// painted rather than aborting the whole render.
-pub fn load_image(src: &str, base_dir: Option<&Path>) -> Option<DecodedImage> {
+/// file, unsupported format, malformed data, blocked/failed remote fetch), so a
+/// broken `<img>` is simply not painted rather than aborting the whole render.
+pub fn load_image(
+    src: &str,
+    base_dir: Option<&Path>,
+    remote: &RemoteImagePolicy,
+) -> Option<DecodedImage> {
     let bytes = if let Some(rest) = src.strip_prefix("data:") {
         decode_data_uri(rest)?
+    } else if is_remote_url(src) {
+        fetch_remote(src, remote)?
     } else {
         read_file(src, base_dir)?
     };
     decode(&bytes)
+}
+
+/// True for an `http://` or `https://` URL (the only remote schemes fetched).
+fn is_remote_url(src: &str) -> bool {
+    let lower = src.trim_start();
+    lower.len() >= 7
+        && (lower[..7.min(lower.len())].eq_ignore_ascii_case("http://")
+            || lower[..8.min(lower.len())].eq_ignore_ascii_case("https://"))
+}
+
+/// Fetch a remote image, honoring the policy. Fail-closed: returns `None`
+/// unless fetching is enabled *and* the `remote-images` feature is compiled in.
+fn fetch_remote(url: &str, remote: &RemoteImagePolicy) -> Option<Vec<u8>> {
+    if !remote.enabled {
+        return None;
+    }
+    #[cfg(feature = "remote-images")]
+    {
+        fetch_remote_impl(url, remote)
+    }
+    #[cfg(not(feature = "remote-images"))]
+    {
+        // The capability was requested but not compiled in; stay fail-closed.
+        let _ = url;
+        None
+    }
+}
+
+/// Extract `(host, port)` from an `http(s)` URL, applying the scheme's default
+/// port. Handles userinfo (`user@host`) and bracketed IPv6 literals.
+#[cfg_attr(not(feature = "remote-images"), allow(dead_code))]
+fn url_host_port(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme.trim().to_ascii_lowercase().as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // Drop any `userinfo@`.
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if authority.is_empty() {
+        return None;
+    }
+    // Bracketed IPv6 literal, optionally with a port: `[::1]` / `[::1]:8080`.
+    if let Some(after) = authority.strip_prefix('[') {
+        let (host, tail) = after.split_once(']')?;
+        let port = tail
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return Some((host.to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) => Some((host.to_string(), port.parse().ok()?)),
+        None => Some((authority.to_string(), default_port)),
+    }
+}
+
+/// Whether an IP is off-limits for remote fetches: loopback, private, CGNAT,
+/// link-local, unique-local, or otherwise non-public. The core SSRF guard.
+#[cfg_attr(not(feature = "remote-images"), allow(dead_code))]
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xC0) == 64) // 100.64.0.0/10 (CGNAT)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|m| is_blocked_ip(IpAddr::V4(m)))
+        }
+    }
+}
+
+/// Whether a URL's host is allowed to be fetched. When `block_private` is set,
+/// the host is resolved and rejected if *any* resolved address is non-public
+/// (conservative: a mixed result is treated as unsafe). A resolution failure or
+/// unparseable authority is also rejected.
+#[cfg_attr(not(feature = "remote-images"), allow(dead_code))]
+fn remote_host_allowed(url: &str, block_private: bool) -> bool {
+    if !block_private {
+        return true;
+    }
+    let Some((host, port)) = url_host_port(url) else {
+        return false;
+    };
+    use std::net::ToSocketAddrs;
+    match (host.as_str(), port).to_socket_addrs() {
+        Ok(addrs) => {
+            let addrs: Vec<_> = addrs.collect();
+            !addrs.is_empty() && addrs.iter().all(|addr| !is_blocked_ip(addr.ip()))
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(feature = "remote-images")]
+fn fetch_remote_impl(url: &str, remote: &RemoteImagePolicy) -> Option<Vec<u8>> {
+    // Block non-public hosts up front. Redirects are disabled below, so this
+    // check governs the address actually connected to (modulo DNS rebinding,
+    // which pinning the resolved IP would close — a documented follow-up).
+    if remote.block_private_hosts && !remote_host_allowed(url, true) {
+        return None;
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(remote.timeout)
+        .timeout_read(remote.timeout)
+        .timeout_write(remote.timeout)
+        // No redirect following: a redirect could otherwise bounce past the
+        // host check to an internal address.
+        .redirects(0)
+        .build();
+
+    let response = agent.get(url).call().ok()?;
+    if response.status() != 200 {
+        return None;
+    }
+
+    // Read at most `max_bytes + 1` so an over-cap body is detected, not truncated.
+    let mut reader = response.into_reader().take(remote.max_bytes as u64 + 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    if bytes.len() > remote.max_bytes {
+        return None;
+    }
+    Some(bytes)
 }
 
 fn read_file(src: &str, base_dir: Option<&Path>) -> Option<Vec<u8>> {
@@ -551,8 +728,64 @@ mod tests {
 
     #[test]
     fn unknown_formats_return_none() {
+        let remote = RemoteImagePolicy::default();
         assert!(decode(b"not an image").is_none());
-        assert!(load_image("data:text/plain,hello", None).is_none());
+        assert!(load_image("data:text/plain,hello", None, &remote).is_none());
+    }
+
+    #[test]
+    fn remote_urls_are_fail_closed_by_default() {
+        // The default policy is disabled, so no network access is attempted and
+        // a remote `<img>` resolves to nothing (whether or not the feature is
+        // compiled in). This is the SSRF-safe default.
+        let disabled = RemoteImagePolicy::default();
+        assert!(!disabled.enabled);
+        assert!(load_image("http://example.com/logo.png", None, &disabled).is_none());
+        assert!(load_image("https://example.com/logo.png", None, &disabled).is_none());
+    }
+
+    #[test]
+    fn detects_remote_url_schemes() {
+        assert!(is_remote_url("http://example.com/a.png"));
+        assert!(is_remote_url("HTTPS://Example.com/a.png"));
+        assert!(is_remote_url("  https://example.com/a.png"));
+        assert!(!is_remote_url("data:image/png;base64,AAAA"));
+        assert!(!is_remote_url("/local/path.png"));
+        assert!(!is_remote_url("ftp://example.com/a.png"));
+    }
+
+    #[test]
+    fn parses_url_host_and_port() {
+        assert_eq!(url_host_port("http://example.com/a"), Some(("example.com".into(), 80)));
+        assert_eq!(url_host_port("https://example.com/a"), Some(("example.com".into(), 443)));
+        assert_eq!(url_host_port("http://example.com:8080/a"), Some(("example.com".into(), 8080)));
+        assert_eq!(url_host_port("http://user:pw@example.com/a"), Some(("example.com".into(), 80)));
+        assert_eq!(url_host_port("http://[::1]:8080/a"), Some(("::1".into(), 8080)));
+        assert_eq!(url_host_port("http://[fe80::1]/a"), Some(("fe80::1".into(), 80)));
+        assert_eq!(url_host_port("ftp://example.com/a"), None);
+    }
+
+    #[test]
+    fn blocks_private_and_loopback_ips() {
+        use std::net::IpAddr;
+        let blocked = [
+            "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.0.1",
+            "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fc00::1",
+            "::ffff:127.0.0.1", // IPv4-mapped loopback
+        ];
+        for ip in blocked {
+            assert!(
+                is_blocked_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} should be blocked"
+            );
+        }
+        let allowed = ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:2800:220:1::1"];
+        for ip in allowed {
+            assert!(
+                !is_blocked_ip(ip.parse::<IpAddr>().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
     }
 
     fn base64_encode(data: &[u8]) -> String {
@@ -639,7 +872,7 @@ mod tests {
         );
 
         let mut document = crate::html::parse(&html);
-        crate::html::resolve_images(&mut document, None);
+        crate::html::resolve_images(&mut document, None, &RemoteImagePolicy::default());
         let image = first_image(&document);
 
         assert_eq!(image.width, 60.0, "CSS width should win over the attribute");
@@ -654,7 +887,7 @@ mod tests {
         let html = format!("<img src=\"{uri}\" style=\"width:80pt\">");
 
         let mut document = crate::html::parse(&html);
-        crate::html::resolve_images(&mut document, None);
+        crate::html::resolve_images(&mut document, None, &RemoteImagePolicy::default());
         let image = first_image(&document);
 
         assert_eq!(image.width, 80.0);

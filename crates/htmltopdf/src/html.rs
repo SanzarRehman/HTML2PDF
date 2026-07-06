@@ -635,25 +635,32 @@ fn build_flow(dom: &crate::dom::Dom, env: &FlowEnv) -> Option<crate::box_tree::F
 /// `document.images`. File-path sources resolve relative to `base_dir`
 /// (`data:` URIs need none). Images that fail to load are left unresolved and
 /// simply not painted. A no-op for table documents (which carry no flow tree).
-pub fn resolve_images(document: &mut Document, base_dir: Option<&std::path::Path>) {
+pub fn resolve_images(
+    document: &mut Document,
+    base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
+) {
     let Some(flow) = document.flow.as_mut() else {
         return;
     };
     let mut images = std::mem::take(&mut document.images);
-    resolve_images_in(&mut flow.children, base_dir, &mut images);
+    resolve_images_in(&mut flow.children, base_dir, remote, &mut images);
     document.images = images;
 }
 
 fn resolve_images_in(
     children: &mut [crate::box_tree::BoxChild],
     base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
     images: &mut Vec<crate::image::DecodedImage>,
 ) {
     use crate::box_tree::BoxChild;
     for child in children {
         match child {
-            BoxChild::Block(block) => resolve_images_in(&mut block.children, base_dir, images),
-            BoxChild::Image(image) => resolve_image_box(image, base_dir, images),
+            BoxChild::Block(block) => {
+                resolve_images_in(&mut block.children, base_dir, remote, images)
+            }
+            BoxChild::Image(image) => resolve_image_box(image, base_dir, remote, images),
             // Table cells carry no `<img>` content in the current model.
             BoxChild::Line(_) | BoxChild::Table(_) => {}
         }
@@ -666,9 +673,10 @@ const PX_TO_PT: f32 = 72.0 / 96.0;
 fn resolve_image_box(
     image: &mut crate::box_tree::ImageBox,
     base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
     images: &mut Vec<crate::image::DecodedImage>,
 ) {
-    let Some(decoded) = crate::image::load_image(&image.src, base_dir) else {
+    let Some(decoded) = crate::image::load_image(&image.src, base_dir, remote) else {
         return;
     };
     let intrinsic_w = decoded.width as f32;

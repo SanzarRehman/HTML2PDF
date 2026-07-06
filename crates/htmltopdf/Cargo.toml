@@ -12,6 +12,10 @@ path = "src/lib.rs"
 # Opt-in bounded pre-layout JavaScript stage (ADR 0006). Off by default to keep
 # the dependency surface and build small.
 js = ["dep:boa_engine", "dep:boa_gc"]
+# Opt-in remote `http(s)` <img> fetching (blocking, via ureq). Off by default so
+# the base engine pulls no networking/TLS stack; even with it, fetching is
+# fail-closed until a caller enables it per render (RemoteImagePolicy).
+remote-images = ["dep:ureq"]
 
 [dependencies]
 cssparser = "0.37.0"
@@ -26,6 +30,10 @@ ttf-parser = "0.25.1"
 unicode-bidi = { version = "0.3", default-features = false, features = ["hardcoded-data"] }
 boa_engine = { version = "0.20", optional = true }
 boa_gc = { version = "0.20", optional = true }
+# Synchronous HTTP client for the optional `remote-images` feature. Blocking
+# (no async runtime), TLS via rustls — matches the project's small-surface,
+# no-async design.
+ureq = { version = "2", optional = true }
 
 [dev-dependencies]
 # Reference DOM used only to verify the custom arena TreeSink builds the same
