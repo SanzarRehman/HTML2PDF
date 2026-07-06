@@ -286,7 +286,8 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   `z-index` ordering (positioned content paints above the flow).
 - **Text shaping** (HarfBuzz via `rustybuzz`) for embedded fonts — kerning
   reproduced in the PDF, ligatures with extractable text, Arabic joining forms —
-  plus **bidirectional text** (UAX #9 visual reordering of mixed LTR/RTL lines)
+  plus **bidirectional text + RTL paragraphs** (UAX #9 visual reordering;
+  `dir="rtl"`/`direction: rtl` set the base direction and right-align)
   and **font fallback chains** (CJK/Hangul/Cyrillic fall back to covering
   system faces automatically, each embedded as its own subset).
 - Non-ASCII text: WinAnsi/CP1252 characters render with the built-in Helvetica;
@@ -325,7 +326,7 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   paints above flow); `flex-shrink`/`order`/`align-self`; grid named
   lines/areas and `grid-template-rows`.
 - Links inside table cells (cell text is flattened); tagged PDF.
-- `@font-face` web fonts; emoji; `dir="rtl"` base paragraphs; `%` heights/
+- `@font-face` web fonts; emoji; `dir="auto"` and RTL table cells; `%` heights/
   margins/offsets; `calc()`/custom properties.
 - Broader **JavaScript**: DOM traversal from JS, `querySelector`, events,
   timers (mid-script layout reads rejected by design — ADR 0009).

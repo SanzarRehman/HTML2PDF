@@ -87,6 +87,9 @@ pub struct CellStyle {
     /// CSS `font-style` (inherited): `Some(true)` = italic/oblique,
     /// `Some(false)` = an explicit `normal` (overrides an inherited italic).
     pub italic: Option<bool>,
+    /// CSS `direction` / the HTML `dir` attribute (inherited): `Some(true)` =
+    /// rtl, `Some(false)` = ltr, `None` = unset (inherits; ltr at the root).
+    pub direction: Option<bool>,
     /// CSS `line-height` (inherited). `None` = `normal` (UA default leading).
     pub line_height: Option<LineHeight>,
     /// CSS `width`/`height` in points. Consumed by `<img>` sizing, blocks,
@@ -169,6 +172,7 @@ impl Default for CellStyle {
             font_size: None,
             font_family: None,
             italic: None,
+            direction: None,
             line_height: None,
             width: None,
             width_percent: None,
@@ -613,6 +617,7 @@ fn build_flow(dom: &crate::dom::Dom, env: &FlowEnv) -> Option<crate::box_tree::F
         line_through: false,
         color: Color::BLACK,
         align: TextAlign::Left,
+        base_rtl: false,
         link: 0,
     };
     let mut acc = ChildAcc::default();
@@ -700,6 +705,8 @@ struct FlowCtx {
     line_through: bool,
     color: Color,
     align: TextAlign,
+    /// Base paragraph direction (UAX #9 base level): `true` = rtl.
+    base_rtl: bool,
     /// Interned link target the content sits inside (0 = none).
     link: u16,
 }
@@ -864,7 +871,19 @@ fn build_block(
     let font_size = own.font_size.unwrap_or(crate::layout::font_size_for(kind));
     let bold = parent.bold || own.bold || is_heading(kind) || tag == "th";
     let color = own.color.unwrap_or(parent.color);
-    let align = own.align.unwrap_or(parent.align);
+    // Base direction: this element's own `direction`/`dir`, else inherited.
+    // When an element sets a new direction and specifies no `text-align`, the
+    // default alignment follows that direction (`start` edge); otherwise
+    // `text-align` inherits as usual.
+    let own_dir = own_direction(dom, id, own);
+    let base_rtl = own_dir.unwrap_or(parent.base_rtl);
+    let align = match own.align {
+        Some(explicit) => explicit,
+        None if own_dir.is_some() && own_dir != Some(parent.base_rtl) => {
+            if base_rtl { TextAlign::Right } else { TextAlign::Left }
+        }
+        None => parent.align,
+    };
 
     // CSS margins (default to the per-kind spacing when unset) and padding. List
     // and blockquote nesting fold into `margin.left` so it accumulates as they
@@ -919,6 +938,7 @@ fn build_block(
         line_through: parent.line_through || own.line_through,
         color,
         align,
+        base_rtl,
         link: parent.link,
     };
 
@@ -993,6 +1013,7 @@ fn build_block(
         max_width_percent: own.max_width_percent,
         center: own.margin_left_auto && own.margin_right_auto,
         line_height: own.line_height,
+        rtl: base_rtl,
         position: own.position,
         z_index: own.z_index,
         offset_top: own.offset_top,
@@ -1056,6 +1077,9 @@ fn inline_ctx(
         line_through: parent.line_through || own.line_through || matches!(tag, "s" | "strike" | "del"),
         color: own.color.unwrap_or(if href.is_some() { LINK_COLOR } else { parent.color }),
         align: parent.align,
+        // An inline `dir`/`direction` (e.g. on `<body>`, which is inline in the
+        // flow builder) sets the base direction inherited by descendant blocks.
+        base_rtl: own_direction(dom, id, own).unwrap_or(parent.base_rtl),
         link,
     }
 }
@@ -1066,6 +1090,21 @@ const LINK_COLOR: Color = Color {
     g: 0.0,
     b: 0.93,
 };
+
+/// An element's own base direction: the CSS `direction` property wins over the
+/// presentational `dir` attribute (`rtl`/`ltr`; `auto` is not resolved yet).
+/// `None` means the element sets no direction and inherits its parent's.
+fn own_direction(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    own: &CellStyle,
+) -> Option<bool> {
+    own.direction.or_else(|| match dom.node(id).attr("dir") {
+        Some(value) if value.eq_ignore_ascii_case("rtl") => Some(true),
+        Some(value) if value.eq_ignore_ascii_case("ltr") => Some(false),
+        _ => None,
+    })
+}
 
 /// The list marker for an `<li>`: a bullet for `<ul>` (or a bare item), or a
 /// 1-based number for `<ol>`.
@@ -1654,6 +1693,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         font_size: own.font_size.or(parent.font_size),
         font_family: own.font_family.clone().or_else(|| parent.font_family.clone()),
         italic: own.italic.or(parent.italic),
+        direction: own.direction.or(parent.direction),
         line_height: own.line_height.or(parent.line_height),
         color: own.color.or(parent.color),
         white_space: own.white_space.or(parent.white_space),
@@ -3495,6 +3535,13 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 _ => None,
             };
         }
+        "direction" => {
+            target.cell.direction = match value.trim().to_ascii_lowercase().as_str() {
+                "rtl" => Some(true),
+                "ltr" => Some(false),
+                _ => target.cell.direction,
+            };
+        }
         "line-height" => target.cell.line_height = parse_line_height(value),
         "width" => match parse_css_percent(value) {
             Some(pct) => target.cell.width_percent = Some(pct),
@@ -3787,6 +3834,7 @@ impl CellStyle {
         self.font_size = other.font_size.or(self.font_size);
         self.font_family = other.font_family.or(self.font_family.take());
         self.italic = other.italic.or(self.italic);
+        self.direction = other.direction.or(self.direction);
         self.line_height = other.line_height.or(self.line_height);
         self.width = other.width.or(self.width);
         self.width_percent = other.width_percent.or(self.width_percent);
@@ -3990,6 +4038,42 @@ mod tests {
         // The h2 keeps its id as an anchor for the #frag destination.
         let target = blocks.iter().find(|b| b.kind == BlockKind::Heading2).unwrap();
         assert_eq!(target.anchor.as_deref(), Some("frag"));
+    }
+
+    #[test]
+    fn dir_attribute_and_direction_css_set_base_rtl_and_default_align() {
+        use super::TextAlign;
+        let document = parse(
+            "<p id=\"ltr\">plain</p>\
+             <p id=\"attr\" dir=\"rtl\">שלום</p>\
+             <p id=\"css\" style=\"direction: rtl\">שלום</p>\
+             <p id=\"leftrtl\" dir=\"rtl\" style=\"text-align: left\">שלום</p>\
+             <div dir=\"rtl\"><p id=\"inherit\">שלום</p></div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        // Only `<p>` blocks carry text; the wrapper `<div>` is block index 4.
+        let ltr = &blocks[0];
+        assert!(!ltr.rtl);
+        assert_eq!(ltr.align, TextAlign::Left);
+
+        let attr = &blocks[1];
+        assert!(attr.rtl, "dir=rtl sets base direction");
+        assert_eq!(attr.align, TextAlign::Right, "rtl default alignment is right");
+
+        let css = &blocks[2];
+        assert!(css.rtl, "direction: rtl sets base direction");
+        assert_eq!(css.align, TextAlign::Right);
+
+        // Explicit text-align wins over the direction default.
+        let leftrtl = &blocks[3];
+        assert!(leftrtl.rtl);
+        assert_eq!(leftrtl.align, TextAlign::Left);
+
+        // The <p> inside <div dir="rtl"> inherits the direction and right-aligns.
+        let inherit = blocks.last().unwrap();
+        assert!(inherit.rtl, "child inherits ancestor direction");
+        assert_eq!(inherit.align, TextAlign::Right);
     }
 
     #[test]

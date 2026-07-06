@@ -135,6 +135,9 @@ pub struct BlockBox {
     /// CSS `line-height` (inherited): overrides the default leading of this
     /// block's line boxes (`None` = UA default, `font × 1.35`).
     pub line_height: Option<crate::html::LineHeight>,
+    /// Base paragraph direction (UAX #9 base level) for this block's inline
+    /// content: `true` = right-to-left (`dir="rtl"` / `direction: rtl`).
+    pub rtl: bool,
     /// CSS `position` (static when `None`) with its box offsets in points.
     pub position: Option<PositionKind>,
     /// CSS `z-index` (`None` = `auto` = 0): paint order among positioned boxes.

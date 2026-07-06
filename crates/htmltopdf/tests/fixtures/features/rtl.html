@@ -1,0 +1,22 @@
+<html><head><style>
+  body { font-size: 16pt; }
+  .box { border: 1px solid; padding: 6pt; margin-bottom: 8pt; }
+</style></head><body>
+<h2>LTR paragraph (default)</h2>
+<p class="box">Hello world, this is left to right text.</p>
+
+<h2>RTL via dir attribute</h2>
+<p class="box" dir="rtl">שלום עולם, זהו טקסט מימין לשמאל.</p>
+
+<h2>RTL via CSS direction</h2>
+<p class="box" style="direction: rtl">مرحبا بالعالم، هذا نص من اليمين إلى اليسار.</p>
+
+<h2>RTL with embedded English</h2>
+<p class="box" dir="rtl">שלום World שלום.</p>
+
+<h2>RTL inherited to child + explicit left align</h2>
+<div dir="rtl">
+  <p class="box">שלום עולם ראשון</p>
+  <p class="box" style="text-align: left">שלום עולם שני (left-aligned)</p>
+</div>
+</body></html>

@@ -103,9 +103,11 @@ Works today:
   `width` on in-flow blocks).
 - **Text shaping** (HarfBuzz via `rustybuzz`) for embedded fonts: kerning
   reproduced in the PDF, ligatures with extractable text, Arabic joining forms.
-- **Bidirectional text** (UAX #9): mixed LTR/RTL lines — an Arabic or Hebrew
-  phrase inside an English sentence, or a full RTL paragraph — reorder into
-  correct visual order, and the PDF text stays extractable in logical order.
+- **Bidirectional text + RTL paragraphs** (UAX #9): mixed LTR/RTL lines — an
+  Arabic or Hebrew phrase inside an English sentence — reorder into correct
+  visual order, and the PDF text stays extractable in logical order.
+  `dir="rtl"` / `direction: rtl` set the base paragraph direction (inherited),
+  flipping the bidi base level and right-aligning by default.
 - **Font fallback chains**: characters the chosen font lacks (CJK, Hangul,
   Cyrillic, …) automatically fall back to a covering system face, each embedded
   as its own subset font — a Chinese/Japanese/Korean invoice renders correctly
@@ -150,8 +152,8 @@ Not complete yet:
   content always paints above the flow); `flex-shrink`/`order`/`align-self`;
   grid named lines/areas and `grid-template-rows`.
 - `@font-face` web fonts; synthetic italic when no italic face exists; emoji
-  (color fonts can't embed as outlines); `dir="rtl"` / `direction: rtl` base
-  paragraphs.
+  (color fonts can't embed as outlines); `dir="auto"`, bracket mirroring, and
+  RTL text inside table cells.
 - Complete CSS selector/property coverage (`%` heights/margins, `calc()`,
   custom properties are the big absences).
 - Links inside table cells (cell text is flattened, so an `<a>` in a `<td>`
@@ -348,7 +350,7 @@ speed and memory stay visible as fidelity improves.
 - Broaden CSS properties and computed-value coverage (`%` heights/margins,
   `min-width`, `calc()`, custom properties).
 - Broaden image support (inline/floated images, remote URLs) and add SVG.
-- `dir="rtl"` base paragraphs; stacking contexts.
+- Stacking contexts (negative z-index below flow); RTL table cells.
 - Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
 - Harden the HTTP server for production deployment patterns.
 

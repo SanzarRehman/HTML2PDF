@@ -931,8 +931,22 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       Table cells treat justify as left. **Not yet done:** justification via
       per-glyph `TJ`/`Tw` adjustments (spaces only today), `text-justify`,
       justified table cells.
-- [ ] **`dir="rtl"` / `direction: rtl`**: RTL base paragraphs (bidi core is
-      in; this is plumbing the base level + right alignment default).
+- [x] **`dir="rtl"` / `direction: rtl`**: RTL base paragraphs. The cascade
+      carries an inherited `direction` (`CellStyle::direction`; the `dir`
+      attribute is read as a presentational hint, CSS wins) → `FlowCtx::base_rtl`
+      → `BlockBox::rtl`. `reorder_pieces_bidi` takes `base_rtl` and resolves
+      UAX #9 embedding levels against `Level::rtl()` for RTL paragraphs (LTR
+      lines with an LTR base still skip via the no-RTL-char fast path). When an
+      element sets a new direction and no `text-align`, the default alignment
+      follows the direction's start edge (RTL → right); an explicit `text-align`
+      still wins and inherits. Verified: Hebrew/Arabic paragraphs reorder +
+      right-align, English embedded in Hebrew keeps its LTR order, direction
+      inherits into child blocks. `features/rtl` fixture (22 total). **Not yet
+      done:** `dir="auto"` (first-strong detection), bracket mirroring, inline
+      `<bdi>`/`<bdo>` embeddings, RTL base inside table cells (cell text reorders
+      within its string but stays left-aligned), and threading the base level
+      into per-piece shaping (individual word pieces are uni-directional, so
+      this only matters for a single token straddling a direction change).
 - [ ] **Remote `http(s)` images** (opt-in flag, size/time caps, server-safe
       fail-closed default) and inline/floated image follow-ups.
 - [ ] **Live-DOM surface on demand**: `insertBefore`, `cloneNode`,

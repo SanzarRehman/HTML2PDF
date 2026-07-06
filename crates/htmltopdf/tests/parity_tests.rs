@@ -44,6 +44,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "sizing"),
     ("features", "links"),
     ("features", "flex-wrap"),
+    ("features", "rtl"),
     ("combined", "invoice"),
     ("edge-cases", "unicode"),
     ("edge-cases", "long-table"),

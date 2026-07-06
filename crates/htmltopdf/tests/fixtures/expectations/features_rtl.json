@@ -1,0 +1,17 @@
+{
+  "fixture": "rtl",
+  "layer": "features",
+  "description": "Base paragraph direction: dir=\"rtl\" and CSS direction: rtl set the UAX #9 base level (RTL runs reorder, base level flips), right-align by default, and inherit to descendant blocks; an explicit text-align overrides the direction default. Hebrew/Arabic glyphs come from the fallback chain (Arial Unicode MS), so PDF text is embedded (not literal in the stream).",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "TJ", "re", "S"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The LTR paragraph is left-aligned; the RTL paragraphs are right-aligned.",
+    "Hebrew and Arabic paragraphs read right-to-left with correct word order.",
+    "The mixed paragraph places the embedded English word in its own left-to-right order between the Hebrew words.",
+    "A <p> inside <div dir=\"rtl\"> is right-aligned by inheritance; a sibling with text-align: left is left-aligned but still reads right-to-left."
+  ]
+}

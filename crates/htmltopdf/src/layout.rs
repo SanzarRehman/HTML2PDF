@@ -447,6 +447,7 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
         content_width,
         TextAlign::Left,
         None,
+        false,
         &mut pages,
         &mut y,
         &mut carried,
@@ -477,6 +478,7 @@ fn layout_box_children(
     width: f32,
     align: TextAlign,
     line_height: Option<crate::html::LineHeight>,
+    base_rtl: bool,
     pages: &mut Vec<Page>,
     y: &mut f32,
     carried: &mut f32,
@@ -572,7 +574,7 @@ fn layout_box_children(
             BoxChild::Line(runs) => {
                 // Content flushes any pending margin above it.
                 flush_margin(y, carried);
-                layout_line_box(runs, x, width, align, line_height, pages, y, floats, options);
+                layout_line_box(runs, x, width, align, line_height, base_rtl, pages, y, floats, options);
             }
             BoxChild::Image(image) if image.float_dir.is_some() => {
                 flush_margin(y, carried);
@@ -1064,7 +1066,7 @@ impl FlexItem<'_> {
                 b, x, width, pages, y, carried, &mut floats, overlays, containing, options,
             ),
             FlexItem::Line(runs) => {
-                layout_line_box(runs, x, width, TextAlign::Left, None, pages, y, &mut floats, options)
+                layout_line_box(runs, x, width, TextAlign::Left, None, false, pages, y, &mut floats, options)
             }
         }
     }
@@ -1555,6 +1557,7 @@ fn layout_block_box(
             inner_width,
             block.align,
             block.line_height,
+            block.rtl,
             pages,
             y,
             carried,
@@ -1756,6 +1759,7 @@ fn layout_line_box(
     width: f32,
     align: TextAlign,
     line_height: Option<crate::html::LineHeight>,
+    base_rtl: bool,
     pages: &mut Vec<Page>,
     y: &mut f32,
     floats: &mut Vec<FloatBand>,
@@ -1787,7 +1791,7 @@ fn layout_line_box(
         }
         // UAX #9: put the line's pieces in visual order when it mixes
         // directions (each piece's own glyph order is handled by shaping).
-        let visual = reorder_pieces_bidi(visual);
+        let visual = reorder_pieces_bidi(visual, base_rtl);
 
         let line_width: f32 = visual
             .iter()
@@ -1909,14 +1913,17 @@ struct LinePiece {
 }
 
 /// Reorder one visual line's pieces per UAX #9 so mixed LTR/RTL text reads
-/// correctly: embedding levels are resolved against an LTR base (HTML's
-/// default paragraph direction — `dir="rtl"` is not supported yet), and the
-/// pieces inside each right-to-left run are emitted in reverse order. Glyph
-/// order *within* a piece is the shaper's job (rustybuzz emits RTL segments
-/// visually), so only whole pieces move here; a piece is assigned to the run
-/// containing its first byte (word tokens rarely straddle a direction change).
-/// Purely-LTR lines return unchanged.
-fn reorder_pieces_bidi(pieces: Vec<LinePiece>) -> Vec<LinePiece> {
+/// correctly: embedding levels are resolved against the paragraph's base
+/// direction (`base_rtl` → base level 1, from `dir="rtl"`/`direction: rtl`),
+/// and the pieces inside each right-to-left run are emitted in reverse order.
+/// Glyph order *within* a piece is the shaper's job (rustybuzz emits RTL
+/// segments visually), so only whole pieces move here; a piece is assigned to
+/// the run containing its first byte (word tokens rarely straddle a direction
+/// change). A purely-LTR line with an LTR base returns unchanged.
+fn reorder_pieces_bidi(pieces: Vec<LinePiece>, base_rtl: bool) -> Vec<LinePiece> {
+    // With an LTR base, a line free of RTL characters never reorders. With an
+    // RTL base the same is true (a run of LTR words stays in logical order —
+    // only its alignment differs), so the fast path applies to both.
     if !pieces
         .iter()
         .any(|piece| crate::font::contains_rtl(&piece.text))
@@ -1924,8 +1931,13 @@ fn reorder_pieces_bidi(pieces: Vec<LinePiece>) -> Vec<LinePiece> {
         return pieces;
     }
 
+    let base = if base_rtl {
+        unicode_bidi::Level::rtl()
+    } else {
+        unicode_bidi::Level::ltr()
+    };
     let line_text: String = pieces.iter().map(|piece| piece.text.as_str()).collect();
-    let bidi = unicode_bidi::BidiInfo::new(&line_text, Some(unicode_bidi::Level::ltr()));
+    let bidi = unicode_bidi::BidiInfo::new(&line_text, Some(base));
     let paragraph = &bidi.paragraphs[0];
     let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
 
@@ -3093,7 +3105,7 @@ mod tests {
             piece("\u{05D3}\u{05D4}\u{05D5}"),
             piece(" xyz"),
         ];
-        let visual: Vec<String> = reorder_pieces_bidi(pieces)
+        let visual: Vec<String> = reorder_pieces_bidi(pieces, false)
             .into_iter()
             .map(|p| p.text)
             .collect();
@@ -3104,8 +3116,40 @@ mod tests {
 
         // A purely-LTR line is untouched.
         let pieces = vec![piece("one "), piece("two")];
-        let visual: Vec<String> = reorder_pieces_bidi(pieces).into_iter().map(|p| p.text).collect();
+        let visual: Vec<String> = reorder_pieces_bidi(pieces, false).into_iter().map(|p| p.text).collect();
         assert_eq!(visual, vec!["one ", "two"]);
+
+        // With an RTL base, two Hebrew words swap so the first word sits on the
+        // right; an LTR word embedded between them keeps its own reading order.
+        let pieces = vec![
+            piece("\u{05D0}\u{05D1}"),
+            piece(" World "),
+            piece("\u{05D2}\u{05D3}"),
+        ];
+        let visual: Vec<String> =
+            reorder_pieces_bidi(pieces, true).into_iter().map(|p| p.text).collect();
+        assert_eq!(visual, vec!["\u{05D2}\u{05D3}", " World ", "\u{05D0}\u{05D1}"]);
+    }
+
+    #[test]
+    fn rtl_paragraph_reorders_and_right_aligns() {
+        // Two Hebrew words in a base-RTL paragraph: the first logical word must
+        // paint furthest right, and the line must be right-aligned (its right
+        // edge near the content edge, not the left margin).
+        let document = crate::html::parse(
+            "<p dir=\"rtl\">\u{05E9}\u{05DC}\u{05D5}\u{05DD} \u{05E2}\u{05D5}\u{05DC}\u{05DD}</p>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let first = pages[0].lines.iter().find(|l| l.text.contains('\u{05E9}')).unwrap();
+        let second = pages[0].lines.iter().find(|l| l.text.contains('\u{05E2}')).unwrap();
+        assert!(
+            first.x > second.x,
+            "first logical word sits to the right of the second"
+        );
+        // Right-aligned: the rightmost glyphs land well past the page midline.
+        let mid = options.page_size.width / 2.0;
+        assert!(first.x > mid, "rtl line is right-aligned (x={})", first.x);
     }
 
     #[test]
@@ -3319,6 +3363,7 @@ mod tests {
                     max_width_percent: None,
                     center: false,
                     line_height: None,
+                    rtl: false,
                     position: None,
                     z_index: None,
                     offset_top: None,
@@ -3391,6 +3436,7 @@ mod tests {
                     max_width_percent: None,
                     center: false,
                     line_height: None,
+                    rtl: false,
                     position: None,
                     z_index: None,
                     offset_top: None,
@@ -3463,6 +3509,7 @@ mod tests {
                 max_width_percent: None,
                 center: false,
                 line_height: None,
+                rtl: false,
                 position: None,
                 z_index: None,
                 offset_top: None,
@@ -3557,6 +3604,7 @@ mod tests {
                         max_width_percent: None,
                         center: false,
                         line_height,
+                        rtl: false,
                         position: None,
                         z_index: None,
                         offset_top: None,
@@ -3626,6 +3674,7 @@ mod tests {
                     max_width_percent: None,
                     center: false,
                     line_height: None,
+                    rtl: false,
                     position: None,
                     z_index: None,
                     offset_top: None,
