@@ -1,0 +1,25 @@
+{
+  "fixture": "rich-cells",
+  "layer": "features",
+  "description": "Rich table cell content: cells with inline markup carry styled runs — bold/colored/sized segments inside one cell, clickable <a href> links in cells (URI annotations), underline decoration, RTL cells (dir attribute sets base direction, reorders per UAX #9, right-aligns by default), and nowrap clipping. Plain text-only cells keep the fast single-style path.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "/Subtype /Link",
+      "/URI (https://example.com/inv/42)",
+      "/URI (https://example.com/x)"
+    ],
+    "must_contain_text": ["Total:", "$1,400.50", "overdue", "bigger", "invoice", "nowrap"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The Total cell mixes regular, bold, and red-bold segments on shared lines.",
+    "The Details cell mixes 16pt and normal text with underline, wrapping across lines.",
+    "invoice #42 and 'a link' are blue, underlined, and clickable inside their cells.",
+    "The dir=rtl cell right-aligns and reads right-to-left with the bold Hebrew word styled.",
+    "The nowrap cell renders one clipped line; the plain cell looks unchanged."
+  ]
+}

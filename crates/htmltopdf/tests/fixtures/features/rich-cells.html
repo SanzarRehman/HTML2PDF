@@ -1,0 +1,22 @@
+<html><head><style>
+  table { width: 100%; }
+  td, th { border: 1px solid #999; padding: 4pt; }
+  .tag { color: #b71c1c; font-weight: bold; }
+  .nowrap { white-space: nowrap; }
+</style></head><body>
+<h2>Rich table cells</h2>
+<table>
+  <tr><th>Item</th><th>Details</th><th>Link</th></tr>
+  <tr>
+    <td>Total: <b>$1,400.50</b> <span class="tag">(overdue)</span></td>
+    <td>Mixed sizes: normal and <span style="font-size: 16pt">bigger</span> and <i>italic</i> plus <u>underlined</u> words wrapping across lines in this cell.</td>
+    <td>See <a href="https://example.com/inv/42">invoice #42</a> online.</td>
+  </tr>
+  <tr>
+    <td dir="rtl">שלום <b>עולם</b> — bidi in a cell</td>
+    <td class="nowrap">A <b>nowrap</b> cell with <a href="https://example.com/x">a link</a> that just keeps going and gets clipped</td>
+    <td>Plain cell (fast path)</td>
+  </tr>
+</table>
+<p>Flow paragraph after the table.</p>
+</body></html>

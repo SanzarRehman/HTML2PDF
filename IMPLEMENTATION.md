@@ -855,6 +855,37 @@ that attach cleanly once the spine exists.
 The current front of the queue (rough value order). Details for each are in the
 feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
 
+- [x] **Rich table cell content** (the big one): `TableCell::runs:
+      Vec<InlineRun>` — built only when a cell contains inline markup
+      (`cell_has_markup`), collected by an inline walker that folds each
+      element's computed style exactly like flow content (`inline_ctx` reuse:
+      bold/italic/color/size/family per run, `<a href>` interned links with UA
+      styling); the flattened `text` stays for column sizing and the fast
+      path. The font/link interners thread through `collect_table_rows` into
+      both table paths (spreadsheet + flow-embedded). Layout: rich cells wrap
+      through the shared `LineBreaker` (`wrap_cell_runs` → piece lines,
+      pre-scaled by `paint_scale`, bidi-reordered with the cell's base
+      direction, capped at the same 1/3-line budget); leading follows the
+      tallest run. Paint: per-piece faces, colors, faux-bold decisions,
+      underline/strike, and merged clickable `LinkArea`s. Cells with
+      `dir="rtl"`/`direction: rtl` right-align by default (attribute folded
+      into the cell style; CSS wins). Plain text-only cells are byte-identical
+      to before; reg-2-9 (22k plain cells) A/B: wall unchanged (0.62 s), RAM
+      +~3 MB (+3%, the 24-byte `Vec` per cell). `features/rich-cells` fixture
+      (26 total). **Not yet done:** inline images and `<br>` in cells, nested
+      blocks in cells laid out as blocks, justify in cells, column sizing that
+      measures per-run faces (bold-heavy cells can under-measure), ancestor
+      `dir` attributes reaching cells (CSS `direction` inherits; the attribute
+      is per-cell only).
+- [ ] **Broader JS DOM surface**: `insertBefore`, `cloneNode`,
+      `querySelector(All)`, JS-side `parentNode`/`children` traversal.
+- [ ] **`@font-face`**: parse the at-rule, load `src:` (local files; remote
+      via the SSRF-guarded fetcher when enabled), register into the
+      `resolve_spec` pipeline ahead of system lookup.
+- [ ] **Real border model**: per-side width/style/color, `box-sizing`,
+      `border-radius` (stroked corners).
+- [ ] **`calc()` + custom properties (`var()`)** in the cascade.
+
 - [x] **Per-element `font-family` + real bold/italic faces**: the cascade
       carries `font-family` (first usable name in the stack, generics kept)
       and `font-style`; the flow builder interns every distinct

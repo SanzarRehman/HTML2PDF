@@ -2482,10 +2482,87 @@ fn render_planned_table_row(
             });
         }
 
+        // A cell's default alignment follows its base direction (rtl → right),
+        // like flow blocks; an explicit `text-align` wins.
+        let default_align = if planned.source.style.direction == Some(true) {
+            TextAlign::Right
+        } else {
+            TextAlign::Left
+        };
+
+        // Rich cells: paint per piece — each with its own face, size, color,
+        // decoration, faux-bold decision, and clickable link rect.
+        for (line_index, pieces) in planned.piece_lines.iter().enumerate() {
+            let line_width: f32 = pieces.iter().map(|piece| piece.advance(options)).sum();
+            let start_x = match planned.source.style.align.unwrap_or(default_align) {
+                TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
+                TextAlign::Center => {
+                    x + ((planned.width - line_width) / 2.0).max(planned.padding_left)
+                }
+                TextAlign::Right => {
+                    x + (planned.width - line_width - planned.padding_right)
+                        .max(planned.padding_left)
+                }
+            };
+            let text_y = *y
+                - planned.padding_top
+                - vertical_offset
+                - planned.font_size
+                - (line_index as f32 * planned.leading);
+
+            let mut px = start_x;
+            for piece in pieces {
+                let piece_width = piece.advance(options);
+                if !piece.text.is_empty() {
+                    page.push_colored_line(
+                        Line {
+                            text: piece.text.clone(),
+                            x: px,
+                            y: text_y,
+                            font_size: piece.font_size,
+                            font: piece.font,
+                            leading: planned.leading,
+                        },
+                        piece.color,
+                        options.run_faux_bold(piece.font, piece.bold),
+                    );
+                    page.push_text_decoration(
+                        px,
+                        text_y,
+                        piece_width,
+                        piece.font_size,
+                        piece.color,
+                        piece.underline,
+                        piece.line_through,
+                    );
+                }
+                if piece.link != 0 && piece_width > 0.0 {
+                    let area = LinkArea {
+                        x: px,
+                        y: text_y - piece.font_size * 0.25,
+                        width: piece_width,
+                        height: piece.font_size * 1.1,
+                        link: piece.link,
+                    };
+                    match page.link_areas.last_mut() {
+                        Some(last)
+                            if last.link == area.link
+                                && last.y == area.y
+                                && (last.x + last.width - area.x).abs() < 0.05 =>
+                        {
+                            last.width += area.width;
+                        }
+                        _ => page.link_areas.push(area),
+                    }
+                }
+                px += piece_width;
+            }
+        }
+
         for (line_index, line) in planned.lines.iter().enumerate() {
             let text_width =
                 estimate_text_width(line, planned.font_size, options.run_font(planned.source.font));
-            let text_x = match planned.source.style.align.unwrap_or(TextAlign::Left) {
+            let text_x = match planned.source.style.align.unwrap_or(default_align) {
                 // Table cells don't justify; treat it as left.
                 TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
                 TextAlign::Center => {
@@ -2550,7 +2627,8 @@ fn vertical_text_offset(planned: &PlannedCell<'_>, row_height: f32) -> f32 {
 
 fn available_vertical_slack(planned: &PlannedCell<'_>, row_height: f32) -> f32 {
     let content_height = (row_height - planned.padding_top - planned.padding_bottom).max(0.0);
-    let text_height = (planned.lines.len().max(1) as f32 * planned.leading).max(0.0);
+    let line_count = planned.lines.len().max(planned.piece_lines.len()).max(1);
+    let text_height = (line_count as f32 * planned.leading).max(0.0);
 
     (content_height - text_height).max(0.0)
 }
@@ -2583,20 +2661,45 @@ fn plan_table_cells<'a>(
         let padding_bottom = cell.style.padding_bottom.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
         let white_space = cell.style.white_space.unwrap_or(WhiteSpace::Normal);
         let break_long_tokens = should_break_long_tokens(cell);
-        let lines = wrap_cell_text(
-            &cell.text,
-            width - padding_left - padding_right,
-            font_size,
-            if white_space == WhiteSpace::NoWrap {
-                1
-            } else {
-                3
-            },
-            white_space,
-            break_long_tokens,
-            options.run_font(cell.font),
-        );
-        let line_count = lines.len().max(1);
+        let max_lines = if white_space == WhiteSpace::NoWrap { 1 } else { 3 };
+        let content_width = width - padding_left - padding_right;
+
+        // Rich cells (inline markup) wrap their styled runs through the shared
+        // line breaker; plain cells keep the fast single-string path.
+        let (lines, piece_lines, leading) = if cell.runs.is_empty() {
+            let lines = wrap_cell_text(
+                &cell.text,
+                content_width,
+                font_size,
+                max_lines,
+                white_space,
+                break_long_tokens,
+                options.run_font(cell.font),
+            );
+            (lines, Vec::new(), leading)
+        } else {
+            let piece_lines = wrap_cell_runs(
+                &cell.runs,
+                content_width,
+                paint_scale,
+                max_lines,
+                cell.style.direction.unwrap_or(false),
+                options,
+            );
+            // Leading follows the tallest run in the cell (mixed sizes), still
+            // honoring an explicit CSS line-height.
+            let max_piece_font = piece_lines
+                .iter()
+                .flatten()
+                .map(|piece| piece.font_size)
+                .fold(font_size, f32::max);
+            let leading = match cell.style.line_height {
+                Some(crate::html::LineHeight::Length(points)) => points * paint_scale,
+                other => resolve_leading(other, max_piece_font, CELL_LEADING_FACTOR),
+            };
+            (Vec::new(), piece_lines, leading)
+        };
+        let line_count = lines.len().max(piece_lines.len()).max(1);
         // A CSS-declared row height is a floor, but it shrinks with the table's
         // shrink-to-fit scale (as a browser's print scaling does) so rows don't
         // stay tall while the text is scaled down.
@@ -2608,6 +2711,7 @@ fn plan_table_cells<'a>(
             source: cell,
             width,
             lines,
+            piece_lines,
             font_size,
             leading,
             height,
@@ -2636,6 +2740,10 @@ struct PlannedCell<'a> {
     source: &'a TableCell,
     width: f32,
     lines: Vec<String>,
+    /// Rich-cell content: wrapped piece lines (per-run fonts/colors/links),
+    /// already in visual (bidi) order. Empty for plain single-style cells,
+    /// which paint from `lines`.
+    piece_lines: Vec<Vec<LinePiece>>,
     font_size: f32,
     leading: f32,
     height: f32,
@@ -2976,6 +3084,49 @@ fn split_long_word(
     lines
 }
 
+/// Wrap a rich cell's styled runs into at most `max_lines` piece lines using
+/// the shared line breaker (per-run fonts/sizes measured correctly), scaling
+/// every run's font by the table's `paint_scale` first. Lines come back in
+/// visual (bidi) order. Content past the line cap is dropped (the cell clips,
+/// like the plain-text path).
+fn wrap_cell_runs(
+    runs: &[crate::box_tree::InlineRun],
+    content_width: f32,
+    paint_scale: f32,
+    max_lines: usize,
+    base_rtl: bool,
+    options: &RenderOptions,
+) -> Vec<Vec<LinePiece>> {
+    let scaled: Vec<crate::box_tree::InlineRun>;
+    let runs = if (paint_scale - 1.0).abs() < f32::EPSILON {
+        runs
+    } else {
+        scaled = runs
+            .iter()
+            .map(|run| {
+                let mut run = run.clone();
+                run.font_size *= paint_scale;
+                run
+            })
+            .collect();
+        &scaled
+    };
+
+    let mut breaker = LineBreaker::new(runs);
+    let mut lines = Vec::new();
+    while !breaker.is_done() && lines.len() < max_lines {
+        // `white-space: nowrap` (max_lines == 1) never wraps: give the single
+        // line unbounded width and let the cell's clip rect cut it off.
+        let line_width = if max_lines == 1 { f32::MAX } else { content_width.max(1.0) };
+        let visual = breaker.next_line(line_width, options);
+        if visual.is_empty() {
+            break;
+        }
+        lines.push(reorder_pieces_bidi(visual, base_rtl));
+    }
+    lines
+}
+
 fn wrap_cell_text(
     text: &str,
     max_width: f32,
@@ -3173,6 +3324,74 @@ mod tests {
             );
         }
         assert!(last < margin_right_edge - 20.0, "last line stays ragged: {last}");
+    }
+
+    #[test]
+    fn rich_cells_paint_per_run_styles_and_links() {
+        let document = crate::html::parse(
+            "<table><tr>\
+               <td>plain</td>\
+               <td>pay <b>now</b> via <a href=\"https://x.test/pay\">this link</a></td>\
+             </tr></table>",
+        );
+        let options = RenderOptions::default().with_document_hints(&document);
+        let pages = layout_document(&document, &options);
+
+        // Both cells' words paint; the bold word carries the bold flag through
+        // the faux-bold decision (default font: no real bold face).
+        let texts: Vec<&str> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                PaintCommand::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"plain"));
+        assert!(texts.contains(&"now"));
+        let bold_cmd = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                PaintCommand::Text(t) if t.text == "now" => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert!(bold_cmd.bold, "run-level bold survives into the cell paint");
+
+        // The linked words produce a clickable area pointing at the target.
+        assert_eq!(options.links, vec!["https://x.test/pay".to_string()]);
+        assert!(
+            !pages[0].link_areas.is_empty(),
+            "cell link produced a clickable area"
+        );
+        assert!(pages[0].link_areas.iter().all(|a| a.link == 1));
+    }
+
+    #[test]
+    fn rtl_cells_right_align_their_content() {
+        let document = crate::html::parse(
+            "<table><tr>\
+               <td dir=\"rtl\"><b>\u{05E9}\u{05DC}\u{05D5}\u{05DD}</b></td>\
+               <td><b>ltr</b></td>\
+             </tr><tr>\
+               <td>a much longer plain cell that widens the first column</td>\
+               <td>x</td>\
+             </tr></table>",
+        );
+        let options = RenderOptions::default().with_document_hints(&document);
+        let pages = layout_document(&document, &options);
+        let rtl = pages[0].lines.iter().find(|l| l.text.contains('\u{05E9}')).unwrap();
+        let ltr = pages[0].lines.iter().find(|l| l.text == "ltr").unwrap();
+        // Column 1 spans half the table; the RTL cell's text must hug the
+        // column's right edge, far past where the LTR cell's text starts
+        // relative to its own column.
+        let rtl_offset_from_left = rtl.x - options.margin_left;
+        assert!(
+            rtl_offset_from_left > 20.0,
+            "rtl cell content right-aligned (offset {rtl_offset_from_left})"
+        );
+        assert!(ltr.x > rtl.x, "second column starts after the first");
     }
 
     #[test]
@@ -4098,6 +4317,7 @@ mod tests {
                         text: "SL".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             border: Some(true),
                             bold: true,
@@ -4109,6 +4329,7 @@ mod tests {
                         text: "Name".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             border: Some(true),
                             bold: true,
@@ -4147,6 +4368,7 @@ mod tests {
                     text: "Warning".to_string(),
                     colspan: 1,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         color: Some(Color::from_rgb_u8(0, 0, 255)),
                         background_color: Some(Color::from_rgb_u8(255, 0, 0)),
@@ -4187,6 +4409,7 @@ mod tests {
                         text: "Top".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             vertical_align: Some(crate::html::VerticalAlign::Top),
                             ..Default::default()
@@ -4196,6 +4419,7 @@ mod tests {
                         text: "Middle".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             vertical_align: Some(crate::html::VerticalAlign::Middle),
                             ..Default::default()
@@ -4205,6 +4429,7 @@ mod tests {
                         text: "Bottom".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             vertical_align: Some(crate::html::VerticalAlign::Bottom),
                             ..Default::default()
@@ -4250,6 +4475,7 @@ mod tests {
                         .to_string(),
                     colspan: 1,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         border: Some(true),
                         bold: false,
@@ -4292,6 +4518,7 @@ mod tests {
                     text: "A".to_string(),
                     colspan: 1,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         border: Some(true),
                         bold: false,
@@ -4332,6 +4559,7 @@ mod tests {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         border: Some(true),
                         font_size: Some(10.0),
@@ -4391,6 +4619,7 @@ mod tests {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         border: Some(true),
                         font_size: Some(10.0),
@@ -4459,6 +4688,7 @@ mod tests {
                     text: long_word.clone(),
                     colspan: 1,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         font_size: Some(10.0),
                         ..Default::default()
@@ -4520,6 +4750,7 @@ mod tests {
                         text: "A".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             font_size: Some(11.0),
                             ..Default::default()
@@ -4529,6 +4760,7 @@ mod tests {
                         text: "B".to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             font_size: Some(11.0),
                             ..Default::default()
@@ -4561,6 +4793,7 @@ mod tests {
                     text: "Report title".to_string(),
                     colspan: 2,
                     font: 0,
+                    runs: Vec::new(),
                     style: crate::html::CellStyle {
                         font_size: Some(12.0),
                         padding_left: Some(4.0),
@@ -4603,6 +4836,7 @@ mod tests {
                 text: "SL".to_string(),
                 colspan: 1,
                 font: 0,
+                runs: Vec::new(),
                 style: crate::html::CellStyle {
                     border: Some(true),
                     bold: true,
@@ -4613,6 +4847,7 @@ mod tests {
                 text: "Name".to_string(),
                 colspan: 1,
                 font: 0,
+                runs: Vec::new(),
                 style: crate::html::CellStyle {
                     border: Some(true),
                     bold: true,
@@ -4637,6 +4872,7 @@ mod tests {
                         text: index.to_string(),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             border: Some(true),
                             ..Default::default()
@@ -4646,6 +4882,7 @@ mod tests {
                         text: format!("Student {index}"),
                         colspan: 1,
                         font: 0,
+                        runs: Vec::new(),
                         style: crate::html::CellStyle {
                             border: Some(true),
                             ..Default::default()

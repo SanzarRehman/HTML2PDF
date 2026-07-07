@@ -61,6 +61,12 @@ pub struct TableCell {
     /// Interned font-spec index into `Document::font_specs` (0 = default),
     /// assigned in a post-pass over the built document.
     pub font: u16,
+    /// Styled inline runs for a *rich* cell — one that contains inline markup
+    /// (`<b>`, `<a>`, `<span style>`, …). Empty for a plain text-only cell,
+    /// which keeps the fast single-style path; when non-empty, layout wraps
+    /// and paints these runs instead of `text` (`text` stays the flattened
+    /// version, used for column sizing).
+    pub runs: Vec<crate::box_tree::InlineRun>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -444,7 +450,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
     // its fast, well-tuned layout.
     let (mut blocks, mut flow) = match flow {
         Some(root) if root.has_nontable_content() => (Vec::new(), Some(root)),
-        _ => (tables_from_dom(&dom, &stylesheet, &computed), None),
+        _ => (tables_from_dom(&dom, &stylesheet, &computed, &fonts, &links), None),
     };
 
     // Post-pass: intern each table cell's font requirement (its computed style
@@ -834,7 +840,16 @@ fn build_node(
                 // collected from this subtree; geometry is resolved at layout.
                 acc.flush_line();
                 let mut rows = Vec::new();
-                collect_table_rows(dom, id, TableSection::Body, env.stylesheet, computed, &mut rows);
+                collect_table_rows(
+                    dom,
+                    id,
+                    TableSection::Body,
+                    env.stylesheet,
+                    computed,
+                    env.fonts,
+                    env.links,
+                    &mut rows,
+                );
                 let rows: Vec<crate::box_tree::TableRow> = rows
                     .into_iter()
                     .map(|block| crate::box_tree::TableRow {
@@ -1570,6 +1585,8 @@ fn tables_from_dom(
     dom: &crate::dom::Dom,
     stylesheet: &Stylesheet,
     computed: &ComputedStyles,
+    fonts: &std::cell::RefCell<FontInterner>,
+    links: &std::cell::RefCell<LinkInterner>,
 ) -> Vec<Block> {
     let mut rows = Vec::new();
     collect_table_rows(
@@ -1578,17 +1595,22 @@ fn tables_from_dom(
         TableSection::Body,
         stylesheet,
         computed,
+        fonts,
+        links,
         &mut rows,
     );
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_table_rows(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
     section: TableSection,
     stylesheet: &Stylesheet,
     computed: &ComputedStyles,
+    fonts: &std::cell::RefCell<FontInterner>,
+    links: &std::cell::RefCell<LinkInterner>,
     rows: &mut Vec<Block>,
 ) {
     // `display: none` hides the element and its whole subtree.
@@ -1612,7 +1634,7 @@ fn collect_table_rows(
                 .unwrap_or(default);
         }
         Some("tr") => {
-            let cells = cells_from_row(dom, id, computed);
+            let cells = cells_from_row(dom, id, stylesheet, computed, fonts, links);
             if !cells.is_empty() {
                 rows.push(Block {
                     kind: row_kind(dom, id, section, stylesheet),
@@ -1626,7 +1648,7 @@ fn collect_table_rows(
     }
 
     for &child in &node.children {
-        collect_table_rows(dom, child, child_section, stylesheet, computed, rows);
+        collect_table_rows(dom, child, child_section, stylesheet, computed, fonts, links, rows);
     }
 }
 
@@ -1694,7 +1716,10 @@ fn computed_display_for_node(
 fn cells_from_row(
     dom: &crate::dom::Dom,
     tr_id: crate::dom::NodeId,
+    stylesheet: &Stylesheet,
     computed: &ComputedStyles,
+    fonts: &std::cell::RefCell<FontInterner>,
+    links: &std::cell::RefCell<LinkInterner>,
 ) -> Vec<TableCell> {
     let mut cells = Vec::new();
 
@@ -1723,16 +1748,117 @@ fn cells_from_row(
         // only where neither the cascade nor inheritance set an alignment.
         let mut style = computed.style[child].clone();
         infer_cell_alignment(&mut style, &node.classes().collect::<Vec<_>>());
+        // Fold the cell's own `dir` attribute into the computed direction
+        // (the CSS `direction` property still wins, as in the flow path).
+        style.direction = own_direction(dom, child, &style);
+
+        // A cell with inline markup gets styled runs (the rich path); a plain
+        // text-only cell keeps `runs` empty — the fast single-style path,
+        // byte-identical to the previous behavior.
+        let runs = if cell_has_markup(dom, child) {
+            collect_cell_runs(dom, child, stylesheet, computed, &style, fonts, links)
+        } else {
+            Vec::new()
+        };
 
         cells.push(TableCell {
             text,
             colspan,
             style,
             font: 0, // interned in the post-pass over the finished document
+            runs,
         });
     }
 
     cells
+}
+
+/// Whether a cell contains any element markup worth per-run styling (anything
+/// beyond bare text, ignoring non-rendered and layout-neutral tags).
+fn cell_has_markup(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
+    dom.node(id).children.iter().any(|&child| match &dom.node(child).data {
+        crate::dom::NodeData::Element { name, .. } => {
+            !matches!(name.as_str(), "script" | "style" | "head" | "title" | "br" | "img")
+                || cell_has_markup(dom, child)
+        }
+        _ => false,
+    })
+}
+
+/// Build a rich cell's styled inline runs: descend the cell's subtree folding
+/// each element's computed style into the context (exactly like flow inline
+/// content — bold/italic/color/size/family, `<a href>` link + UA styling),
+/// flattening block-level descendants inline. `<img>` and `<br>` are skipped,
+/// matching the flat-text collector.
+fn collect_cell_runs(
+    dom: &crate::dom::Dom,
+    cell_id: crate::dom::NodeId,
+    stylesheet: &Stylesheet,
+    computed: &ComputedStyles,
+    style: &CellStyle,
+    fonts: &std::cell::RefCell<FontInterner>,
+    links: &std::cell::RefCell<LinkInterner>,
+) -> Vec<crate::box_tree::InlineRun> {
+    let env = FlowEnv {
+        stylesheet,
+        computed,
+        table_columns: &[],
+        row_height: None,
+        fonts,
+        links,
+    };
+    let family = style
+        .font_family
+        .as_deref()
+        .map(|name| env.fonts.borrow_mut().family(name));
+    let bold = style.bold;
+    let italic = style.italic.unwrap_or(false);
+    let font = env.fonts.borrow_mut().spec(family, bold, italic);
+    let ctx = FlowCtx {
+        font_size: style.font_size.unwrap_or(11.0),
+        bold,
+        italic,
+        family,
+        font,
+        underline: style.underline,
+        line_through: style.line_through,
+        color: style.color.unwrap_or(Color::BLACK),
+        align: style.align.unwrap_or(TextAlign::Left),
+        base_rtl: style.direction.unwrap_or(false),
+        link: 0,
+    };
+    let mut acc = ChildAcc::default();
+    collect_cell_runs_into(dom, cell_id, &env, ctx, &mut acc);
+    acc.pending
+}
+
+fn collect_cell_runs_into(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    env: &FlowEnv,
+    ctx: FlowCtx,
+    acc: &mut ChildAcc,
+) {
+    use crate::dom::NodeData;
+    for &child in &dom.node(id).children {
+        match &dom.node(child).data {
+            NodeData::Text(text) => acc.push_text(text, &ctx),
+            NodeData::Element { name, .. } => {
+                let tag = name.as_str();
+                if matches!(tag, "script" | "style" | "head" | "title" | "img")
+                    || env.computed.hidden[child]
+                {
+                    continue;
+                }
+                if tag == "br" {
+                    continue; // parity with the flat-text collector
+                }
+                let child_ctx = inline_ctx(&ctx, env, dom, child, tag);
+                collect_cell_runs_into(dom, child, env, child_ctx, acc);
+            }
+            NodeData::Document => {}
+        }
+    }
 }
 
 /// Concatenate all descendant text of a node. html5ever has already decoded
@@ -4203,6 +4329,48 @@ mod tests {
                 _ => 0,
             })
             .sum()
+    }
+
+    #[test]
+    fn cells_with_markup_get_styled_runs_and_plain_cells_stay_flat() {
+        let document = parse(
+            "<table><tr>\
+               <td>plain text only</td>\
+               <td>Total: <b>$400</b> <span style=\"color:#f00\">due</span></td>\
+               <td>see <a href=\"https://x.test/inv\">the invoice</a></td>\
+             </tr></table>",
+        );
+        let cells = &document.blocks[0].cells;
+
+        // Plain cell: no runs (fast path), text as before.
+        assert!(cells[0].runs.is_empty());
+        assert_eq!(cells[0].text, "plain text only");
+
+        // Bold + colored runs, with the flattened text still intact.
+        let rich = &cells[1];
+        assert_eq!(rich.text, "Total: $400 due");
+        assert!(!rich.runs.is_empty());
+        let bold = rich.runs.iter().find(|r| r.text.contains("$400")).unwrap();
+        assert!(bold.bold);
+        let due = rich.runs.iter().find(|r| r.text.contains("due")).unwrap();
+        assert!(due.color.r > 0.9 && due.color.g < 0.1);
+
+        // The linked run carries the interned target and UA link styling.
+        let linked = &cells[2];
+        let link_run = linked.runs.iter().find(|r| r.text.contains("invoice")).unwrap();
+        assert_eq!(link_run.link, 1);
+        assert!(link_run.underline);
+        assert_eq!(document.links, vec!["https://x.test/inv".to_string()]);
+    }
+
+    #[test]
+    fn cell_dir_attribute_sets_direction() {
+        let document = parse(
+            "<table><tr><td dir=\"rtl\">\u{05E9}\u{05DC}\u{05D5}\u{05DD} <b>x</b></td></tr></table>",
+        );
+        let cell = &document.blocks[0].cells[0];
+        assert_eq!(cell.style.direction, Some(true));
+        assert!(!cell.runs.is_empty());
     }
 
     #[test]

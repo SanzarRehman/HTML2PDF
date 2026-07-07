@@ -21,12 +21,12 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `u`, `ins`, `s`, `strike`, `del` | ✅ | Underline / line-through decoration. |
 | `span`, inline text | ✅ | Per-run color/size/weight/decoration. |
 | `br` | ✅ | Hard line break. |
-| `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `col` | ✅ | Automatic column sizing, header repeat across pages, **now renders alongside surrounding flow content**. |
+| `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `col` | ✅ | Automatic column sizing, header repeat across pages, renders alongside surrounding flow content. **Rich cell content**: a cell with inline markup carries styled runs — mixed bold/italic/color/size segments, clickable `<a href>` links, underline/strike, and RTL cells (`dir`/`direction` set the base level, reorder per UAX #9, right-align by default). Plain text-only cells keep the fast single-style path. Column sizing still measures the flattened text (a heavily-bold cell can be slightly under-measured); no images/`<br>`/nested blocks *as blocks* inside cells. |
 | `colspan` | ✅ | |
 | `rowspan` | ❌ | Ignored. |
 | `caption`, nested tables | ❌ | |
 | `img` | 🟡 | Inline when it shares a line with text (baseline-aligned, wraps like a word, clickable inside `<a>`); block path for standalone/floated images (see Images). |
-| `a` | 🟡 | Clickable `/Link` annotations: external URIs and `mailto:` as URI actions, `#fragment` as in-document jumps to `id` anchors (dead fragments annotate nothing). UA style applied (blue + underline; author `color` and `text-decoration: none` win). Adjacent words merge into one clickable rect per line. Not yet: links inside table cells (cell text is flattened). |
+| `a` | 🟡 | Clickable `/Link` annotations: external URIs and `mailto:` as URI actions, `#fragment` as in-document jumps to `id` anchors (dead fragments annotate nothing). UA style applied (blue + underline; author `color` and `text-decoration: none` win). Adjacent words merge into one clickable rect per line. Links inside table cells work (rich cells carry styled runs). |
 | `form`, `fieldset`, `input`, `select`, `textarea`, `button` | ❌ | Containers may render text; no form controls. |
 | `svg`, `canvas`, `video`, `audio`, `iframe`, `object` | ❌ | |
 | `script`, `style`, `head`, `title` | ✅ | Consumed (CSS parsed; scripts only with `--js`), not rendered. |

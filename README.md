@@ -89,7 +89,9 @@ Works today:
 - Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes —
   and tables rendered inline with the surrounding flow content.
 - Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
-  alignment, wrapping, clipping, and repeated table headers.
+  alignment, wrapping, clipping, and repeated table headers — with **rich cell
+  content**: mixed bold/color/size segments, clickable links, and RTL text
+  inside cells (plain cells keep the fast single-style path).
 - CSS colors, font sizes, bold text (rendered as faux-bold fill+stroke), text
   alignment (including `text-align: justify`), text decoration
   (underline/line-through), margins, padding (with vertical margin collapse),
@@ -169,8 +171,7 @@ Not complete yet:
   RTL text inside table cells.
 - Complete CSS selector/property coverage (`%` heights/margins, `calc()`,
   custom properties are the big absences).
-- Links inside table cells (cell text is flattened, so an `<a>` in a `<td>`
-  renders as plain text); tagged PDF.
+- Tagged PDF; images and nested block layout inside table cells.
 - Full visual compatibility with Chromium.
 
 See [docs/COVERAGE.md](docs/COVERAGE.md) for the full ✅/🟡/❌ support matrix,

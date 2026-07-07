@@ -331,7 +331,7 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Isolated stacking contexts (`z-index` compares globally — negative z does
   paint below the flow now); `flex-shrink`/`order`/`align-self`; grid named
   lines/areas and `grid-template-rows`.
-- Links inside table cells (cell text is flattened); tagged PDF.
+- Images / nested block layout inside table cells; tagged PDF.
 - `@font-face` web fonts; emoji; `dir="auto"` and RTL table cells; `%` heights/
   margins/offsets; `calc()`/custom properties.
 - Broader **JavaScript**: DOM traversal from JS, `querySelector`, events,
