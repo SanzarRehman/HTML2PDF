@@ -1,0 +1,19 @@
+{
+  "fixture": "inline-images",
+  "layer": "features",
+  "description": "Inline <img> flowing with text: an image sharing its line with text sits on the baseline and advances like a word (icon at line start via lookahead, image mid-sentence, tall image growing the line box, linked image staying clickable). Standalone and floated images keep the block path.",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "Do", "/Subtype /Link"],
+    "must_contain_text": ["Note:", "mid-sentence", "taller", "clickable", "Standalone"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The blue icon starts the first line with text beside it on the same baseline.",
+    "The mid-sentence icon flows with the words and the paragraph wraps naturally.",
+    "The tall green image grows its line box without overlapping the line above; its bottom sits on the baseline.",
+    "The linked icon and its label are one clickable region.",
+    "The standalone image renders block-level below its caption."
+  ]
+}

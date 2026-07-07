@@ -197,6 +197,10 @@ pub struct InlineRun {
     pub font: u16,
     /// Interned link target: `Document::links[link - 1]` (0 = not a link).
     pub link: u16,
+    /// An inline `<img>` flowing with the text (empty `text` in that case):
+    /// it occupies its resolved width on the line and sits on the baseline.
+    /// `None` for ordinary text runs.
+    pub image: Option<Box<ImageBox>>,
     /// `text-decoration: underline` (also `<u>`/`<ins>`), stroked below the baseline.
     pub underline: bool,
     /// `text-decoration: line-through` (also `<s>`/`<strike>`/`<del>`).
@@ -223,7 +227,9 @@ impl FlowRoot {
 fn children_have_text(children: &[BoxChild]) -> bool {
     children.iter().any(|child| match child {
         BoxChild::Block(block) => children_have_text(&block.children),
-        BoxChild::Line(runs) => runs.iter().any(|run| !run.text.trim().is_empty()),
+        BoxChild::Line(runs) => runs
+            .iter()
+            .any(|run| run.image.is_some() || !run.text.trim().is_empty()),
         // An image is visible content in its own right. This is evaluated both
         // before image resolution (to keep an image-only document's flow tree)
         // and after, so it counts regardless of whether `image_index` is set yet.
@@ -235,7 +241,9 @@ fn children_have_text(children: &[BoxChild]) -> bool {
 fn children_have_nontable(children: &[BoxChild]) -> bool {
     children.iter().any(|child| match child {
         BoxChild::Block(block) => children_have_nontable(&block.children),
-        BoxChild::Line(runs) => runs.iter().any(|run| !run.text.trim().is_empty()),
+        BoxChild::Line(runs) => runs
+            .iter()
+            .any(|run| run.image.is_some() || !run.text.trim().is_empty()),
         BoxChild::Image(_) => true,
         BoxChild::Table(_) => false,
     })

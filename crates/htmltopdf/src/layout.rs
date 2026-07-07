@@ -1098,7 +1098,12 @@ impl FlexItem<'_> {
             }),
             FlexItem::Line(runs) => runs
                 .iter()
-                .map(|run| estimate_text_width(&run.text, run.font_size, options.run_font(run.font)))
+                .map(|run| match run.image.as_deref() {
+                    Some(image) => image.width,
+                    None => {
+                        estimate_text_width(&run.text, run.font_size, options.run_font(run.font))
+                    }
+                })
                 .sum(),
         }
     }
@@ -1433,7 +1438,12 @@ fn measure_max_content(children: &[crate::box_tree::BoxChild], options: &RenderO
         let w = match child {
             BoxChild::Line(runs) => runs
                 .iter()
-                .map(|run| estimate_text_width(&run.text, run.font_size, options.run_font(run.font)))
+                .map(|run| match run.image.as_deref() {
+                    Some(image) => image.width,
+                    None => {
+                        estimate_text_width(&run.text, run.font_size, options.run_font(run.font))
+                    }
+                })
                 .sum(),
             BoxChild::Block(b) => {
                 measure_max_content(&b.children, options)
@@ -1860,21 +1870,28 @@ fn layout_line_box(
         // directions (each piece's own glyph order is handled by shaping).
         let visual = reorder_pieces_bidi(visual, base_rtl);
 
-        let line_width: f32 = visual
-            .iter()
-            .map(|piece| estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font)))
-            .sum();
+        let line_width: f32 = visual.iter().map(|piece| piece.advance(options)).sum();
         // Leading follows the tallest run on the line; an explicit `line-height`
-        // overrides the UA default (×1.35).
+        // overrides the UA default (×1.35). An inline image grows the line box
+        // when it rises higher above the baseline than the tallest text ascent
+        // (the image's bottom sits on the baseline, like a browser's default
+        // `vertical-align: baseline`).
         let max_font = visual
             .iter()
             .map(|piece| piece.font_size)
             .fold(0.0_f32, f32::max);
-        let leading = resolve_leading(line_height, max_font, FLOW_LEADING_FACTOR);
+        let max_image = visual
+            .iter()
+            .filter_map(|piece| piece.image.map(|(_, _, height)| height))
+            .fold(0.0_f32, f32::max);
+        let text_ascent = max_font * 0.8;
+        let image_rise = (max_image - text_ascent).max(0.0);
+        let leading = resolve_leading(line_height, max_font, FLOW_LEADING_FACTOR) + image_rise;
         // When line-height exceeds the default line box, distribute the extra as
         // half-leading (glyphs sit mid-line, as browsers do). When it's smaller
         // (or unset) the baseline stays where the default box puts it.
-        let half_leading = ((leading - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
+        let half_leading =
+            ((leading - image_rise - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
 
         // A page break retires the previous page's floats.
         if !has_space(*y, options, leading) {
@@ -1902,12 +1919,35 @@ fn layout_line_box(
         };
 
         // Drop the baseline below the line's top edge by the tallest run's
-        // ascent (~0.8 em), so ascenders stay inside the line box instead of
+        // ascent (~0.8 em) — or by the tallest inline image, whichever rises
+        // higher — so ascenders stay inside the line box instead of
         // overlapping the border/padding of the box above.
-        let baseline = *y - half_leading - max_font * 0.8;
+        let baseline = *y - half_leading - text_ascent.max(max_image);
 
         let page = pages.last_mut().expect("at least one page exists");
         for piece in &visual {
+            // An inline image paints with its bottom on the baseline and
+            // advances by its width; a linked image is clickable over its box.
+            if let Some((image_index, image_w, image_h)) = piece.image {
+                page.commands.push(PaintCommand::Image(ImageCommand {
+                    image_index,
+                    x: px,
+                    y: baseline,
+                    width: image_w,
+                    height: image_h,
+                }));
+                if piece.link != 0 && image_w > 0.0 {
+                    page.link_areas.push(LinkArea {
+                        x: px,
+                        y: baseline,
+                        width: image_w,
+                        height: image_h,
+                        link: piece.link,
+                    });
+                }
+                px += image_w;
+                continue;
+            }
             let mut piece_width =
                 estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
             if piece.text == " " {
@@ -1977,6 +2017,20 @@ struct LinePiece {
     line_through: bool,
     /// Interned link target (see `Document::links`; 0 = not a link).
     link: u16,
+    /// An inline image: `(image_index, width, height)` in points. The piece
+    /// occupies `width` on the line and sits with its bottom on the baseline.
+    image: Option<(usize, f32, f32)>,
+}
+
+impl LinePiece {
+    /// The horizontal space this piece occupies: its image width, or the
+    /// measured text width.
+    fn advance(&self, options: &RenderOptions) -> f32 {
+        match self.image {
+            Some((_, width, _)) => width,
+            None => estimate_text_width(&self.text, self.font_size, options.run_font(self.font)),
+        }
+    }
 }
 
 /// Reorder one visual line's pieces per UAX #9 so mixed LTR/RTL text reads
@@ -2059,11 +2113,7 @@ impl LineBreaker {
     /// Width of the next unplaced token, if any.
     fn peek_token_width(&self, options: &RenderOptions) -> Option<f32> {
         self.tokens.front().map(|token| {
-            token
-                .pieces
-                .iter()
-                .map(|piece| estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font)))
-                .sum()
+            token.pieces.iter().map(|piece| piece.advance(options)).sum()
         })
     }
 
@@ -2074,20 +2124,26 @@ impl LineBreaker {
         let mut current_width = 0.0_f32;
 
         while let Some(token) = self.tokens.front() {
-            let token_width: f32 = token
-                .pieces
-                .iter()
-                .map(|piece| estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font)))
-                .sum();
+            let token_width: f32 = token.pieces.iter().map(|piece| piece.advance(options)).sum();
 
             // A token wider than the line can never fit by wrapping: fill this
             // line character-by-character (starting on an empty line) and queue
-            // the remainder as the next token.
+            // the remainder as the next token. An over-wide *image* token can't
+            // split: it takes the whole line, scaled down to fit.
             if token_width > max_width + WRAP_TOLERANCE {
                 if !current.is_empty() {
                     break;
                 }
                 let token = self.tokens.pop_front().expect("front token exists");
+                if let Some((_, width, height)) =
+                    token.pieces.first().and_then(|piece| piece.image)
+                {
+                    let mut piece = token.pieces.into_iter().next().expect("image piece");
+                    let scale = (max_width / width).min(1.0).max(0.0);
+                    piece.image = Some((piece.image.expect("is image").0, width * scale, height * scale));
+                    current.push(piece);
+                    break;
+                }
                 let leftover =
                     fill_from_long_token(&token.pieces, max_width, options, &mut current, &mut current_width);
                 if !leftover.is_empty() {
@@ -2136,11 +2192,12 @@ impl LineBreaker {
                     underline,
                     line_through,
                     link,
+                    image: None,
                 });
                 current_width += space_width;
             }
             for piece in token.pieces {
-                current_width += estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
+                current_width += piece.advance(options);
                 current.push(piece);
             }
         }
@@ -2164,7 +2221,8 @@ fn fill_from_long_token(
 
     let push_merged = |list: &mut Vec<LinePiece>, piece: &LinePiece, ch: char| {
         if let Some(last) = list.last_mut() {
-            if last.font_size == piece.font_size
+            if last.image.is_none()
+                && last.font_size == piece.font_size
                 && last.font == piece.font
                 && last.color == piece.color
                 && last.bold == piece.bold
@@ -2185,6 +2243,7 @@ fn fill_from_long_token(
             underline: piece.underline,
             line_through: piece.line_through,
             link: piece.link,
+            image: None,
         });
     };
 
@@ -2238,6 +2297,32 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
     };
 
     for run in runs {
+        // An inline image is a word of its own: it can wrap to the next line
+        // but never merges with or splits across text pieces. Unresolved
+        // images (failed load) contribute nothing.
+        if let Some(image) = run.image.as_deref() {
+            if let Some(index) = image.image_index {
+                if image.width > 0.0 && image.height > 0.0 {
+                    finish_word(&mut word, &mut tokens, &mut pending_space);
+                    tokens.push(Token {
+                        pieces: vec![LinePiece {
+                            text: String::new(),
+                            font_size: run.font_size,
+                            font: run.font,
+                            color: run.color,
+                            bold: false,
+                            underline: false,
+                            line_through: false,
+                            link: run.link,
+                            image: Some((index, image.width, image.height)),
+                        }],
+                        space_font_size: pending_space.take().unwrap_or(0.0),
+                    });
+                    seen_token = true;
+                }
+            }
+            continue;
+        }
         for ch in run.text.chars() {
             if ch.is_whitespace() {
                 finish_word(&mut word, &mut tokens, &mut pending_space);
@@ -2251,7 +2336,8 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
             // Extend the current word, merging into the last piece if the style
             // matches so adjacent same-style characters stay in one piece.
             if let Some(last) = word.last_mut() {
-                if last.font_size == run.font_size
+                if last.image.is_none()
+                    && last.font_size == run.font_size
                     && last.font == run.font
                     && last.color == run.color
                     && last.bold == run.bold
@@ -2272,6 +2358,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 underline: run.underline,
                 line_through: run.line_through,
                 link: run.link,
+                image: None,
             });
         }
     }
@@ -3089,6 +3176,142 @@ mod tests {
     }
 
     #[test]
+    fn inline_images_sit_on_the_baseline_and_grow_the_line() {
+        use crate::box_tree::{BoxChild, FlowRoot, ImageBox, InlineRun};
+
+        let run = |text: &str| InlineRun {
+            text: text.to_string(),
+            font_size: 12.0,
+            bold: false,
+            font: 0,
+            link: 0,
+            underline: false,
+            line_through: false,
+            color: Color::BLACK,
+            image: None,
+        };
+        let image_run = |w: f32, h: f32| InlineRun {
+            image: Some(Box::new(ImageBox {
+                src: String::new(),
+                attr_width: None,
+                attr_height: None,
+                css_width: None,
+                css_width_percent: None,
+                css_height: None,
+                max_width: None,
+                max_width_percent: None,
+                image_index: Some(0),
+                width: w,
+                height: h,
+                float_dir: None,
+            })),
+            ..run("")
+        };
+
+        let document = Document {
+            page_style: crate::html::PageStyle::default(),
+            table_style: crate::html::TableStyle::default(),
+            table_columns: Vec::new(),
+            images: Vec::new(),
+            font_specs: Vec::new(),
+            links: Vec::new(),
+            flow: Some(FlowRoot {
+                children: vec![BoxChild::Line(vec![
+                    run("before "),
+                    image_run(30.0, 40.0),
+                    run(" after"),
+                ])],
+            }),
+            blocks: Vec::new(),
+        };
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+
+        let image = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                PaintCommand::Image(image) => Some(*image),
+                _ => None,
+            })
+            .expect("inline image painted");
+        let before = pages[0].lines.iter().find(|l| l.text == "before").unwrap();
+        let after = pages[0].lines.iter().find(|l| l.text == "after").unwrap();
+
+        // Bottom of the image sits on the shared baseline; text continues
+        // after it on the same line.
+        assert_eq!(image.y, before.y, "image bottom on the text baseline");
+        assert_eq!(before.y, after.y, "one line");
+        assert!(image.x > before.x);
+        assert!(after.x >= image.x + image.width - 0.5);
+        assert_eq!(image.width, 30.0);
+
+        // The 40pt image rises above the 12pt text ascent, so the line's top
+        // must clear it: baseline sits at least 40pt below the content top.
+        let top = options.page_size.height - options.margin_top;
+        assert!(
+            top - before.y >= 40.0 - 0.5,
+            "line box grew to the image height (drop = {})",
+            top - before.y
+        );
+    }
+
+    #[test]
+    fn oversized_inline_images_scale_to_the_line() {
+        use crate::box_tree::{BoxChild, FlowRoot, ImageBox, InlineRun};
+        let image_run = InlineRun {
+            text: String::new(),
+            font_size: 12.0,
+            bold: false,
+            font: 0,
+            link: 0,
+            underline: false,
+            line_through: false,
+            color: Color::BLACK,
+            image: Some(Box::new(ImageBox {
+                src: String::new(),
+                attr_width: None,
+                attr_height: None,
+                css_width: None,
+                css_width_percent: None,
+                css_height: None,
+                max_width: None,
+                max_width_percent: None,
+                image_index: Some(0),
+                width: 900.0,
+                height: 300.0,
+                float_dir: None,
+            })),
+        };
+        let document = Document {
+            page_style: crate::html::PageStyle::default(),
+            table_style: crate::html::TableStyle::default(),
+            table_columns: Vec::new(),
+            images: Vec::new(),
+            font_specs: Vec::new(),
+            links: Vec::new(),
+            flow: Some(FlowRoot {
+                children: vec![BoxChild::Line(vec![image_run])],
+            }),
+            blocks: Vec::new(),
+        };
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let image = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                PaintCommand::Image(image) => Some(*image),
+                _ => None,
+            })
+            .expect("image painted");
+        let content_width = options.page_size.width - options.margin_left - options.margin_right;
+        assert!(image.width <= content_width + 0.5, "scaled to fit: {}", image.width);
+        // Aspect ratio preserved by the same scale.
+        assert!((image.height / image.width - 300.0 / 900.0).abs() < 0.01);
+    }
+
+    #[test]
     fn negative_z_index_paints_below_flow_content() {
         // The classic pattern: an empty, sized, absolutely-positioned div with
         // z-index: -1 painting a band *behind* the flow text, while a positive
@@ -3218,6 +3441,7 @@ mod tests {
             underline: false,
             line_through: false,
             link: 0,
+            image: None,
         };
         // Logical: abc · אבג · space · דהו · xyz. The two Hebrew words and the
         // space between them form one RTL run, so they swap; Latin stays put.
@@ -3504,6 +3728,7 @@ mod tests {
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
+                        image: None,
                     }])],
                 })
             })
@@ -3578,6 +3803,7 @@ mod tests {
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
+                        image: None,
                     }])],
                 })],
             }),
@@ -3652,6 +3878,7 @@ mod tests {
                     underline: false,
                     line_through: false,
                     color: Color::BLACK,
+                    image: None,
                 }])],
             })
         };
@@ -3698,6 +3925,7 @@ mod tests {
                     underline: false,
                     line_through: false,
                     color: Color::BLACK,
+                    image: None,
                 }])
             };
             let document = Document {
@@ -3819,6 +4047,7 @@ mod tests {
                         underline: false,
                         line_through: false,
                         color: Color::BLACK,
+                        image: None,
                     }])],
                 })],
             }),

@@ -25,7 +25,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `colspan` | ✅ | |
 | `rowspan` | ❌ | Ignored. |
 | `caption`, nested tables | ❌ | |
-| `img` | 🟡 | Block-level only (see Images). |
+| `img` | 🟡 | Inline when it shares a line with text (baseline-aligned, wraps like a word, clickable inside `<a>`); block path for standalone/floated images (see Images). |
 | `a` | 🟡 | Clickable `/Link` annotations: external URIs and `mailto:` as URI actions, `#fragment` as in-document jumps to `id` anchors (dead fragments annotate nothing). UA style applied (blue + underline; author `color` and `text-decoration: none` win). Adjacent words merge into one clickable rect per line. Not yet: links inside table cells (cell text is flattened). |
 | `form`, `fieldset`, `input`, `select`, `textarea`, `button` | ❌ | Containers may render text; no form controls. |
 | `svg`, `canvas`, `video`, `audio`, `iframe`, `object` | ❌ | |
@@ -88,7 +88,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `data:` URIs, local file paths | ✅ | |
 | Block-level placement, CSS `width`/`height` (aspect-preserving) | ✅ | |
 | PNG alpha → `/SMask` | ✅ | |
-| Inline/floated images | ❌ | Always breaks to its own line. |
+| Inline/floated images | 🟡 | **Inline**: an `<img>` with text on its line flows in place — bottom on the baseline, the line box grows to the image, over-wide images scale to the line, linked images clickable. Standalone images stay block-level; **floats** wrap text around the image. No `vertical-align` variants (baseline only), no descender-aware baseline. |
 | Remote `http(s)` URLs | 🟡 | Opt-in behind the `remote-images` cargo feature *and* a per-render flag (`RemoteImagePolicy { enabled: true }`); **fail-closed** otherwise. Byte + timeout caps; blocks loopback/private/link-local/CGNAT hosts (SSRF guard); no redirects. Not in default builds (keeps the base engine free of a TLS/networking stack). No DNS-rebinding pin, no redirect following, no on-disk cache. |
 | CSS `%` width / `max-width` (incl. `max-width:100%`) | ✅ | Percent of the containing block; `%` may scale up, `max-width` clamps. |
 | `object-fit` | ❌ | |

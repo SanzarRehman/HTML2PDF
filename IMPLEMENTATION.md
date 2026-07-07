@@ -1136,14 +1136,21 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
 - [x] Honor cascaded CSS `width`/`height` on `<img>` (from rules and inline
       `style`), taking precedence over the presentational HTML attributes and
       preserving the intrinsic aspect ratio when only one axis is set.
-- [ ] Broaden images further. **Not yet done** (explicit gaps):
-  - [ ] Inline `<img>` in flow text (it currently breaks onto its own line;
-        no baseline alignment with surrounding text).
-  - [ ] Floated / wrapped images (`float`, text wrapping around an image).
+- [ ] Broaden images further:
+  - [x] Inline `<img>` in flow text: an image that shares its line with text
+        (text pending before it, or inline text following it — `dir`-agnostic
+        lookahead) becomes an inline run (`InlineRun::image`), tokenized as an
+        unbreakable word; its bottom sits on the baseline, the line box grows
+        to the image height, an over-wide image scales down to the line, and a
+        linked image emits its own clickable rect. Standalone/floated images
+        keep the block path. **Not yet done:** `vertical-align` variants
+        (baseline only), descender-aware line metrics, images inside table
+        cells.
+  - [x] Floated / wrapped images (`float: left/right`, text wraps around).
   - [ ] `object-fit` (`contain`/`cover`/`fill`/`none`) and `object-position` —
         the box is always stretched to the resolved width/height.
-  - [ ] `max-width`/`min-width`/`max-height`/`min-height` clamping (e.g. the
-        common `img { max-width: 100% }`); only plain `width`/`height` are read.
+  - [x] `max-width` (points / `%`) and `%` widths on images; **min-width /
+        max-height / min-height** still unread.
   - [ ] Percentage image dimensions (resolved against the containing block).
   - [x] Remote (`http`/`https`) image URLs — behind the `remote-images` feature
         + a per-render opt-in (`RemoteImagePolicy`); fail-closed, capped, and

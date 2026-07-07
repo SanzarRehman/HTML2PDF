@@ -122,9 +122,12 @@ Works today:
   jumps to `id` anchors — styled with browser UA defaults (blue, underlined;
   `text-decoration: none` and author colors respected). Headings build the
   PDF bookmark sidebar (`h2` nests under `h1`, and so on).
-- Block-level `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded
-  in-house, alpha as a soft mask), from file paths and `data:` URIs, with
-  `width`/`height` sizing and aspect-ratio preservation.
+- `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded in-house,
+  alpha as a soft mask), from file paths and `data:` URIs, with
+  `width`/`height` sizing and aspect-ratio preservation. An image sharing a
+  line with text flows **inline** on the baseline (icons, badges — clickable
+  inside a link); standalone images render block-level and floated ones wrap
+  text around them.
 - Pagination, page margins, landscape pages, compressed PDF streams.
 - Built-in Helvetica metrics and optional embedded TrueType/OpenType fonts.
 - Font subsetting for `glyf`-based TrueType fonts, with full-font fallback for
@@ -154,7 +157,7 @@ Not complete yet:
   (`::before`) — dropped, since they do not apply to static print output.
 - Broader JavaScript: DOM traversal from JS, `querySelector`, events, timers,
   and mid-script layout reads (rejected by design — ADR 0009).
-- Inline/floated images and `object-fit`; SVG and canvas. (Remote `http(s)`
+- `object-fit`; SVG and canvas. (Remote `http(s)`
   image URLs are supported behind the opt-in `remote-images` feature — see
   below.)
 - Isolated stacking contexts (`z-index` compares globally; negative z paints

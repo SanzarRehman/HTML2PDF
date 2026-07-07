@@ -661,8 +661,16 @@ fn resolve_images_in(
                 resolve_images_in(&mut block.children, base_dir, remote, images)
             }
             BoxChild::Image(image) => resolve_image_box(image, base_dir, remote, images),
+            // Inline images live inside line runs; resolve them in place.
+            BoxChild::Line(runs) => {
+                for run in runs {
+                    if let Some(image) = run.image.as_deref_mut() {
+                        resolve_image_box(image, base_dir, remote, images);
+                    }
+                }
+            }
             // Table cells carry no `<img>` content in the current model.
-            BoxChild::Line(_) | BoxChild::Table(_) => {}
+            BoxChild::Table(_) => {}
         }
     }
 }
@@ -735,7 +743,8 @@ impl ChildAcc {
             return;
         }
         if let Some(last) = self.pending.last_mut() {
-            if last.font_size == ctx.font_size
+            if last.image.is_none()
+                && last.font_size == ctx.font_size
                 && last.bold == ctx.bold
                 && last.font == ctx.font
                 && last.underline == ctx.underline
@@ -756,12 +765,34 @@ impl ChildAcc {
             underline: ctx.underline,
             line_through: ctx.line_through,
             color: ctx.color,
+            image: None,
         });
     }
 
-    /// Emit the pending inline content as a line box, if it carries any text.
+    /// Append an inline image, flowing with the surrounding text (its run
+    /// carries the context's link so a linked image stays clickable).
+    fn push_image(&mut self, image: crate::box_tree::ImageBox, ctx: &FlowCtx) {
+        self.pending.push(crate::box_tree::InlineRun {
+            text: String::new(),
+            font_size: ctx.font_size,
+            bold: false,
+            font: ctx.font,
+            link: ctx.link,
+            underline: false,
+            line_through: false,
+            color: ctx.color,
+            image: Some(Box::new(image)),
+        });
+    }
+
+    /// Emit the pending inline content as a line box, if it carries any text
+    /// (or an inline image, which is content in its own right).
     fn flush_line(&mut self) {
-        if self.pending.iter().any(|run| !run.text.trim().is_empty()) {
+        if self
+            .pending
+            .iter()
+            .any(|run| run.image.is_some() || !run.text.trim().is_empty())
+        {
             self.children
                 .push(crate::box_tree::BoxChild::Line(std::mem::take(&mut self.pending)));
         } else {
@@ -821,30 +852,43 @@ fn build_node(
                     ));
                 }
             } else if tag == "img" {
-                // A block-level image. Resolved (loaded/measured) after parsing.
+                // Resolved (loaded/measured) after parsing. An image that
+                // shares its line with text flows *inline* (on the baseline);
+                // a standalone or floated one takes the block image path
+                // (page-fitting, pagination as a unit).
                 if let Some(src) = node.attr("src") {
                     if !src.is_empty() {
-                        acc.flush_line();
                         let own = &computed.style[id];
-                        acc.children
-                            .push(crate::box_tree::BoxChild::Image(crate::box_tree::ImageBox {
-                                src: src.to_string(),
-                                attr_width: node
-                                    .attr("width")
-                                    .and_then(|v| v.trim().parse::<f32>().ok()),
-                                attr_height: node
-                                    .attr("height")
-                                    .and_then(|v| v.trim().parse::<f32>().ok()),
-                                css_width: own.width,
-                                css_width_percent: own.width_percent,
-                                css_height: own.height,
-                                max_width: own.max_width,
-                                max_width_percent: own.max_width_percent,
-                                image_index: None,
-                                width: 0.0,
-                                height: 0.0,
-                                float_dir: own.float_dir,
-                            }));
+                        let image = crate::box_tree::ImageBox {
+                            src: src.to_string(),
+                            attr_width: node
+                                .attr("width")
+                                .and_then(|v| v.trim().parse::<f32>().ok()),
+                            attr_height: node
+                                .attr("height")
+                                .and_then(|v| v.trim().parse::<f32>().ok()),
+                            css_width: own.width,
+                            css_width_percent: own.width_percent,
+                            css_height: own.height,
+                            max_width: own.max_width,
+                            max_width_percent: own.max_width_percent,
+                            image_index: None,
+                            width: 0.0,
+                            height: 0.0,
+                            float_dir: own.float_dir,
+                        };
+                        let pending_text = acc
+                            .pending
+                            .iter()
+                            .any(|run| run.image.is_some() || !run.text.trim().is_empty());
+                        let inline = own.float_dir.is_none()
+                            && (pending_text || followed_by_inline_text(dom, id));
+                        if inline {
+                            acc.push_image(image, &ctx);
+                        } else {
+                            acc.flush_line();
+                            acc.children.push(crate::box_tree::BoxChild::Image(image));
+                        }
                     }
                 }
             } else if is_block_tag(tag) {
@@ -1119,6 +1163,69 @@ fn own_direction(
         Some(value) if value.eq_ignore_ascii_case("ltr") => Some(false),
         _ => None,
     })
+}
+
+/// Whether inline text follows `id` before the next block-level boundary among
+/// its siblings — i.e. whether an `<img>` here would share its line with text
+/// that comes after it (text *before* it is visible in the accumulator).
+fn followed_by_inline_text(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
+    use crate::dom::NodeData;
+    let Some(parent) = dom.node(id).parent else {
+        return false;
+    };
+    let siblings = &dom.node(parent).children;
+    let Some(position) = siblings.iter().position(|&child| child == id) else {
+        return false;
+    };
+    for &sibling in &siblings[position + 1..] {
+        match &dom.node(sibling).data {
+            NodeData::Text(text) => {
+                if !text.trim().is_empty() {
+                    return true;
+                }
+            }
+            NodeData::Element { name, .. } => {
+                let tag = name.as_str();
+                if is_block_tag(tag) || matches!(tag, "br" | "table" | "img") {
+                    return false;
+                }
+                if matches!(tag, "head" | "script" | "style" | "title") {
+                    continue;
+                }
+                if inline_subtree_has_text(dom, sibling) {
+                    return true;
+                }
+            }
+            NodeData::Document => {}
+        }
+    }
+    false
+}
+
+/// Whether an inline element's subtree carries any non-whitespace text
+/// (descending only through inline children).
+fn inline_subtree_has_text(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
+    use crate::dom::NodeData;
+    for &child in &dom.node(id).children {
+        match &dom.node(child).data {
+            NodeData::Text(text) => {
+                if !text.trim().is_empty() {
+                    return true;
+                }
+            }
+            NodeData::Element { name, .. } => {
+                let tag = name.as_str();
+                if !is_block_tag(tag)
+                    && !matches!(tag, "head" | "script" | "style" | "title" | "br" | "table")
+                    && inline_subtree_has_text(dom, child)
+                {
+                    return true;
+                }
+            }
+            NodeData::Document => {}
+        }
+    }
+    false
 }
 
 /// The list marker for an `<li>`: a bullet for `<ul>` (or a bare item), or a
@@ -4053,6 +4160,49 @@ mod tests {
         // The h2 keeps its id as an anchor for the #frag destination.
         let target = blocks.iter().find(|b| b.kind == BlockKind::Heading2).unwrap();
         assert_eq!(target.anchor.as_deref(), Some("frag"));
+    }
+
+    #[test]
+    fn images_flow_inline_when_sharing_a_line_with_text() {
+        let document = parse(
+            "<p>before <img src=\"a.png\"> after</p>\
+             <p><img src=\"b.png\"> leading icon</p>\
+             <img src=\"alone.png\">\
+             <p>text <img src=\"f.png\" style=\"float: left\"> floated</p>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+
+        // "before <img> after": one line, image run in the middle.
+        let first_line = match &blocks[0].children[0] {
+            BoxChild::Line(runs) => runs,
+            other => panic!("expected a line, got {other:?}"),
+        };
+        assert!(first_line.iter().any(|r| r.image.is_some()));
+        assert!(first_line.first().unwrap().text.contains("before"));
+        assert!(first_line.last().unwrap().text.contains("after"));
+
+        // Leading icon followed by text is inline too (lookahead).
+        let second_line = match &blocks[1].children[0] {
+            BoxChild::Line(runs) => runs,
+            other => panic!("expected a line, got {other:?}"),
+        };
+        assert!(second_line.first().unwrap().image.is_some());
+
+        // A standalone image keeps the block path; a floated one does as well.
+        let block_images = count_images(&flow.children);
+        assert_eq!(block_images, 2, "standalone + floated stay block-level");
+    }
+
+    fn count_images(children: &[BoxChild]) -> usize {
+        children
+            .iter()
+            .map(|child| match child {
+                BoxChild::Image(_) => 1,
+                BoxChild::Block(b) => count_images(&b.children),
+                _ => 0,
+            })
+            .sum()
     }
 
     #[test]
