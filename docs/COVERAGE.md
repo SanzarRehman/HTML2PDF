@@ -39,7 +39,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Attribute `[a]`, `[a=v]`, `~=`, `\|=`, `^=`, `$=`, `*=` | ✅ | |
 | Descendant, child `>`, sibling `+` / `~` | ✅ | |
 | `:nth-child`, `:first/last-child`, `:*-of-type`, `:empty`, `:root`, `:not()` | ✅ | |
-| `:hover`, `:link`, `::before`/`::after`, other pseudo-elements | ❌ | |
+| `:hover`, `:active`, `:focus` (dynamic pseudo-classes) | — | Out of scope by design: the target is static print, so these can never fire. Selectors using them are dropped, never over-applied. |
+| `:link`/`:visited`, `::before`/`::after` + `content` | ❌ | Generated content does matter for print; queued. |
 | Specificity + source-order cascade, `!important` | ✅ | |
 | `@media print` / `screen` | ✅ | Screen-only rules excluded. |
 | `@page` margins + orientation | ✅ | `size: landscape`, `margin`. |
@@ -103,7 +104,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Embedded TrueType faces (`--font`, `font-family`, fallback) | ✅ | Type0/Identity-H, per-face glyph subsetting, ToUnicode; several faces per document. |
 | **Text shaping (HarfBuzz via `rustybuzz`)** for embedded fonts | ✅ | Kerning (measured *and* reproduced in PDF via `TJ` adjustments), ligatures (GSUB; ToUnicode maps a ligature glyph back to all its chars), Arabic joining forms with correct in-run RTL order. Shaped-run cache keyed by string. |
 | Real glyph metrics + line breaking | ✅ | via `ttf-parser`/`fontdb`; widths are shaped widths when a face is embedded. |
-| Bidi reordering + RTL base (UAX #9) | 🟡 | Line pieces reorder visually against the paragraph's base level; shaping itemizes each string into directional runs (joining computed on logical text, glyphs emitted visually). **`dir="rtl"` / `direction: rtl`** set the base direction (inherited; block-level), flipping the base level to RTL and right-aligning by default; an explicit `text-align` overrides. Works for embedded fonts (base-14 has no RTL glyphs; the fallback chain supplies them). No `dir="auto"`, bracket mirroring, inline `<bdi>`/`<bdo>` embeddings, or RTL base inside table cells (cell text reorders within its string but stays left-aligned). |
+| Bidi reordering + RTL base (UAX #9) | 🟡 | Line pieces reorder visually against the paragraph's base level; shaping itemizes each string into directional runs (joining computed on logical text, glyphs emitted visually). **`dir="rtl"` / `direction: rtl`** set the base direction (inherited; block-level), flipping the base level to RTL and right-aligning by default; an explicit `text-align` overrides. Works for embedded fonts (base-14 has no RTL glyphs; the fallback chain supplies them). RTL base works inside table cells too (`dir` on the cell / CSS `direction`; right-aligned by default). No `dir="auto"`, bracket mirroring, or inline `<bdi>`/`<bdo>` embeddings; an ancestor's `dir` *attribute* doesn't reach cells (CSS `direction` inherits fine). |
 | **Font fallback chain** (CJK, Hangul, Cyrillic, …) | 🟡 | Characters the primary font lacks fall back to system faces (Arial Unicode MS / Noto Sans / DejaVu Sans, first that covers), each embedded as its own subset Type0 resource — works from the base-14 default *and* from an embedded `--font`. Measurement is chain-aware. Emoji excluded (color faces can't embed as outlines). Chain is fixed, not configurable; char-level line breaking still measures with the primary. |
 | Bold/italic faces, multiple families per document | ✅ | Resolved per element via `fontdb` (weight/style queries), each face embedded as its own subset resource; process-wide face cache. |
 
@@ -126,6 +127,6 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Image XObjects, per-page backgrounds/borders | ✅ | |
 | Multi-page pagination, repeated table headers | ✅ | |
 | Configurable page size (A4/Letter, portrait/landscape), margins | ✅ | `--paper`, `@page`. |
-| Link annotations (`/Annots`) | 🟡 | URI actions + in-document `/Dest` (`#fragment` → `id` anchor); one merged rect per link per line. Not in table cells yet. |
+| Link annotations (`/Annots`) | 🟡 | URI actions + in-document `/Dest` (`#fragment` → `id` anchor); one merged rect per link per line, including inside table cells. No `PageMode /UseOutlines`, no `<a name>` anchors. |
 | Document outline (`/Outlines`) | ✅ | Built from `h1`–`h6` in document order; deeper levels nest under the closest shallower heading; non-ASCII titles as UTF-16BE. |
 | Headers/footers, tagged PDF, encryption | ❌ | |

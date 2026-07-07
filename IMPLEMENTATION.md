@@ -877,14 +877,34 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       measures per-run faces (bold-heavy cells can under-measure), ancestor
       `dir` attributes reaching cells (CSS `direction` inherits; the attribute
       is per-cell only).
-- [ ] **Broader JS DOM surface**: `insertBefore`, `cloneNode`,
-      `querySelector(All)`, JS-side `parentNode`/`children` traversal.
+Direction (2026-07-08): **CSS-first.** The output is a static PDF, so dynamic
+CSS (`:hover`/`:focus`/`:active`, transitions, animations) is out of scope by
+design — the cascade already drops those selectors so they never over-apply.
+The queue below closes the CSS gaps that actually change what a printed page
+looks like. JS DOM breadth moves to the tail (decision: finish JS later).
+
 - [ ] **`@font-face`**: parse the at-rule, load `src:` (local files; remote
       via the SSRF-guarded fetcher when enabled), register into the
       `resolve_spec` pipeline ahead of system lookup.
 - [ ] **Real border model**: per-side width/style/color, `box-sizing`,
       `border-radius` (stroked corners).
+- [ ] **`%` lengths everywhere + min/max sizing**: `%` heights, margins,
+      padding, and position offsets; `min-width`/`min-height`/`max-height`;
+      `overflow: hidden` clipping of over-tall fixed-height blocks.
 - [ ] **`calc()` + custom properties (`var()`)** in the cascade.
+- [ ] **CSS text polish**: `letter-spacing`, `word-spacing`,
+      `text-transform`, `text-indent`; `::before`/`::after` with text
+      `content` (generated content matters for print).
+- [ ] **Backgrounds beyond solid color**: `background-image` (PNG/JPEG via
+      the existing decoder), `linear-gradient()`, `background-size` /
+      `background-position` / `background-repeat`.
+- [ ] **`display: inline-block`** and table `rowspan`.
+- [ ] **Flex/grid leftovers**: `flex-shrink` / `order` / `align-self` /
+      `align-content` / `wrap-reverse`; grid `grid-template-rows`, named
+      areas/lines, cell alignment.
+- [ ] **Broader JS DOM surface** (deferred per 2026-07-08 decision):
+      `insertBefore`, `cloneNode`, `querySelector(All)`, JS-side
+      `parentNode`/`children` traversal.
 
 - [x] **Per-element `font-family` + real bold/italic faces**: the cascade
       carries `font-family` (first usable name in the stack, generics kept)
