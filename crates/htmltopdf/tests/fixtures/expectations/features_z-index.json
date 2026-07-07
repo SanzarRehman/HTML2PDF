@@ -1,0 +1,18 @@
+{
+  "fixture": "z-index",
+  "layer": "features",
+  "description": "Negative z-index paints below in-flow content (CSS paint order step 2): an empty, sized, absolutely-positioned background div with z-index: -1 renders behind the hero text, while a positive z-index badge paints above everything. Also exercises CSS height on blocks (the band is an empty div sized by width/height alone).",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "re", "f"],
+    "must_contain_text": ["Readable", "headline", "TOP", "after"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The yellow band paints behind the headline and paragraph text (text stays readable).",
+    "The red ON TOP badge paints above the band and the text.",
+    "The band is 480pt x 90pt from an empty div (CSS width/height honored).",
+    "Content after the hero sits below the band."
+  ]
+}

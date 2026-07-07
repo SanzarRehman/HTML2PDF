@@ -985,7 +985,13 @@ fn build_block(
     acc.flush_line();
 
     if acc.children.is_empty() {
-        return None;
+        // An empty block is normally dropped, but a *decorated* one with an
+        // explicit size still paints (the `z-index: -1` background-layer div).
+        let paints_alone = (background.is_some() || own.border.unwrap_or(false))
+            && (own.width.is_some() || own.width_percent.is_some() || own.height.is_some());
+        if !paints_alone {
+            return None;
+        }
     }
     let flex = own.display_flex.then(|| crate::box_tree::FlexContainer {
         direction: own.flex_direction.unwrap_or(FlexDirection::Row),
@@ -1019,6 +1025,7 @@ fn build_block(
         css_width_percent: own.width_percent,
         max_width: own.max_width,
         max_width_percent: own.max_width_percent,
+        css_height: own.height,
         center: own.margin_left_auto && own.margin_right_auto,
         line_height: own.line_height,
         rtl: base_rtl,
@@ -4046,6 +4053,23 @@ mod tests {
         // The h2 keeps its id as an anchor for the #frag destination.
         let target = blocks.iter().find(|b| b.kind == BlockKind::Heading2).unwrap();
         assert_eq!(target.anchor.as_deref(), Some("frag"));
+    }
+
+    #[test]
+    fn empty_decorated_sized_blocks_are_kept() {
+        // A sized background-layer div with no content must survive box
+        // generation (it paints alone); a bare empty div is still dropped.
+        let document = parse(
+            "<div style=\"width: 200pt; height: 50pt; background: #fd4\"></div>\
+             <div></div>\
+             <p>text</p>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        assert_eq!(blocks.len(), 2, "background div + paragraph, empty div dropped");
+        assert!(blocks[0].background.is_some());
+        assert_eq!(blocks[0].css_height, Some(50.0));
+        assert!(blocks[0].children.is_empty());
     }
 
     #[test]

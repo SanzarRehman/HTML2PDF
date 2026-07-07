@@ -130,6 +130,10 @@ pub struct BlockBox {
     /// CSS `max-width` (points / percent), clamping the used width.
     pub max_width: Option<f32>,
     pub max_width_percent: Option<f32>,
+    /// CSS `height` (points, content-box). Treated as a *minimum* box height:
+    /// the block extends to it when its content is shorter (content taller
+    /// than the height overflows visibly, as in CSS `overflow: visible`).
+    pub css_height: Option<f32>,
     /// `margin-left: auto` + `margin-right: auto` + a width = centered.
     pub center: bool,
     /// CSS `line-height` (inherited): overrides the default leading of this

@@ -99,8 +99,9 @@ Works today:
   (`display: grid` — fixed/`fr`/`auto`/`repeat()`/`minmax()` tracks, `span N`
   and line-based `grid-column: A / B` placement, gaps),
   **floats** with real text wrap (`float: left/right`, `clear`, stacked floats),
-  and **positioning** (`position: relative/absolute` with box offsets, CSS
-  `width` on in-flow blocks).
+  and **positioning** (`position: relative/absolute/fixed` with box offsets;
+  `z-index` ordering with negative z painting *below* the flow — the
+  `z-index: -1` background-layer pattern; CSS `width` and `height` on blocks).
 - **Text shaping** (HarfBuzz via `rustybuzz`) for embedded fonts: kerning
   reproduced in the PDF, ligatures with extractable text, Arabic joining forms.
 - **Bidirectional text + RTL paragraphs** (UAX #9): mixed LTR/RTL lines — an
@@ -156,9 +157,10 @@ Not complete yet:
 - Inline/floated images and `object-fit`; SVG and canvas. (Remote `http(s)`
   image URLs are supported behind the opt-in `remote-images` feature — see
   below.)
-- Stacking contexts (`z-index` works, but compares globally and positioned
-  content always paints above the flow); `flex-shrink`/`order`/`align-self`;
-  grid named lines/areas and `grid-template-rows`.
+- Isolated stacking contexts (`z-index` compares globally; negative z paints
+  below the flow, but `opacity`/`transform` don't create contexts);
+  `flex-shrink`/`order`/`align-self`; grid named lines/areas and
+  `grid-template-rows`.
 - `@font-face` web fonts; synthetic italic when no italic face exists; emoji
   (color fonts can't embed as outlines); `dir="auto"`, bracket mirroring, and
   RTL text inside table cells.
@@ -358,7 +360,7 @@ speed and memory stay visible as fidelity improves.
 - Broaden CSS properties and computed-value coverage (`%` heights/margins,
   `min-width`, `calc()`, custom properties).
 - Broaden image support (inline/floated images) and add SVG.
-- Stacking contexts (negative z-index below flow); RTL table cells.
+- Isolated per-context `z-index` comparison; RTL table cells.
 - Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
 - Harden the HTTP server for production deployment patterns.
 

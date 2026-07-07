@@ -415,20 +415,52 @@ struct ContainingBlock {
 /// Merge captured overlays into the finished pages, sorted by `z-index`.
 /// Page-bound overlays land on their page; `fixed` overlays are stamped onto
 /// every page (headers/footers/watermarks).
+///
+/// Paint order follows CSS: overlays with a **negative** `z-index` go *below*
+/// the in-flow content (prepended, most-negative deepest — the classic
+/// `z-index: -1` decorative background), everything else paints above it in
+/// ascending z order.
 fn apply_overlays(pages: &mut [Page], mut overlays: Vec<Overlay>) {
     overlays.sort_by_key(|overlay| overlay.z);
+
+    // Collect the below-flow layer per page first, so several negative
+    // overlays keep their ascending z order after the single prepend.
+    let mut under: Vec<Vec<PaintCommand>> = vec![Vec::new(); pages.len()];
+    for overlay in &overlays {
+        if overlay.z >= 0 {
+            continue;
+        }
+        match overlay.page {
+            Some(index) => under[index.min(pages.len() - 1)].extend(overlay.commands.iter().cloned()),
+            None => {
+                for buffer in &mut under {
+                    buffer.extend(overlay.commands.iter().cloned());
+                }
+            }
+        }
+    }
+    for (page, buffer) in pages.iter_mut().zip(under) {
+        if !buffer.is_empty() {
+            page.commands.splice(0..0, buffer);
+        }
+    }
+
     for overlay in overlays {
         match overlay.page {
             Some(index) => {
                 let page = &mut pages[index.min(pages.len() - 1)];
-                page.commands.extend(overlay.commands);
+                if overlay.z >= 0 {
+                    page.commands.extend(overlay.commands);
+                }
                 page.lines.extend(overlay.lines);
                 page.rects.extend(overlay.rects);
                 page.link_areas.extend(overlay.links);
             }
             None => {
                 for page in pages.iter_mut() {
-                    page.commands.extend(overlay.commands.iter().cloned());
+                    if overlay.z >= 0 {
+                        page.commands.extend(overlay.commands.iter().cloned());
+                    }
                     page.lines.extend(overlay.lines.iter().cloned());
                     page.rects.extend(overlay.rects.iter().cloned());
                     page.link_areas.extend(overlay.links.iter().cloned());
@@ -535,15 +567,25 @@ fn layout_box_children(
                 // Nested positioned descendants paint above their ancestor in
                 // z order; nested `fixed` boxes keep their per-page repeat.
                 nested.sort_by_key(|overlay| overlay.z);
+                let mut under: Vec<PaintCommand> = Vec::new();
                 for inner in nested {
                     if inner.page.is_none() {
                         overlays.push(inner);
                     } else {
-                        captured.commands.extend(inner.commands);
+                        // Within this positioned box's own stacking context: a
+                        // negative-z descendant paints below the box's content.
+                        if inner.z < 0 {
+                            under.extend(inner.commands);
+                        } else {
+                            captured.commands.extend(inner.commands);
+                        }
                         captured.lines.extend(inner.lines);
                         captured.rects.extend(inner.rects);
                         captured.link_areas.extend(inner.links);
                     }
+                }
+                if !under.is_empty() {
+                    captured.commands.splice(0..0, under);
                 }
                 overlays.push(Overlay {
                     z: block.z_index.unwrap_or(0),
@@ -1586,6 +1628,18 @@ fn layout_block_box(
     if block.padding.bottom > 0.0 || decorated {
         flush_margin(y, carried);
         *y -= block.padding.bottom;
+    }
+
+    // CSS `height`: extend the border box to at least the declared height when
+    // the content is shorter (an empty background-layer div, a fixed-height
+    // hero band). Taller content simply overflows, like `overflow: visible`.
+    // No pagination of the extension: a fragment never grows past its page.
+    if let Some(height) = block.css_height {
+        flush_margin(y, carried);
+        let target = start_y - (height + block.padding.top + block.padding.bottom);
+        if target < *y && pages.len() - 1 == start_page {
+            *y = target;
+        }
     }
 
     if decorated {
@@ -3035,6 +3089,62 @@ mod tests {
     }
 
     #[test]
+    fn negative_z_index_paints_below_flow_content() {
+        // The classic pattern: an empty, sized, absolutely-positioned div with
+        // z-index: -1 painting a band *behind* the flow text, while a positive
+        // z-index badge paints above it.
+        let document = crate::html::parse(
+            "<style>.hero { position: relative; } \
+                    .bg { position: absolute; z-index: -1; top: 0; left: 0; \
+                          width: 300pt; height: 80pt; background: #ffd54a; } \
+                    .badge { position: absolute; z-index: 5; top: 0; right: 10pt; \
+                             background: #c62828; margin: 0; }</style>\
+             <div class=\"hero\"><div class=\"bg\"></div>\
+             <p class=\"badge\">TOP</p><h1>Headline</h1></div>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let commands = &pages[0].commands;
+
+        let first_text = commands
+            .iter()
+            .position(|c| matches!(c, PaintCommand::Text(_)))
+            .expect("has text");
+        let fill_rects: Vec<usize> = commands
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, PaintCommand::FillRect(_)))
+            .map(|(i, _)| i)
+            .collect();
+        // The band (z: -1) paints before any text; the badge (z: 5) after.
+        assert!(
+            fill_rects.iter().any(|&i| i < first_text),
+            "a background rect must precede the first text (below the flow)"
+        );
+        assert!(
+            fill_rects.iter().any(|&i| i > first_text),
+            "the positive-z badge rect must follow the flow text (above it)"
+        );
+    }
+
+    #[test]
+    fn css_height_extends_short_blocks() {
+        // A 100pt-high box with one short line: the following paragraph must
+        // start below the full declared height, not right under the line.
+        let document = crate::html::parse(
+            "<div style=\"height: 100pt; background: #eee; margin: 0\">short</div>\
+             <p style=\"margin: 0\">after</p>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let short = pages[0].lines.iter().find(|l| l.text == "short").unwrap();
+        let after = pages[0].lines.iter().find(|l| l.text == "after").unwrap();
+        assert!(
+            short.y - after.y >= 90.0,
+            "gap should span the declared height, got {}",
+            short.y - after.y
+        );
+    }
+
+    #[test]
     fn links_produce_merged_areas_and_headings_produce_anchors() {
         let document = crate::html::parse(
             "<h1 id=\"top\">The Report Title</h1>\
@@ -3374,6 +3484,7 @@ mod tests {
                     css_width_percent: None,
                     max_width: None,
                     max_width_percent: None,
+                    css_height: None,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -3447,6 +3558,7 @@ mod tests {
                     css_width_percent: None,
                     max_width: None,
                     max_width_percent: None,
+                    css_height: None,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -3520,6 +3632,7 @@ mod tests {
                 css_width_percent: None,
                 max_width: None,
                 max_width_percent: None,
+                css_height: None,
                 center: false,
                 line_height: None,
                 rtl: false,
@@ -3615,6 +3728,7 @@ mod tests {
                         css_width_percent: None,
                         max_width: None,
                         max_width_percent: None,
+                        css_height: None,
                         center: false,
                         line_height,
                         rtl: false,
@@ -3685,6 +3799,7 @@ mod tests {
                     css_width_percent: None,
                     max_width: None,
                     max_width_percent: None,
+                    css_height: None,
                     center: false,
                     line_height: None,
                     rtl: false,

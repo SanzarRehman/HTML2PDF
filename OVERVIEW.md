@@ -325,8 +325,8 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Inline (text-flowed) images and `object-fit`; remote images need the opt-in
   `remote-images` feature (not in default builds); a true font-metric baseline
   model (0.8 em ascent approximation today).
-- Stacking contexts (`z-index` compares globally; positioned content always
-  paints above flow); `flex-shrink`/`order`/`align-self`; grid named
+- Isolated stacking contexts (`z-index` compares globally — negative z does
+  paint below the flow now); `flex-shrink`/`order`/`align-self`; grid named
   lines/areas and `grid-template-rows`.
 - Links inside table cells (cell text is flattened); tagged PDF.
 - `@font-face` web fonts; emoji; `dir="auto"` and RTL table cells; `%` heights/

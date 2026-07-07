@@ -1,0 +1,16 @@
+<html><head><style>
+  .hero { position: relative; padding: 12pt; }
+  .bg   { position: absolute; z-index: -1; top: 0; left: 0; width: 480pt; height: 90pt;
+          background: #ffd54a; }
+  .badge{ position: absolute; z-index: 5; top: 6pt; right: 20pt;
+          background: #c62828; color: white; padding: 4pt; margin: 0; }
+</style></head><body>
+<div class="hero">
+  <div class="bg"></div>
+  <p class="badge">ON TOP</p>
+  <h1>Readable headline</h1>
+  <p>This paragraph must stay readable above the yellow band, because the band
+     has z-index: -1 and belongs underneath the flow content.</p>
+</div>
+<p>Content after the hero.</p>
+</body></html>

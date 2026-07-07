@@ -964,8 +964,24 @@ feature list below and in [docs/COVERAGE.md](docs/COVERAGE.md).
       inline/floated image follow-ups, and a server opt-in path.
 - [ ] **Live-DOM surface on demand**: `insertBefore`, `cloneNode`,
       `querySelector(All)`, JS-side `parentNode`/`children` traversal.
-- [ ] **Stacking contexts**: negative `z-index` painting below flow content,
-      per-context z comparison (currently global, positioned always above).
+- [x] **Stacking contexts, first pass — negative `z-index` below the flow**:
+      `apply_overlays` splits overlays at z 0 — negative-z overlays are
+      *prepended* to the page (most-negative deepest, matching CSS paint-order
+      step 2: below in-flow block backgrounds and text), non-negative append
+      above as before; `fixed` negatives stamp under every page. A nested
+      negative-z descendant inside a positioned ancestor prepends to that
+      ancestor's captured content (per-context, below its own box). Two
+      enablers shipped with it, since the classic `z-index: -1` background
+      layer needs them: **empty decorated blocks with an explicit size are
+      kept** (background/border + width/height ⇒ the box paints alone instead
+      of being dropped), and **CSS `height` on blocks** — honored as a
+      *minimum* box height (short content extends the box; taller content
+      overflows visibly; the extension never crosses a page break).
+      `features/z-index` fixture (23 total). **Not yet done:** isolated
+      per-context z *comparison* (z still compares globally across contexts),
+      contexts from `opacity`/`transform`, exact CSS `height` overflow
+      semantics (`overflow: hidden` clipping of over-tall content), `%`
+      heights, and `min-height`/`max-height`.
 - [x] **CSS grid, first pass** (`display: grid`): `grid-template-columns` with
       fixed lengths / `fr` / `auto` / `repeat(N, …)`, row-major auto-placement,
       `grid-column: span N`, and separate row/column gaps. Auto tracks size to
