@@ -169,26 +169,37 @@ Opt-in (behind build features):
   hosts and refuses redirects. Off by default so the base engine pulls no
   networking or TLS stack.
 
-Not complete yet:
+Out of scope by design (static print target):
 
-- Dynamic pseudo-classes (`:hover`, `:focus`, …) and pseudo-elements
-  (`::before`) — dropped, since they do not apply to static print output.
-- Broader JavaScript: DOM traversal from JS, `querySelector`, events, timers,
-  and mid-script layout reads (rejected by design — ADR 0009).
-- `object-fit`; SVG and canvas. (Remote `http(s)`
-  image URLs are supported behind the opt-in `remote-images` feature — see
-  below.)
-- Isolated stacking contexts (`z-index` compares globally; negative z paints
-  below the flow, but `opacity`/`transform` don't create contexts);
-  `flex-shrink`/`order`/`align-self`; grid named lines/areas and
-  `grid-template-rows`.
+- Dynamic pseudo-classes (`:hover`, `:focus`, `:active`) and CSS transitions /
+  animations — they can never fire in a static PDF, so selectors using them are
+  dropped rather than misapplied.
+- Mid-script layout reads (`getBoundingClientRect`, …) — rejected by design so
+  the JS stage stays a pure pre-layout DOM mutation (ADR 0009).
+
+Not complete yet (queued, CSS-first):
+
+- `%` heights, margins, padding, and offsets; `min-width`/`min-height`/
+  `max-height`; `overflow: hidden` clipping — the next item up.
+- `calc()` and custom properties (`var()`) in the cascade.
+- `::before`/`::after` generated `content`, `letter-spacing`, `word-spacing`,
+  `text-transform`, `text-indent`.
+- Backgrounds beyond a solid color: `background-image`, `linear-gradient()`,
+  `background-size`/`position`/`repeat`.
+- `display: inline-block`; table `rowspan`.
+- Flex/grid leftovers: `flex-shrink`/`order`/`align-self`/`align-content`/
+  `wrap-reverse`; grid `grid-template-rows`, named lines/areas; and border
+  polish (real `double`/`groove`, per-corner radius, `border-collapse`).
+- Isolated stacking contexts (`z-index` compares globally today; negative z
+  already paints below the flow, but `opacity`/`transform` don't create
+  contexts).
 - WOFF2 `@font-face` sources (needs a Brotli decoder; TTF/OTF/WOFF1 work);
   synthetic italic when no italic face exists; emoji (color fonts can't embed
   as outlines); `dir="auto"` and bracket mirroring.
-- Complete CSS selector/property coverage (`%` heights/margins, `calc()`,
-  custom properties are the big absences).
-- Tagged PDF; images and nested block layout inside table cells.
-- Full visual compatibility with Chromium.
+- Broader JavaScript DOM surface (deferred): `insertBefore`, `cloneNode`,
+  `querySelector(All)`, `parentNode`/`children` traversal, events, timers.
+- `object-fit`; SVG and canvas; tagged PDF; images and nested block layout
+  inside table cells; full visual compatibility with Chromium.
 
 See [docs/COVERAGE.md](docs/COVERAGE.md) for the full ✅/🟡/❌ support matrix,
 and [OVERVIEW.md](OVERVIEW.md), [IMPLEMENTATION.md](IMPLEMENTATION.md), and
@@ -226,10 +237,14 @@ cargo run --release -p htmltopdf-cli -- --font /path/to/font.ttf input.html outp
 ## CLI
 
 ```bash
-htmltopdf [--font <path|family>] [--paper a4|letter] [--js] <input.html> <output.pdf>
+htmltopdf [--font <path|family>] [--paper a4|letter] [--js] [--remote-images] <input.html> <output.pdf>
 htmltopdf bench <input.html> <output-dir> [runs]
 htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>
 ```
+
+Relative `<img src>` and `@font-face url()` paths resolve against the input
+file's directory. `--remote-images` opts into fetching `http(s)` URLs (needs a
+build with `--features remote-images`; fail-closed and SSRF-guarded otherwise).
 
 `--js` runs the bounded pre-layout JavaScript stage and requires a build with the
 `js` feature: `cargo run --release -p htmltopdf-cli --features js -- --js in.html out.pdf`.
@@ -336,13 +351,13 @@ Important engine modules:
 | File | Responsibility |
 | --- | --- |
 | `dom.rs` | `html5ever` integration and compact arena DOM |
-| `html.rs` | CSS parsing, cascade, computed styles, document extraction |
+| `html.rs` | CSS parsing, cascade, computed styles, box generation, `@font-face` |
 | `box_tree.rs` | Nested flow box tree |
-| `layout.rs` | Pagination, line breaking, tables, flex/grid, floats, positioning |
+| `layout.rs` | Pagination, line breaking, tables, flex/grid, floats, positioning, borders |
 | `paint.rs` | Backend-neutral display-list commands |
-| `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, image XObjects |
-| `image.rs` | `<img>` loading: `data:` URIs, JPEG headers, in-house PNG decoding |
-| `font.rs` | Font loading, metrics, WinAnsi encoding, and system font lookup |
+| `pdf.rs` | PDF writer, compression, Type0/Identity-H embedding, image XObjects, links/outline |
+| `image.rs` | `<img>` + font `url()` byte loading: `data:` URIs, JPEG headers, in-house PNG decode |
+| `font.rs` | Font resolution/metrics, HarfBuzz shaping, fallback chains, WOFF1, `@font-face` loading |
 | `subset.rs` | Retain-GIDs TrueType glyph subsetter for embedded fonts |
 | `script.rs` | Bounded pre-layout JavaScript stage (`ScriptEngine`; Boa behind `js`) |
 
@@ -369,7 +384,10 @@ Measurement history (details in [IMPLEMENTATION.md](IMPLEMENTATION.md)):
 The current default is doing strictly more work than the earlier rows: it
 honors the document's `font-family`, embeds and subsets real Arial + Arial
 Bold, shapes text, and reproduces kerning — the earlier builds substituted
-built-in Helvetica metrics for everything.
+built-in Helvetica metrics for everything. Features shipped since (rich table
+cells, `@font-face`, the real border model) are **byte-identical** on this
+fixture — a fast path keeps plain spreadsheet cells and unbordered boxes on
+the exact prior code — so the numbers above still hold.
 
 These numbers are development baselines, not a final performance guarantee.
 Every major rendering feature should be benchmarked against fixed fixtures so
@@ -377,12 +395,23 @@ speed and memory stay visible as fidelity improves.
 
 ## Roadmap
 
-- Broaden CSS properties and computed-value coverage (`%` heights/margins,
-  `min-width`, `calc()`, custom properties).
-- Broaden image support (inline/floated images) and add SVG.
-- Isolated per-context `z-index` comparison; RTL table cells.
-- Broaden the scriptable DOM surface (`querySelector`, traversal) on demand.
-- Harden the HTTP server for production deployment patterns.
+The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
+(`:hover`, transitions, animations) is out of scope by design, and the JS DOM
+surface is deferred. The front of the queue, in order (see
+[IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
+
+1. `%` heights/margins/padding/offsets, `min-width`/`min-height`/`max-height`,
+   and `overflow: hidden` clipping.
+2. `calc()` and custom properties (`var()`).
+3. Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
+   `text-indent`, and `::before`/`::after` generated content.
+4. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.
+5. `display: inline-block` and table `rowspan`.
+6. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
+
+Then, further out: WOFF2 web fonts, SVG, the broader scriptable DOM surface
+(`querySelector`, traversal) on demand, and HTTP server hardening for
+production deployment patterns.
 
 ## Author
 
