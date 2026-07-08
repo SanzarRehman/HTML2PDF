@@ -21,7 +21,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `u`, `ins`, `s`, `strike`, `del` | ✅ | Underline / line-through decoration. |
 | `span`, inline text | ✅ | Per-run color/size/weight/decoration. |
 | `br` | ✅ | Hard line break. |
-| `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `col` | ✅ | Automatic column sizing, header repeat across pages, renders alongside surrounding flow content. **Rich cell content**: a cell with inline markup carries styled runs — mixed bold/italic/color/size segments, clickable `<a href>` links, underline/strike, and RTL cells (`dir`/`direction` set the base level, reorder per UAX #9, right-align by default). Plain text-only cells keep the fast single-style path. Column sizing still measures the flattened text (a heavily-bold cell can be slightly under-measured); no images/`<br>`/nested blocks *as blocks* inside cells. |
+| `table`, `thead`, `tbody`, `tfoot`, `tr`, `td`, `th`, `col` | ✅ | Automatic column sizing, header repeat across pages, renders alongside surrounding flow content. **Rich cell content**: a cell with inline markup carries styled runs — mixed bold/italic/color/size segments, clickable `<a href>` links, underline/strike, and RTL cells (`dir`/`direction` set the base level, reorder per UAX #9, right-align by default). Plain text-only cells keep the fast single-style path. Column sizing still measures the flattened text (a heavily-bold cell can be slightly under-measured); no images/`<br>`/nested blocks *as blocks* inside cells. Cells honor per-side borders with width/color (`th { border-bottom: 2px solid }` paints just that edge); uniform black keeps the fast rect path. |
 | `colspan` | ✅ | |
 | `rowspan` | ❌ | Ignored. |
 | `caption`, nested tables | ❌ | |
@@ -60,7 +60,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `text-decoration` | 🟡 | `underline`, `line-through`, `none`; no `overline`/color/style; can't cancel an ancestor's. |
 | `margin` (+ longhands, shorthand) | ✅ | Vertical margins collapse. |
 | `padding` (+ longhands, shorthand) | ✅ | |
-| `border` (+ per-side) | 🟡 | On/off + width; color is always black. |
+| `border` (+ per-side, `border-width/style/color`, all 12 longhands) | ✅ | Per-side width (incl. `thin/medium/thick`), style, and color; `solid`/`dashed`/`dotted` real (double/groove/ridge/inset/outset render solid); color defaults to `currentColor`. Borders consume layout space; backgrounds cover the border box. Uniform borders stroke one rect (fast path); mixed sides stroke per-edge segments; fragmented blocks repeat left/right edges, top/bottom only on first/last page. Stroke is centered on the border-box edge (CSS puts the band fully inside). Legacy lenience: a width with no style still paints solid (`border: 1px` gridlines). |
 | `width` / `height` | 🟡 | `width` honored on `img`, table `col`, floats, positioned boxes, and in-flow blocks. `height` on `img` and on blocks — treated as a **minimum** box height (short content extends the box; taller content overflows visibly; the extension never crosses a page break). An empty div with a background + explicit size still paints (background-layer pattern). |
 | `white-space` | 🟡 | `normal` / `nowrap`. |
 | `overflow` | 🟡 | `visible` / `hidden`. |
@@ -76,7 +76,9 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `position: relative/absolute/fixed` (+ `top`/`right`/`bottom`/`left`, `z-index`) | 🟡 | Relative = visual offset with flow preserved. Absolute = out of flow; `left`/`right`/`top` resolve against the nearest **positioned ancestor's** containing block (else the page content box), `bottom` against the page. **`fixed` repeats on every page** (headers/footers/watermarks). Positioned boxes paint ordered by `z-index` (integer; `auto`=0): non-negative z above in-flow content, **negative z below it** (the `z-index: -1` background layer; nested negative-z descendants paint below their positioned ancestor's content too). Absolute boxes don't paginate (content past the page bottom is dropped). z compares globally (no isolated per-context stacking from `opacity`/`transform`), no `%` offsets, no `sticky`. |
 | `width` on in-flow blocks | 🟡 | Content-box width (points or `%`), `max-width` (points or `%`), and **`margin: auto` horizontal centering**; no `height`/`min-width`. |
 | `columns` (multi-col), `flex-shrink` (explicit), `order` | ❌ | |
-| `transform`, `opacity`, `box-shadow`, `border-radius`, `filter` | ❌ | |
+| `border-radius` | 🟡 | Single uniform radius on blocks: rounds the background fill and (uniform) border stroke via Bézier paths. No per-corner/elliptical radii, no content clipping to the rounded shape, not on table cells. |
+| `box-sizing` | ✅ | `border-box`/`content-box` on in-flow blocks, floats, and positioned boxes (width and min-height). |
+| `transform`, `opacity`, `box-shadow`, `filter` | ❌ | |
 | `max-width` (pt / `%`) | 🟡 | On blocks and images (`max-width: 100%` works). |
 | `object-fit`, `min-width`, `max-height`, `min-height` | ❌ | |
 | `calc()`, custom properties (`--var`, `var()`) | ❌ | |

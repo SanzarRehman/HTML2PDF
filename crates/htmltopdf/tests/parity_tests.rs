@@ -31,6 +31,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "text-decoration"),
     ("features", "colors"),
     ("features", "box-model"),
+    ("features", "borders"),
     ("features", "lists"),
     ("features", "tables"),
     ("features", "images"),

@@ -685,6 +685,40 @@ fn push_text_segment(content: &mut String, plan: &FontPlan, segment: &str) {
     }
 }
 
+/// Build the path operators for a rectangle with uniformly rounded corners:
+/// four edge segments joined by quarter-circle Bézier arcs (the standard
+/// circle approximation constant k ≈ 0.5523). `(x, y)` is the lower-left
+/// corner; the caller appends the painting operator (`S` / `f`).
+fn rounded_rect_path(rect: &crate::paint::RoundedRectCommand) -> String {
+    let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height);
+    let r = rect.radius.min(w / 2.0).min(h / 2.0).max(0.0);
+    let k = 0.552_284_75 * r;
+    let mut path = String::new();
+    path.push_str(&format!("{:.2} {:.2} m\n", x + r, y));
+    path.push_str(&format!("{:.2} {:.2} l\n", x + w - r, y));
+    path.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        x + w - r + k, y, x + w, y + r - k, x + w, y + r
+    ));
+    path.push_str(&format!("{:.2} {:.2} l\n", x + w, y + h - r));
+    path.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        x + w, y + h - r + k, x + w - r + k, y + h, x + w - r, y + h
+    ));
+    path.push_str(&format!("{:.2} {:.2} l\n", x + r, y + h));
+    path.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        x + r - k, y + h, x, y + h - r + k, x, y + h - r
+    ));
+    path.push_str(&format!("{:.2} {:.2} l\n", x, y + r));
+    path.push_str(&format!(
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c\n",
+        x, y + r - k, x + r - k, y, x + r, y
+    ));
+    path.push_str("h\n");
+    path
+}
+
 fn page_content(page: &Page, options: &RenderOptions, font_plans: &[FontPlan]) -> String {
     // Faces are deduplicated by identity when plans are built, so a linear
     // identity scan (over a handful of plans) resolves any face to its plan.
@@ -719,6 +753,20 @@ fn page_content(page: &Page, options: &RenderOptions, font_plans: &[FontPlan]) -
             }
             PaintCommand::SetLineWidth(width) => {
                 content.push_str(&format!("{width:.3} w\n"));
+            }
+            PaintCommand::SetDash(pattern) => match pattern {
+                Some(dash) => {
+                    content.push_str(&format!("[{:.2} {:.2}] 0 d\n", dash.on, dash.off));
+                }
+                None => content.push_str("[] 0 d\n"),
+            },
+            PaintCommand::StrokeRoundedRect(rect) => {
+                content.push_str(&rounded_rect_path(rect));
+                content.push_str("S\n");
+            }
+            PaintCommand::FillRoundedRect(rect) => {
+                content.push_str(&rounded_rect_path(rect));
+                content.push_str("f\n");
             }
             PaintCommand::StrokeRect(rect) => {
                 content.push_str(&format!(

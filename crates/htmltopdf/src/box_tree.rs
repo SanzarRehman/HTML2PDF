@@ -99,8 +99,17 @@ pub struct BlockBox {
     pub align: TextAlign,
     /// A non-white background color to paint behind the block's border box.
     pub background: Option<Color>,
-    /// Whether to stroke a border around the block's border box.
-    pub border: bool,
+    /// Resolved border sides (per-side width/style/color); `None` = no border.
+    /// The side widths are already folded into `padding`, so the border box is
+    /// `content + padding` and borders consume layout space.
+    pub border: Option<crate::html::BorderEdges>,
+    /// `border-radius` (uniform corner radius, points; 0 = square). Applied to
+    /// the background fill and — when the border is uniform — the border
+    /// stroke; content is not clipped to the rounded shape.
+    pub border_radius: f32,
+    /// `box-sizing: border-box`: the declared CSS width/height include padding
+    /// and borders instead of adding to them.
+    pub border_box: bool,
     /// `Some` when this block is a `display: flex` container: its block children
     /// are laid out as flex items instead of stacking vertically.
     pub flex: Option<FlexContainer>,

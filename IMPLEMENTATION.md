@@ -906,8 +906,33 @@ looks like. JS DOM breadth moves to the tail (decision: finish JS later).
       total). **Not yet done:** WOFF2 (needs a Brotli decoder),
       `unicode-range`, `font-display`, per-render font cache (remote fonts
       re-fetch every render), variable-font axis selection.
-- [ ] **Real border model**: per-side width/style/color, `box-sizing`,
-      `border-radius` (stroked corners).
+- [x] **Real border model** (2026-07-08): per-side cascaded sub-properties
+      (`BorderSideCss { width, style, color }` behind `Option<Box<BorderSides>>`
+      on `CellStyle` — boxed so unbordered computed styles pay one pointer,
+      keeping the 22k-cell doc's RAM flat). Parses the `border`/`border-<side>`
+      shorthands (any token order), `border-width/style/color` (1–4 values),
+      all 12 longhands, `thin/medium/thick`, `solid/dashed/dotted` (+
+      double/groove/ridge/inset/outset → solid, `hidden` → none), color
+      defaulting to `currentColor`; sub-properties merge across cascade layers
+      per side. `resolved_borders` → `BorderEdges` on `BlockBox`; widths fold
+      into `padding`, so **borders consume layout space** and backgrounds
+      cover the border box. Paint: uniform border = one stroke rect (legacy
+      command sequence, hot path byte-identical); mixed sides = per-edge
+      segments with own color/width; dashed/dotted via a new
+      `SetDash`/`DashPattern` paint command (always reset after); fragmented
+      blocks repeat left/right, top/bottom only on first/last page.
+      **`border-radius`** (single uniform radius): `Fill/StrokeRoundedRect`
+      commands, Bézier quarter arcs (k≈0.5523) in pdf.rs, radius clamped to
+      the half-box. **`box-sizing: border-box`** honored on in-flow width,
+      floats, absolute boxes, and `height`-as-min. **Table cells**: per-side
+      rules paint edge lines (`th { border-bottom: 2px solid #333 }`), colored
+      uniform borders recolor the rect (stroke state restored to black);
+      uniform-black keeps the exact historic fast path — 22k-cell fixture
+      **byte-identical**, wall/RAM unchanged (0.41 s / ~93 MB A/B).
+      `features/borders` fixture (28 total; near-1:1 vs Chrome side-by-side).
+      **Not yet done:** real double/groove rendering, stroke centered on the
+      edge instead of inside it, per-corner/elliptical radii, rounded-corner
+      content clipping, radius on cells, `border-collapse` semantics.
 - [ ] **`%` lengths everywhere + min/max sizing**: `%` heights, margins,
       padding, and position offsets; `min-width`/`min-height`/`max-height`;
       `overflow: hidden` clipping of over-tall fixed-height blocks.

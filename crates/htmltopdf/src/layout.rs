@@ -3,7 +3,10 @@ use crate::html::{
     BlockKind, Document, Overflow, OverflowWrap, PageOrientation, TableCell, TextAlign,
     VerticalAlign, WhiteSpace, WordBreak,
 };
-use crate::paint::{ImageCommand, LineCommand, PaintCommand, RectCommand, TextCommand};
+use crate::paint::{
+    DashPattern, ImageCommand, LineCommand, PaintCommand, RectCommand, RoundedRectCommand,
+    TextCommand,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct PageSize {
@@ -673,11 +676,18 @@ fn layout_float(
     let is_left = block.float_dir == Some(crate::html::FloatDir::Left);
 
     // Shrink-to-fit: CSS width (points or percent) if declared, else
-    // max-content + own edges, clamped to the containing width.
+    // max-content + own edges, clamped to the containing width. With
+    // `border-box` sizing the declared width already includes the padding.
     let float_width = block
         .css_width
         .or(block.css_width_percent.map(|pct| pct / 100.0 * width))
-        .map(|w| w + block.padding.left + block.padding.right)
+        .map(|w| {
+            if block.border_box {
+                w.max(block.padding.left + block.padding.right)
+            } else {
+                w + block.padding.left + block.padding.right
+            }
+        })
         .unwrap_or_else(|| {
             measure_max_content(&block.children, options)
                 + block.padding.left
@@ -757,7 +767,13 @@ fn layout_absolute_box(
     let width = block
         .css_width
         .or(block.css_width_percent.map(|pct| pct / 100.0 * content_width))
-        .map(|w| w + block.padding.left + block.padding.right)
+        .map(|w| {
+            if block.border_box {
+                w.max(block.padding.left + block.padding.right)
+            } else {
+                w + block.padding.left + block.padding.right
+            }
+        })
         .unwrap_or_else(|| {
             measure_max_content(&block.children, options)
                 + block.padding.left
@@ -1542,17 +1558,22 @@ fn layout_block_box(
     // containing block) narrows the block to `width + padding + margins`,
     // clamped to the containing width; `max-width` clamps further. With
     // `margin: auto` on both sides, the leftover space centers the box.
-    let edges =
-        block.padding.left + block.padding.right + block.margin.left + block.margin.right;
+    // With `box-sizing: border-box`, the declared width already covers padding
+    // and borders, so only the margins are added on top of it.
+    let css_extra = if block.border_box {
+        block.margin.left + block.margin.right
+    } else {
+        block.padding.left + block.padding.right + block.margin.left + block.margin.right
+    };
     let css_width = block
         .css_width
         .or(block.css_width_percent.map(|pct| pct / 100.0 * width));
     let max_outer = block
         .max_width
         .or(block.max_width_percent.map(|pct| pct / 100.0 * width))
-        .map(|max| max + edges);
+        .map(|max| max + css_extra);
     let outer = match css_width {
-        Some(css) => (css + edges).min(width),
+        Some(css) => (css + css_extra).min(width),
         None => width,
     };
     let outer = match max_outer {
@@ -1578,7 +1599,7 @@ fn layout_block_box(
     // This block's top margin collapses with the margin carried from above.
     *carried = carried.max(block.margin.top);
 
-    let decorated = block.border || block.background.is_some();
+    let decorated = block.border.is_some() || block.background.is_some();
     let inner_x = x + block.margin.left + block.padding.left;
     let inner_width =
         (width - block.margin.left - block.margin.right - block.padding.left - block.padding.right)
@@ -1655,7 +1676,14 @@ fn layout_block_box(
     // No pagination of the extension: a fragment never grows past its page.
     if let Some(height) = block.css_height {
         flush_margin(y, carried);
-        let target = start_y - (height + block.padding.top + block.padding.bottom);
+        // `border-box` sizing: the declared height already includes padding
+        // and borders (both folded into `padding` here).
+        let outer = if block.border_box {
+            height.max(block.padding.top + block.padding.bottom)
+        } else {
+            height + block.padding.top + block.padding.bottom
+        };
+        let target = start_y - outer;
         if target < *y && pages.len() - 1 == start_page {
             *y = target;
         }
@@ -1761,28 +1789,129 @@ fn paint_decorations(
         }
 
         let mut commands = Vec::new();
+        let radius = block.border_radius.min(width / 2.0).min(height / 2.0).max(0.0);
         if let Some(color) = block.background {
             commands.push(PaintCommand::SetFillColor(color));
-            commands.push(PaintCommand::FillRect(RectCommand {
-                x,
-                y: bottom,
-                width,
-                height,
-            }));
+            if radius > 0.0 {
+                commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
+                    x,
+                    y: bottom,
+                    width,
+                    height,
+                    radius,
+                }));
+            } else {
+                commands.push(PaintCommand::FillRect(RectCommand {
+                    x,
+                    y: bottom,
+                    width,
+                    height,
+                }));
+            }
         }
-        if block.border {
-            commands.push(PaintCommand::SetStrokeColor(Color::BLACK));
-            commands.push(PaintCommand::SetLineWidth(DEFAULT_BORDER_WIDTH));
-            commands.push(PaintCommand::StrokeRect(RectCommand {
+        if let Some(edges) = &block.border {
+            paint_border(
+                &mut commands,
+                edges,
+                radius,
                 x,
-                y: bottom,
+                bottom,
                 width,
                 height,
-            }));
+                page_index == start_page,
+                page_index == end_page,
+            );
         }
 
         let at = if page_index == start_page { start_index } else { 0 };
         pages[page_index].commands.splice(at..at, commands);
+    }
+}
+
+/// Stroke a block's border along its border-box rectangle. A uniform border
+/// (all four sides equal) strokes one rectangle — rounded when a radius is
+/// set; mixed sides stroke individual edge segments (radius is ignored for
+/// them). On a fragmented block, the top edge paints only on the first page
+/// fragment and the bottom edge only on the last (CSS `box-decoration-break:
+/// slice`); left/right repeat on every fragment. Dashed/dotted styles emit a
+/// dash pattern and always reset it, so later strokes stay solid.
+#[allow(clippy::too_many_arguments)]
+fn paint_border(
+    commands: &mut Vec<PaintCommand>,
+    edges: &crate::html::BorderEdges,
+    radius: f32,
+    x: f32,
+    bottom: f32,
+    width: f32,
+    height: f32,
+    first_fragment: bool,
+    last_fragment: bool,
+) {
+    let dash_for = border_dash;
+
+    if let Some(side) = edges.uniform() {
+        commands.push(PaintCommand::SetStrokeColor(side.color));
+        commands.push(PaintCommand::SetLineWidth(side.width));
+        let dash = dash_for(side);
+        if let Some(pattern) = dash {
+            commands.push(PaintCommand::SetDash(Some(pattern)));
+        }
+        let rect = RectCommand { x, y: bottom, width, height };
+        if radius > 0.0 {
+            commands.push(PaintCommand::StrokeRoundedRect(RoundedRectCommand {
+                x,
+                y: bottom,
+                width,
+                height,
+                radius,
+            }));
+        } else {
+            commands.push(PaintCommand::StrokeRect(rect));
+        }
+        if dash.is_some() {
+            commands.push(PaintCommand::SetDash(None));
+        }
+        return;
+    }
+
+    let top_y = bottom + height;
+    let sides = [
+        (edges.top, first_fragment, (x, top_y, x + width, top_y)),
+        (edges.bottom, last_fragment, (x, bottom, x + width, bottom)),
+        (edges.left, true, (x, bottom, x, top_y)),
+        (edges.right, true, (x + width, bottom, x + width, top_y)),
+    ];
+    for (side, active, (x1, y1, x2, y2)) in sides {
+        let Some(side) = side else { continue };
+        if !active {
+            continue;
+        }
+        commands.push(PaintCommand::SetStrokeColor(side.color));
+        commands.push(PaintCommand::SetLineWidth(side.width));
+        let dash = dash_for(side);
+        if let Some(pattern) = dash {
+            commands.push(PaintCommand::SetDash(Some(pattern)));
+        }
+        commands.push(PaintCommand::StrokeLine(LineCommand { x1, y1, x2, y2 }));
+        if dash.is_some() {
+            commands.push(PaintCommand::SetDash(None));
+        }
+    }
+}
+
+/// The dash pattern for a border side's style: dashed = 3×width on/off,
+/// dotted = width on/off (square dots). Solid strokes return `None`.
+fn border_dash(side: crate::html::BorderSide) -> Option<DashPattern> {
+    match side.style {
+        crate::html::BorderStyle::Dashed => Some(DashPattern {
+            on: side.width * 3.0,
+            off: side.width * 3.0,
+        }),
+        crate::html::BorderStyle::Dotted => Some(DashPattern {
+            on: side.width,
+            off: side.width,
+        }),
+        _ => None,
     }
 }
 
@@ -2470,15 +2599,26 @@ fn render_planned_table_row(
         }
 
         if planned.source.style.border == Some(true) {
-            page.commands
-                .push(PaintCommand::SetLineWidth(planned.border_width));
-            page.push_rect(Rect {
+            let rect = Rect {
                 x,
                 y: *y - row_height,
                 width: planned.width,
                 height: row_height,
                 stroke: true,
-            });
+            };
+            match crate::html::resolved_borders(&planned.source.style) {
+                Some(edges) => {
+                    paint_cell_border(page, &edges, planned.paint_scale, rect);
+                }
+                // Summary on but no resolvable sides (legacy inputs that only
+                // flipped the flag): the historic uniform 1px black rect.
+                None => {
+                    page.commands.push(PaintCommand::SetLineWidth(
+                        DEFAULT_BORDER_WIDTH * planned.paint_scale,
+                    ));
+                    page.push_rect(rect);
+                }
+            }
         }
 
         if planned.clip_content {
@@ -2729,7 +2869,7 @@ fn plan_table_cells<'a>(
             padding_top,
             padding_bottom,
             clip_content,
-            border_width: DEFAULT_BORDER_WIDTH * table_geometry.paint_scale,
+            paint_scale: table_geometry.paint_scale,
         });
 
         column_index += colspan;
@@ -2761,7 +2901,81 @@ struct PlannedCell<'a> {
     padding_top: f32,
     padding_bottom: f32,
     clip_content: bool,
-    border_width: f32,
+    /// The table's shrink-to-fit scale (border widths scale with it, like the
+    /// font and padding do).
+    paint_scale: f32,
+}
+
+/// Stroke a table cell's border. The uniform solid-black case reproduces the
+/// historic command sequence exactly (line width + `push_rect`), keeping
+/// plain spreadsheet output byte-identical; colored/dashed/per-side borders
+/// paint their own strokes, always leaving solid black stroke state behind.
+fn paint_cell_border(page: &mut Page, edges: &crate::html::BorderEdges, scale: f32, rect: Rect) {
+    let scaled_dash = |side: crate::html::BorderSide| {
+        border_dash(side).map(|dash| DashPattern {
+            on: dash.on * scale,
+            off: dash.off * scale,
+        })
+    };
+
+    if let Some(side) = edges.uniform() {
+        let dash = scaled_dash(side);
+        page.commands
+            .push(PaintCommand::SetLineWidth(side.width * scale));
+        if let Some(pattern) = dash {
+            page.commands.push(PaintCommand::SetDash(Some(pattern)));
+        }
+        if side.color == Color::BLACK {
+            page.push_rect(rect);
+        } else {
+            page.commands.push(PaintCommand::SetStrokeColor(side.color));
+            page.commands.push(PaintCommand::StrokeRect(RectCommand {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            }));
+            page.rects.push(rect);
+            page.commands.push(PaintCommand::SetStrokeColor(Color::BLACK));
+        }
+        if dash.is_some() {
+            page.commands.push(PaintCommand::SetDash(None));
+        }
+        return;
+    }
+
+    let (x0, y0) = (rect.x, rect.y);
+    let (x1, y1) = (rect.x + rect.width, rect.y + rect.height);
+    let sides = [
+        (edges.top, (x0, y1, x1, y1)),
+        (edges.bottom, (x0, y0, x1, y0)),
+        (edges.left, (x0, y0, x0, y1)),
+        (edges.right, (x1, y0, x1, y1)),
+    ];
+    let mut recolored = false;
+    for (side, (ax, ay, bx, by)) in sides {
+        let Some(side) = side else { continue };
+        page.commands.push(PaintCommand::SetStrokeColor(side.color));
+        recolored |= side.color != Color::BLACK;
+        page.commands
+            .push(PaintCommand::SetLineWidth(side.width * scale));
+        let dash = scaled_dash(side);
+        if let Some(pattern) = dash {
+            page.commands.push(PaintCommand::SetDash(Some(pattern)));
+        }
+        page.commands.push(PaintCommand::StrokeLine(LineCommand {
+            x1: ax,
+            y1: ay,
+            x2: bx,
+            y2: by,
+        }));
+        if dash.is_some() {
+            page.commands.push(PaintCommand::SetDash(None));
+        }
+    }
+    if recolored {
+        page.commands.push(PaintCommand::SetStrokeColor(Color::BLACK));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3244,6 +3458,14 @@ mod tests {
     use crate::html::{Block, BlockKind, Document};
     use crate::paint::PaintCommand;
 
+    /// The historic default border for hand-built test boxes: uniform 1px
+    /// solid black.
+    const TEST_BORDER_SIDE: crate::html::BorderSide = crate::html::BorderSide {
+        width: super::DEFAULT_BORDER_WIDTH,
+        style: crate::html::BorderStyle::Solid,
+        color: Color::BLACK,
+    };
+
     use super::{
         estimate_text_width, justify_offsets, layout_document, table_geometry, PageSize,
         RenderOptions,
@@ -3577,6 +3799,112 @@ mod tests {
             fill_rects.iter().any(|&i| i > first_text),
             "the positive-z badge rect must follow the flow text (above it)"
         );
+    }
+
+    #[test]
+    fn paints_per_side_dashed_and_rounded_borders() {
+        let document = crate::html::parse(
+            r##"
+            <style>
+            .dash { border: 2px dashed #b00; padding: 4px; }
+            .rule { border-bottom: 3px solid #00f; }
+            .round { border: 2px solid black; border-radius: 6px;
+                     background-color: #dde; padding: 4px; }
+            </style>
+            <div class="dash">dashed box</div>
+            <div class="rule">ruled paragraph</div>
+            <div class="round">rounded card</div>
+            "##,
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let commands = &pages[0].commands;
+
+        // Dashed: a dash pattern is set and always reset back to solid.
+        let dash_on = commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::SetDash(Some(_))));
+        let dash_off = commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::SetDash(None)));
+        assert!(dash_on && dash_off, "dash set + reset expected");
+
+        // The single-side rule paints a line, in its declared blue.
+        assert!(commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::StrokeLine(_))));
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            PaintCommand::SetStrokeColor(color) if color.b > 0.9 && color.r < 0.1
+        )));
+
+        // border-radius: both the background and the border take the rounded
+        // path commands.
+        assert!(commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::FillRoundedRect(r) if r.radius > 0.0)));
+        assert!(commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::StrokeRoundedRect(r) if r.radius > 0.0)));
+    }
+
+    #[test]
+    fn border_box_sizing_narrows_the_declared_width() {
+        // Same declared width; the border-box one absorbs padding + border
+        // into it, so its stroked border box is exactly the declared 90pt
+        // (120px) while the content-box one adds 8px padding and 3px border
+        // per side (90 + 2*6 + 2*2.25 = 106.5).
+        let document = crate::html::parse(
+            r#"
+            <div style="width: 120px; padding: 8px; border: 3px solid black">a</div>
+            <div style="width: 120px; padding: 8px; border: 3px solid black; box-sizing: border-box">b</div>
+            "#,
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let mut widths: Vec<f32> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                PaintCommand::StrokeRect(rect) => Some(rect.width),
+                _ => None,
+            })
+            .collect();
+        widths.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(widths.len(), 2, "two bordered boxes");
+        assert!((widths[0] - 90.0).abs() < 0.01, "border-box: {}", widths[0]);
+        assert!((widths[1] - 106.5).abs() < 0.01, "content-box: {}", widths[1]);
+    }
+
+    #[test]
+    fn cell_border_bottom_paints_a_line_not_a_rect() {
+        let document = crate::html::parse(
+            "<style>td { border-bottom: 1pt solid #cccccc; }</style>\
+             <table><tr><td>alpha</td><td>beta</td></tr></table>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let commands = &pages[0].commands;
+        let lines = commands
+            .iter()
+            .filter(|c| matches!(c, PaintCommand::StrokeLine(_)))
+            .count();
+        let rects = commands
+            .iter()
+            .filter(|c| matches!(c, PaintCommand::StrokeRect(_)))
+            .count();
+        assert_eq!(lines, 2, "one bottom edge per cell");
+        assert_eq!(rects, 0, "no full border rectangles");
+        // The declared #ccc stroke color is used, and solid black is restored
+        // afterwards so later strokes are unaffected.
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            PaintCommand::SetStrokeColor(color) if (color.r - 0.8).abs() < 0.01
+        )));
+        assert!(matches!(
+            commands
+                .iter()
+                .filter(|c| matches!(c, PaintCommand::SetStrokeColor(_)))
+                .last(),
+            Some(PaintCommand::SetStrokeColor(color)) if *color == Color::BLACK
+        ));
     }
 
     #[test]
@@ -3924,7 +4252,9 @@ mod tests {
                     padding: crate::box_tree::Edges::default(),
                     align: crate::html::TextAlign::Left,
                     background: None,
-                    border: false,
+                    border: None,
+                    border_radius: 0.0,
+                    border_box: false,
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
@@ -4001,7 +4331,9 @@ mod tests {
                     padding: Edges::default(),
                     align: crate::html::TextAlign::Left,
                     background: None,
-                    border: false,
+                    border: None,
+                    border_radius: 0.0,
+                    border_box: false,
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
@@ -4076,7 +4408,9 @@ mod tests {
                 padding: Edges::default(),
                 align: crate::html::TextAlign::Left,
                 background: None,
-                border: false,
+                border: None,
+                border_radius: 0.0,
+                border_box: false,
                 flex: None,
                 flex_grow: 0.0,
                 flex_basis: None,
@@ -4176,7 +4510,9 @@ mod tests {
                         padding: Edges::default(),
                         align: crate::html::TextAlign::Left,
                         background: None,
-                        border: false,
+                        border: None,
+                        border_radius: 0.0,
+                        border_box: false,
                         flex: None,
                         flex_grow: 0.0,
                         flex_basis: None,
@@ -4248,7 +4584,14 @@ mod tests {
                     },
                     align: crate::html::TextAlign::Left,
                     background: Some(Color::from_rgb_u8(255, 0, 0)),
-                    border: true,
+                    border: Some(crate::html::BorderEdges {
+                        top: Some(TEST_BORDER_SIDE),
+                        right: Some(TEST_BORDER_SIDE),
+                        bottom: Some(TEST_BORDER_SIDE),
+                        left: Some(TEST_BORDER_SIDE),
+                    }),
+                    border_radius: 0.0,
+                    border_box: false,
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,

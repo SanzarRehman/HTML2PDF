@@ -88,7 +88,17 @@ pub struct CellStyle {
     pub decoration_none: bool,
     /// Whether the box draws a border. `None` means unset (so a more specific
     /// `border: none` can override a less specific border rule in the cascade).
+    /// Kept as the any-visible-border *summary* that table heuristics and fast
+    /// paths read; the per-side truth lives in `border_top..border_left`.
     pub border: Option<bool>,
+    /// Per-side cascaded border sub-properties + `border-radius`
+    /// (non-inherited), resolved to paintable sides by [`resolved_borders`].
+    /// Boxed so the ~99% of computed styles with no border declarations pay
+    /// one pointer, not four inline sides — `CellStyle` is cloned per node.
+    pub border_sides: Option<Box<BorderSides>>,
+    /// `box-sizing`: `Some(true)` = `border-box` (declared width/height include
+    /// padding and borders), `Some(false)` = explicit `content-box`.
+    pub border_box: Option<bool>,
     pub overflow: Option<Overflow>,
     pub font_size: Option<f32>,
     /// First usable family from CSS `font-family` (inherited): a concrete name
@@ -178,6 +188,8 @@ impl Default for CellStyle {
             line_through: false,
             decoration_none: false,
             border: None,
+            border_sides: None,
+            border_box: None,
             overflow: None,
             font_size: None,
             font_family: None,
@@ -229,6 +241,119 @@ impl Default for CellStyle {
         }
     }
 }
+
+/// One cascaded border side's sub-properties. Each cascades independently
+/// (`border-color` may arrive in a different rule than `border-style`), so all
+/// three stay optional until [`resolved_borders`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BorderSideCss {
+    /// Width in points (`thin`/`medium`/`thick` already mapped).
+    pub width: Option<f32>,
+    pub style: Option<BorderStyle>,
+    pub color: Option<Color>,
+}
+
+/// The boxed per-side border data of one style: four cascaded sides plus the
+/// uniform `border-radius`. Lives behind an `Option<Box<..>>` on `CellStyle`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BorderSides {
+    pub top: BorderSideCss,
+    pub right: BorderSideCss,
+    pub bottom: BorderSideCss,
+    pub left: BorderSideCss,
+    /// `border-radius`, single uniform corner radius in points (per-corner
+    /// and elliptical radii are not parsed).
+    pub radius: Option<f32>,
+}
+
+/// CSS border line styles the painter distinguishes. `double`, `groove`,
+/// `ridge`, `inset`, and `outset` parse as `Solid` (a visible approximation);
+/// `hidden` parses as `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderStyle {
+    None,
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+/// A resolved, paintable border side (style is never `None` here).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BorderSide {
+    pub width: f32,
+    pub style: BorderStyle,
+    pub color: Color,
+}
+
+/// The four resolved border sides of a box (`None` = that side absent).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BorderEdges {
+    pub top: Option<BorderSide>,
+    pub right: Option<BorderSide>,
+    pub bottom: Option<BorderSide>,
+    pub left: Option<BorderSide>,
+}
+
+impl BorderEdges {
+    /// The single side shared by all four edges, when they are all present and
+    /// identical — the fast path that strokes one rectangle.
+    pub fn uniform(&self) -> Option<BorderSide> {
+        match (self.top, self.right, self.bottom, self.left) {
+            (Some(t), Some(r), Some(b), Some(l)) if t == r && r == b && b == l => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Per-side widths as box edges (absent sides are zero) — the layout space
+    /// the border consumes, folded into the block's padding.
+    pub fn widths(&self) -> crate::box_tree::Edges {
+        let w = |side: Option<BorderSide>| side.map_or(0.0, |s| s.width);
+        crate::box_tree::Edges {
+            top: w(self.top),
+            right: w(self.right),
+            bottom: w(self.bottom),
+            left: w(self.left),
+        }
+    }
+}
+
+/// Resolve the cascaded per-side border sub-properties to paintable sides.
+/// Missing sub-properties default like CSS: width `medium` (3px), color
+/// `currentColor` (the element's text color, else black) — with one legacy
+/// lenience: a declared width with *no* style paints `Solid` (browsers hide
+/// it, but spreadsheet exports rely on `border: 1px` drawing gridlines).
+pub(crate) fn resolved_borders(style: &CellStyle) -> Option<BorderEdges> {
+    let resolve = |side: BorderSideCss| -> Option<BorderSide> {
+        let kind = match side.style {
+            Some(BorderStyle::None) => return None,
+            Some(kind) => kind,
+            None if side.width.is_some() => BorderStyle::Solid,
+            None => return None,
+        };
+        let width = side.width.unwrap_or(MEDIUM_BORDER_WIDTH);
+        if width <= 0.0 {
+            return None;
+        }
+        Some(BorderSide {
+            width,
+            style: kind,
+            color: side.color.or(style.color).unwrap_or(Color::BLACK),
+        })
+    };
+    let sides = style.border_sides.as_deref()?;
+    let edges = BorderEdges {
+        top: resolve(sides.top),
+        right: resolve(sides.right),
+        bottom: resolve(sides.bottom),
+        left: resolve(sides.left),
+    };
+    (edges.top.is_some() || edges.right.is_some() || edges.bottom.is_some()
+        || edges.left.is_some())
+    .then_some(edges)
+}
+
+/// CSS `medium` border width: 3px at 96 dpi, in points.
+const MEDIUM_BORDER_WIDTH: f32 = 2.25;
 
 /// A cascaded CSS `line-height` value. `normal` is represented as the absence
 /// of a value (`None` in [`CellStyle::line_height`]).
@@ -978,11 +1103,17 @@ fn build_block(
         }),
         left: own.margin_left.unwrap_or(0.0) + nesting_indent,
     };
+    // Border widths consume layout space like padding (content sits inside
+    // them), so they fold into the padding edges here; the painted background
+    // and border rectangle span this same (border) box, matching how CSS
+    // backgrounds extend under the border.
+    let border = resolved_borders(own);
+    let border_widths = border.map(|edges| edges.widths()).unwrap_or_default();
     let padding = crate::box_tree::Edges {
-        top: own.padding_top.unwrap_or(0.0),
-        right: own.padding_right.unwrap_or(0.0),
-        bottom: own.padding_bottom.unwrap_or(0.0),
-        left: own.padding_left.unwrap_or(0.0),
+        top: own.padding_top.unwrap_or(0.0) + border_widths.top,
+        right: own.padding_right.unwrap_or(0.0) + border_widths.right,
+        bottom: own.padding_bottom.unwrap_or(0.0) + border_widths.bottom,
+        left: own.padding_left.unwrap_or(0.0) + border_widths.left,
     };
     // A white background matches the page, so it is treated as "no background".
     let background = own
@@ -1051,7 +1182,7 @@ fn build_block(
     if acc.children.is_empty() {
         // An empty block is normally dropped, but a *decorated* one with an
         // explicit size still paints (the `z-index: -1` background-layer div).
-        let paints_alone = (background.is_some() || own.border.unwrap_or(false))
+        let paints_alone = (background.is_some() || border.is_some())
             && (own.width.is_some() || own.width_percent.is_some() || own.height.is_some());
         if !paints_alone {
             return None;
@@ -1075,7 +1206,13 @@ fn build_block(
         padding,
         align,
         background,
-        border: own.border.unwrap_or(false),
+        border,
+        border_radius: own
+            .border_sides
+            .as_deref()
+            .and_then(|sides| sides.radius)
+            .unwrap_or(0.0),
+        border_box: own.border_box.unwrap_or(false),
         flex,
         flex_grow: own.flex_grow.unwrap_or(0.0),
         flex_basis: own.flex_basis,
@@ -1961,6 +2098,8 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         // Non-inheritable: the element's own value only.
         vertical_align: own.vertical_align,
         border: own.border,
+        border_sides: own.border_sides.clone(),
+        border_box: own.border_box,
         overflow: own.overflow,
         width: own.width,
         width_percent: own.width_percent,
@@ -4065,15 +4204,187 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "word-break" if value.eq_ignore_ascii_case("break-all") => {
             target.cell.word_break = Some(WordBreak::BreakAll);
         }
-        "border" | "border-left" | "border-right" | "border-top" | "border-bottom" => {
-            // `none`/`0` disable the border; anything else enables it. Recorded as
-            // an explicit value so a more specific rule (e.g. `th.style0 {
-            // border: none }`) can override a broad `th { border }`.
-            let v = value.trim();
-            target.cell.border = Some(!(v.starts_with("none") || v.starts_with('0')));
+        "border" => {
+            // The shorthand resets all sub-properties on every side (one
+            // declaration → whole-side assignment, not a merge). The legacy
+            // `border` summary flag is kept in sync for the heuristics that
+            // read it (caption rows, empty decorated blocks, cell fast path).
+            let side = parse_border_shorthand(value);
+            let sides = border_sides_mut(&mut target.cell);
+            sides.top = side;
+            sides.right = side;
+            sides.bottom = side;
+            sides.left = side;
+            target.cell.border = Some(border_side_visible(side));
+        }
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            let side = parse_border_shorthand(value);
+            *border_side_mut(&mut target.cell, &property[7..]) = side;
+            // Matches the legacy summary latch: a per-side declaration flips
+            // the whole-box summary (per-side truth lives in the side fields).
+            target.cell.border = Some(border_side_visible(side));
+        }
+        "border-width" | "border-style" | "border-color" => {
+            let values = expand_box_values(value);
+            for (index, name) in ["top", "right", "bottom", "left"].iter().enumerate() {
+                let Some(token) = values.get(index) else { continue };
+                let side = border_side_mut(&mut target.cell, name);
+                match &property[7..] {
+                    "width" => side.width = parse_border_width_token(token),
+                    "style" => side.style = parse_border_style_keyword(token),
+                    _ => side.color = parse_css_color(token),
+                }
+            }
+            if property == "border-style" {
+                let sides = border_sides_mut(&mut target.cell);
+                let any_visible = [sides.top, sides.right, sides.bottom, sides.left]
+                    .iter()
+                    .any(|side| border_side_visible(*side));
+                target.cell.border = Some(any_visible);
+            }
+        }
+        "border-top-width" | "border-right-width" | "border-bottom-width"
+        | "border-left-width" => {
+            let name = &property[7..property.len() - 6];
+            border_side_mut(&mut target.cell, name).width = parse_border_width_token(value);
+        }
+        "border-top-style" | "border-right-style" | "border-bottom-style"
+        | "border-left-style" => {
+            let name = &property[7..property.len() - 6];
+            let style = parse_border_style_keyword(value);
+            border_side_mut(&mut target.cell, name).style = style;
+            if style.is_some_and(|kind| kind != BorderStyle::None) {
+                target.cell.border = Some(true);
+            }
+        }
+        "border-top-color" | "border-right-color" | "border-bottom-color"
+        | "border-left-color" => {
+            let name = &property[7..property.len() - 6];
+            border_side_mut(&mut target.cell, name).color = parse_css_color(value);
+        }
+        "border-radius" => {
+            // Single uniform radius: the first length wins (per-corner and
+            // elliptical `/` syntax collapse to it).
+            let first = value.split(['/', ' ']).find(|token| !token.is_empty());
+            if let Some(radius) = first.and_then(parse_css_length) {
+                border_sides_mut(&mut target.cell).radius = Some(radius.max(0.0));
+            }
+        }
+        "box-sizing" => {
+            if value.eq_ignore_ascii_case("border-box") {
+                target.cell.border_box = Some(true);
+            } else if value.eq_ignore_ascii_case("content-box") {
+                target.cell.border_box = Some(false);
+            }
         }
         _ => {}
     }
+}
+
+/// Parse a `border`/`border-<side>` shorthand: any order of width, style, and
+/// color tokens. `none`/`hidden` set the explicit `None` style.
+fn parse_border_shorthand(value: &str) -> BorderSideCss {
+    let mut side = BorderSideCss::default();
+    for token in split_css_tokens(value) {
+        if let Some(style) = parse_border_style_keyword(token) {
+            side.style = Some(style);
+        } else if let Some(width) = parse_border_width_token(token) {
+            side.width = Some(width);
+        } else if let Some(color) = parse_css_color(token) {
+            side.color = Some(color);
+        }
+    }
+    side
+}
+
+/// Whether a cascaded side would paint (mirrors [`resolved_borders`]'s rule,
+/// including the width-without-style lenience).
+fn border_side_visible(side: BorderSideCss) -> bool {
+    match side.style {
+        Some(BorderStyle::None) => false,
+        Some(_) => side.width != Some(0.0),
+        None => side.width.is_some_and(|width| width > 0.0),
+    }
+}
+
+fn border_sides_mut(cell: &mut CellStyle) -> &mut BorderSides {
+    cell.border_sides.get_or_insert_with(Default::default)
+}
+
+fn border_side_mut<'a>(cell: &'a mut CellStyle, name: &str) -> &'a mut BorderSideCss {
+    let sides = border_sides_mut(cell);
+    match name {
+        "top" => &mut sides.top,
+        "right" => &mut sides.right,
+        "bottom" => &mut sides.bottom,
+        _ => &mut sides.left,
+    }
+}
+
+fn parse_border_style_keyword(value: &str) -> Option<BorderStyle> {
+    let value = value.trim();
+    Some(match value.to_ascii_lowercase().as_str() {
+        "none" | "hidden" => BorderStyle::None,
+        "solid" | "double" | "groove" | "ridge" | "inset" | "outset" => BorderStyle::Solid,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        _ => return None,
+    })
+}
+
+/// A border width token: a length or the `thin`/`medium`/`thick` keywords
+/// (1px / 3px / 5px, in points).
+fn parse_border_width_token(value: &str) -> Option<f32> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "thin" => Some(0.75),
+        "medium" => Some(2.25),
+        "thick" => Some(3.75),
+        other => parse_css_length(other),
+    }
+}
+
+/// Split a declaration value on whitespace outside parentheses, so a color
+/// like `rgb(1, 2, 3)` stays one token.
+fn split_css_tokens(value: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (i, c) in value.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if c.is_whitespace() && depth == 0 => {
+                if let Some(s) = start.take() {
+                    tokens.push(&value[s..i]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        tokens.push(&value[s..]);
+    }
+    tokens
+}
+
+/// Expand a 1-to-4-value box property (like `border-width: 1px 2px`) into the
+/// CSS top/right/bottom/left order.
+fn expand_box_values(value: &str) -> Vec<String> {
+    let tokens: Vec<&str> = split_css_tokens(value);
+    let pick = |i: usize| -> String {
+        match tokens.len() {
+            0 => String::new(),
+            1 => tokens[0].to_string(),
+            2 => tokens[i % 2].to_string(),
+            3 => tokens[[0, 1, 2, 1][i]].to_string(),
+            _ => tokens[i].to_string(),
+        }
+    };
+    (0..4).map(pick).collect()
 }
 
 /// CSS `font-weight` values that render as bold: the `bold`/`bolder` keywords or
@@ -4270,6 +4581,25 @@ impl CellStyle {
         self.line_through |= other.line_through;
         self.decoration_none |= other.decoration_none;
         self.border = other.border.or(self.border);
+        // Border sides merge per sub-property: a higher-priority rule that only
+        // sets `border-color` must not wipe a lower-priority `border-style`.
+        self.border_sides = match (self.border_sides.take(), other.border_sides) {
+            (Some(mut base), Some(over)) => {
+                let side = |over: BorderSideCss, base: BorderSideCss| BorderSideCss {
+                    width: over.width.or(base.width),
+                    style: over.style.or(base.style),
+                    color: over.color.or(base.color),
+                };
+                base.top = side(over.top, base.top);
+                base.right = side(over.right, base.right);
+                base.bottom = side(over.bottom, base.bottom);
+                base.left = side(over.left, base.left);
+                base.radius = over.radius.or(base.radius);
+                Some(base)
+            }
+            (base, over) => over.or(base),
+        };
+        self.border_box = other.border_box.or(self.border_box);
         self.overflow = other.overflow.or(self.overflow);
         self.font_size = other.font_size.or(self.font_size);
         self.font_family = other.font_family.or(self.font_family.take());
@@ -5216,6 +5546,81 @@ mod tests {
         assert_eq!(document.page_style.margin_top, Some(54.0));
         assert_eq!(document.page_style.margin_bottom, Some(54.0));
         assert_eq!(document.table_style.row_height, Some(15.0));
+    }
+
+    #[test]
+    fn parses_per_side_borders_radius_and_box_sizing() {
+        use crate::color::Color;
+        use crate::html::BorderStyle;
+        let document = parse(
+            r#"
+            <style>
+            .card { border: 2px dashed rgb(255, 0, 0); border-radius: 8px; padding: 4px; }
+            .rule { border-bottom: 3px solid #00f; }
+            .mixed { border-style: solid; border-width: 1px 2px 3px 4px;
+                     border-color: red green; }
+            .boxed { box-sizing: border-box; width: 100px; border: 1px solid; }
+            .off { border: 1px solid black; border-top-style: none; }
+            </style>
+            <div class="card">a</div>
+            <div class="rule">b</div>
+            <div class="mixed">c</div>
+            <div class="boxed">d</div>
+            <div class="off">e</div>
+            "#,
+        );
+        let flow = document.flow.as_ref().expect("flow");
+        let blocks = flow_blocks(flow);
+        let by_text = |needle: &str| {
+            *blocks
+                .iter()
+                .find(|block| block_text(block).contains(needle))
+                .expect(needle)
+        };
+
+        // Shorthand: every side identical; the uniform() fast path sees it.
+        let card = by_text("a");
+        let edges = card.border.expect("card border");
+        let side = edges.uniform().expect("uniform");
+        assert_eq!(side.width, 1.5); // 2px
+        assert_eq!(side.style, BorderStyle::Dashed);
+        assert_eq!(side.color, Color { r: 1.0, g: 0.0, b: 0.0 });
+        assert_eq!(card.border_radius, 6.0); // 8px
+        // Border width consumes layout space: 4px padding + 2px border.
+        assert_eq!(card.padding.left, 3.0 + 1.5);
+
+        // A single-side declaration leaves the other sides absent.
+        let rule = by_text("b");
+        let edges = rule.border.expect("rule border");
+        assert!(edges.top.is_none() && edges.left.is_none() && edges.right.is_none());
+        let bottom = edges.bottom.expect("bottom");
+        assert_eq!(bottom.width, 2.25); // 3px
+        assert_eq!(bottom.color, Color { r: 0.0, g: 0.0, b: 1.0 });
+
+        // 1-to-4 value longhands expand in top/right/bottom/left order; a
+        // 2-value color list alternates.
+        let mixed = by_text("c");
+        let edges = mixed.border.expect("mixed border");
+        let widths = [
+            edges.top.unwrap().width,
+            edges.right.unwrap().width,
+            edges.bottom.unwrap().width,
+            edges.left.unwrap().width,
+        ];
+        assert_eq!(widths, [0.75, 1.5, 2.25, 3.0]);
+        assert_eq!(edges.top.unwrap().color, Color { r: 1.0, g: 0.0, b: 0.0 });
+        assert_eq!(edges.right.unwrap().color, edges.left.unwrap().color);
+
+        // box-sizing flows through; `border: 1px solid` with no color is black.
+        let boxed = by_text("d");
+        assert!(boxed.border_box);
+        assert_eq!(boxed.border.unwrap().uniform().unwrap().color, Color::BLACK);
+
+        // A later longhand can knock one side out of an earlier shorthand.
+        let off = by_text("e");
+        let edges = off.border.expect("off border");
+        assert!(edges.top.is_none());
+        assert!(edges.bottom.is_some());
     }
 
     #[test]

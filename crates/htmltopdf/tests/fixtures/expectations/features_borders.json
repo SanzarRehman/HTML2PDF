@@ -1,0 +1,33 @@
+{
+  "fixture": "borders",
+  "layer": "features",
+  "description": "Real border model: per-side width/style/color, dashed/dotted patterns, border-radius (bezier path), box-sizing: border-box, and per-side table cell rules (th/td border-bottom).",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "re",
+      "S",
+      "RG",
+      "] 0 d",
+      " c\n"
+    ],
+    "must_contain_text": [
+      "Rounded",
+      "Dashed",
+      "Dotted",
+      "callout",
+      "Widgets"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The first card has rounded corners, a 2px blue border, and a light blue fill.",
+    "The second box has a dashed red border; the third only a dotted green top edge.",
+    "The fourth box shows a thick orange stripe on its left edge only.",
+    "The border-box card is narrower than a content-box one would be (250px outer).",
+    "Table header has a heavier dark bottom rule; body rows thin light gray rules; no full cell rectangles."
+  ]
+}

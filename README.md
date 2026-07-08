@@ -95,7 +95,16 @@ Works today:
 - CSS colors, font sizes, bold text (rendered as faux-bold fill+stroke), text
   alignment (including `text-align: justify`), text decoration
   (underline/line-through), margins, padding (with vertical margin collapse),
-  `line-height`, block backgrounds, and basic borders.
+  `line-height`, and block backgrounds.
+- **Real borders**: per-side `border-top/right/bottom/left` with independent
+  width, style, and color — `solid`, `dashed`, and `dotted` (double/groove/
+  ridge render solid), `thin/medium/thick`, `currentColor` defaults. Borders
+  consume layout space and backgrounds extend under them, like a browser.
+  **`border-radius`** rounds card backgrounds and uniform borders (Bézier
+  paths); **`box-sizing: border-box`** is honored on blocks, floats, and
+  positioned boxes. Table cells take per-side rules too — the classic
+  `th { border-bottom: 2px solid }` paints exactly that edge, while uniform
+  spreadsheet gridlines keep the fast path.
 - Modern layout, first pass each: **flexbox** (`display: flex` — grow/basis,
   `flex-wrap`, `justify-content`, `align-items`, gaps, row and column), **grid**
   (`display: grid` — fixed/`fr`/`auto`/`repeat()`/`minmax()` tracks, `span N`

@@ -328,8 +328,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 
 **Not yet (the honest list)**
 
-- Per-side **border** width/style/color and rounded corners (borders are a
-  uniform box today), and `box-sizing`.
+- Border polish: `double`/`groove`/`ridge` render as solid, the stroke is
+  centered on the border-box edge (not fully inside it), per-corner /
+  elliptical `border-radius`, and rounded-corner *content clipping*.
 - `object-fit` / `vertical-align` on images (inline images sit on the
   baseline only); remote images need the opt-in `remote-images` feature (not
   in default builds); a true font-metric baseline model (0.8 em ascent
@@ -369,8 +370,9 @@ Foundation first, so features attach to something solid. Done ✓ / next ▶:
 ✓ Font subsetting (retain-GIDs glyf/loca rebuild; embed only used glyphs)
 ✓ JavaScript pre-layout stage — first pass (Boa behind the `js` feature)
 ✓ Block-level `<img>` images (JPEG DCTDecode + in-house PNG decode; XObjects)
+✓ Real border model (per-side width/style/color, dashed/dotted, radius, box-sizing)
 ▶ Broader JS DOM API (innerHTML/createElement) + heap/time limits
-· CFF/OpenType-CFF subsetting; per-side borders; inline/floated images
+· CFF/OpenType-CFF subsetting; inline/floated images
 ```
 
 Every step keeps the test suite green and the test spreadsheet rendering
