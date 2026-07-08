@@ -101,14 +101,24 @@ pub fn load_image(
     base_dir: Option<&Path>,
     remote: &RemoteImagePolicy,
 ) -> Option<DecodedImage> {
-    let bytes = if let Some(rest) = src.strip_prefix("data:") {
-        decode_data_uri(rest)?
+    decode(&load_bytes(src, base_dir, remote)?)
+}
+
+/// Resolve a `src` to raw bytes: a `data:` URI, a (policy-gated, SSRF-guarded)
+/// remote `http(s)` URL, or a file path against `base_dir`. Shared by `<img>`
+/// loading and `@font-face` `url()` sources.
+pub(crate) fn load_bytes(
+    src: &str,
+    base_dir: Option<&Path>,
+    remote: &RemoteImagePolicy,
+) -> Option<Vec<u8>> {
+    if let Some(rest) = src.strip_prefix("data:") {
+        decode_data_uri(rest)
     } else if is_remote_url(src) {
-        fetch_remote(src, remote)?
+        fetch_remote(src, remote)
     } else {
-        read_file(src, base_dir)?
-    };
-    decode(&bytes)
+        read_file(src, base_dir)
+    }
 }
 
 /// True for an `http://` or `https://` URL (the only remote schemes fetched).

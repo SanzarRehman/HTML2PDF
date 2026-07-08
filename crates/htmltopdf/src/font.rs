@@ -768,6 +768,258 @@ fn load_family_variant(name: &str, bold: bool, italic: bool) -> Option<(Arc<Font
     Some((Arc::new(font), real_bold))
 }
 
+// --- @font-face web fonts ---------------------------------------------------
+
+/// A parsed `@font-face` rule: the family it declares, its `src:` candidates in
+/// author order, and the declared weight/style (used to pick among several
+/// rules for the same family at resolve time).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFaceRule {
+    pub family: String,
+    pub sources: Vec<FontFaceSource>,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// One `src:` candidate of a `@font-face` rule.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FontFaceSource {
+    /// `local(<family>)`: resolve from the system font database by family name.
+    Local(String),
+    /// `url(<target>)` with its optional `format(<hint>)` (lowercased).
+    Url { url: String, format: Option<String> },
+}
+
+/// A `@font-face` rule whose source bytes loaded and parsed: the face to use
+/// when a [`FontSpec`] names its family. Document-scoped — never entered into
+/// the process-wide system-family cache, since two documents can bind the same
+/// family name to different font data.
+#[derive(Debug, Clone)]
+pub struct WebFont {
+    family_lower: String,
+    bold: bool,
+    italic: bool,
+    font: Arc<Font>,
+}
+
+/// Load each `@font-face` rule's first usable source. `url()` sources resolve
+/// like image `src`s — `data:` URIs, file paths against `base_dir`, and
+/// (policy-gated, SSRF-guarded) remote `http(s)` — and accept raw
+/// TrueType/OpenType or WOFF1 bytes; WOFF2 needs a Brotli decoder and is
+/// skipped, falling through to the next source in the list. `local()` resolves
+/// a system family by name. A rule whose sources all fail is dropped, so its
+/// family falls back to normal system lookup.
+pub fn load_font_faces(
+    rules: &[FontFaceRule],
+    base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
+) -> Vec<WebFont> {
+    let mut loaded = Vec::new();
+    for rule in rules {
+        if rule.family.is_empty() {
+            continue;
+        }
+        let font = rule
+            .sources
+            .iter()
+            .find_map(|source| load_face_source(source, base_dir, remote));
+        if let Some(font) = font {
+            loaded.push(WebFont {
+                family_lower: rule.family.to_ascii_lowercase(),
+                bold: rule.bold,
+                italic: rule.italic,
+                font,
+            });
+        }
+    }
+    loaded
+}
+
+fn load_face_source(
+    source: &FontFaceSource,
+    base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
+) -> Option<Arc<Font>> {
+    match source {
+        FontFaceSource::Local(name) => load_local_source(name),
+        FontFaceSource::Url { url, format } => {
+            // A format() hint for a container we can't read: skip without
+            // fetching (WOFF2, EOT, SVG-in-font).
+            if let Some(hint) = format {
+                if !matches!(hint.as_str(), "truetype" | "opentype" | "woff") {
+                    return None;
+                }
+            }
+            let bytes = crate::image::load_bytes(url, base_dir, remote)?;
+            let bytes = if bytes.starts_with(b"wOFF") {
+                woff1_to_sfnt(&bytes)?
+            } else {
+                bytes
+            };
+            font_from_bytes(bytes, 0)
+        }
+    }
+}
+
+/// Resolve a `local(<name>)` source. CSS matches local() against family, full,
+/// and PostScript names; `fontdb` indexes families and PostScript names, so a
+/// full name like "Arial Bold" is additionally handled by stripping the
+/// Bold/Italic suffix and querying the base family with that weight/style.
+fn load_local_source(name: &str) -> Option<Arc<Font>> {
+    let db = system_font_db();
+    let id = db
+        .query(&fontdb::Query {
+            families: &[fontdb::Family::Name(name)],
+            ..Default::default()
+        })
+        .or_else(|| {
+            db.faces()
+                .find(|face| face.post_script_name.eq_ignore_ascii_case(name))
+                .map(|face| face.id)
+        })
+        .or_else(|| {
+            let lower = name.to_ascii_lowercase();
+            let (base, bold, italic) = if let Some(base) = lower.strip_suffix(" bold italic") {
+                (base, true, true)
+            } else if let Some(base) = lower.strip_suffix(" bold") {
+                (base, true, false)
+            } else if let Some(base) = lower.strip_suffix(" italic") {
+                (base, false, true)
+            } else {
+                return None;
+            };
+            let base = &name[..base.len()];
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(base)],
+                weight: if bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL },
+                style: if italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
+                ..Default::default()
+            })
+        })?;
+    let (data, index) = db.with_face_data(id, |data, index| (data.to_vec(), index))?;
+    font_from_bytes(data, index)
+}
+
+fn font_from_bytes(data: Vec<u8>, index: u32) -> Option<Arc<Font>> {
+    let parsed = TrueTypeFont::parse(data, index).ok()?;
+    Some(Arc::new(Font {
+        kind: FontKind::TrueType(Box::new(parsed)),
+        fallbacks: Mutex::new(None),
+    }))
+}
+
+/// Resolve a spec, consulting the document's loaded `@font-face` fonts ahead of
+/// the system lookup — an author-declared family shadows any same-named system
+/// family. Among several rules for one family, the best weight/style match wins
+/// (weight over style, first declared on a tie); bold is still synthesized when
+/// only a non-bold face was declared for a bold request.
+pub fn resolve_spec_with(
+    primary: &Arc<Font>,
+    spec: &FontSpec,
+    web_fonts: &[WebFont],
+) -> ResolvedFont {
+    if let Some(family) = &spec.family {
+        let mut best: Option<(&WebFont, u8)> = None;
+        for candidate in web_fonts {
+            if !candidate.family_lower.eq_ignore_ascii_case(family) {
+                continue;
+            }
+            let score = u8::from(candidate.bold == spec.bold) * 2
+                + u8::from(candidate.italic == spec.italic);
+            if best.is_none_or(|(_, s)| score > s) {
+                best = Some((candidate, score));
+            }
+        }
+        if let Some((chosen, _)) = best {
+            return ResolvedFont {
+                font: chosen.font.clone(),
+                faux_bold: spec.bold && !chosen.bold,
+            };
+        }
+    }
+    resolve_spec(primary, spec)
+}
+
+/// Convert a WOFF (version 1) container to raw sfnt (TrueType/OpenType) bytes:
+/// rebuild the 16-byte-entry table directory and inflate each zlib-compressed
+/// table with `flate2` (already a dependency). WOFF2 uses Brotli plus a
+/// transformed `glyf` model and is out of scope here.
+fn woff1_to_sfnt(data: &[u8]) -> Option<Vec<u8>> {
+    fn be16(bytes: &[u8], at: usize) -> Option<u16> {
+        Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+    }
+    fn be32(bytes: &[u8], at: usize) -> Option<u32> {
+        Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    }
+
+    if data.get(..4)? != b"wOFF" {
+        return None;
+    }
+    let flavor = be32(data, 4)?;
+    let num_tables = be16(data, 12)? as usize;
+    // Real fonts have a few dozen tables; the cap also keeps the u16
+    // searchRange arithmetic below from overflowing.
+    if num_tables == 0 || num_tables > 1024 {
+        return None;
+    }
+
+    struct Table {
+        tag: [u8; 4],
+        checksum: u32,
+        data: Vec<u8>,
+    }
+    let mut tables = Vec::with_capacity(num_tables);
+    for i in 0..num_tables {
+        let at = 44 + i * 20;
+        let tag: [u8; 4] = data.get(at..at + 4)?.try_into().ok()?;
+        let offset = be32(data, at + 4)? as usize;
+        let comp_len = be32(data, at + 8)? as usize;
+        let orig_len = be32(data, at + 12)? as usize;
+        let checksum = be32(data, at + 16)?;
+        let raw = data.get(offset..offset.checked_add(comp_len)?)?;
+        let table = if comp_len < orig_len {
+            let mut out = Vec::with_capacity(orig_len);
+            let mut inflater = flate2::read::ZlibDecoder::new(raw);
+            std::io::Read::read_to_end(&mut inflater, &mut out).ok()?;
+            if out.len() != orig_len {
+                return None;
+            }
+            out
+        } else if comp_len == orig_len {
+            raw.to_vec()
+        } else {
+            return None;
+        };
+        tables.push(Table { tag, checksum, data: table });
+    }
+
+    let entry_selector = (num_tables as u32).ilog2() as u16;
+    let search_range = (1u16 << entry_selector) * 16;
+    let mut out = Vec::new();
+    out.extend_from_slice(&flavor.to_be_bytes());
+    out.extend_from_slice(&(num_tables as u16).to_be_bytes());
+    out.extend_from_slice(&search_range.to_be_bytes());
+    out.extend_from_slice(&entry_selector.to_be_bytes());
+    out.extend_from_slice(&(num_tables as u16 * 16 - search_range).to_be_bytes());
+    // WOFF directory entries keep the sfnt's tag order, so offsets are the only
+    // thing to recompute; table data is 4-byte aligned as in the original.
+    let mut offset = 12 + num_tables * 16;
+    for table in &tables {
+        out.extend_from_slice(&table.tag);
+        out.extend_from_slice(&table.checksum.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(table.data.len() as u32).to_be_bytes());
+        offset += (table.data.len() + 3) & !3;
+    }
+    for table in &tables {
+        out.extend_from_slice(&table.data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+    Some(out)
+}
+
 /// PostScript name (name id 6), falling back to family (id 1), sanitized to a
 /// valid PDF name (no spaces or delimiters).
 /// Emoji and pictograph ranges: excluded from fallback (color-bitmap faces
@@ -903,6 +1155,244 @@ pub(crate) fn char_to_winansi(ch: char) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn woff1_converts_back_to_sfnt() {
+        // A synthetic two-table sfnt wrapped into WOFF1 (first table
+        // zlib-compressed, second stored raw) converts back to the expected
+        // sfnt byte layout: rebuilt header/directory, inflated + aligned data.
+        let table_a = vec![b'A'; 100];
+        let table_b = vec![7u8; 20];
+        let mut compressed = Vec::new();
+        {
+            use std::io::Write;
+            let mut encoder = flate2::write::ZlibEncoder::new(
+                &mut compressed,
+                flate2::Compression::default(),
+            );
+            encoder.write_all(&table_a).unwrap();
+            encoder.finish().unwrap();
+        }
+        assert!(compressed.len() < table_a.len());
+
+        let mut woff = Vec::new();
+        woff.extend_from_slice(b"wOFF");
+        woff.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // flavor
+        woff.extend_from_slice(&0u32.to_be_bytes()); // total length (unread)
+        woff.extend_from_slice(&2u16.to_be_bytes()); // numTables
+        woff.extend_from_slice(&[0u8; 30]); // reserved … privLength
+        assert_eq!(woff.len(), 44);
+        let data_start = 44 + 2 * 20;
+        woff.extend_from_slice(b"glyf");
+        woff.extend_from_slice(&(data_start as u32).to_be_bytes());
+        woff.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        woff.extend_from_slice(&(table_a.len() as u32).to_be_bytes());
+        woff.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        woff.extend_from_slice(b"loca");
+        woff.extend_from_slice(&((data_start + compressed.len()) as u32).to_be_bytes());
+        woff.extend_from_slice(&(table_b.len() as u32).to_be_bytes());
+        woff.extend_from_slice(&(table_b.len() as u32).to_be_bytes());
+        woff.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        woff.extend_from_slice(&compressed);
+        woff.extend_from_slice(&table_b);
+
+        let sfnt = woff1_to_sfnt(&woff).expect("woff1 should convert");
+        assert_eq!(&sfnt[0..4], &0x0001_0000u32.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([sfnt[4], sfnt[5]]), 2);
+        // Directory entries: glyf at 12 + 2*16 = 44 (len 100), loca at 144.
+        assert_eq!(&sfnt[12..16], b"glyf");
+        assert_eq!(&sfnt[16..20], &0xDEAD_BEEFu32.to_be_bytes());
+        assert_eq!(&sfnt[20..24], &44u32.to_be_bytes());
+        assert_eq!(&sfnt[24..28], &100u32.to_be_bytes());
+        assert_eq!(&sfnt[28..32], b"loca");
+        assert_eq!(&sfnt[36..40], &144u32.to_be_bytes());
+        assert_eq!(&sfnt[40..44], &20u32.to_be_bytes());
+        assert_eq!(&sfnt[44..144], &table_a[..]);
+        assert_eq!(&sfnt[144..164], &table_b[..]);
+        assert!(woff1_to_sfnt(b"not a woff").is_none());
+    }
+
+    #[test]
+    fn font_face_shadows_system_lookup() {
+        let remote = crate::image::RemoteImagePolicy::default();
+        let rules = vec![
+            FontFaceRule {
+                family: "BrandFont".into(),
+                sources: vec![
+                    // Unsupported container: skipped without touching the network.
+                    FontFaceSource::Url {
+                        url: "https://example.invalid/a.woff2".into(),
+                        format: Some("woff2".into()),
+                    },
+                    FontFaceSource::Local("Arial".into()),
+                ],
+                bold: false,
+                italic: false,
+            },
+            FontFaceRule {
+                family: "BrandFont".into(),
+                sources: vec![FontFaceSource::Local("Arial Bold".into())],
+                bold: true,
+                italic: false,
+            },
+        ];
+        let web = load_font_faces(&rules, None, &remote);
+        if web.is_empty() {
+            return; // no Arial on this box; the macOS dev/CI machines have it
+        }
+
+        let primary = Arc::new(Font::helvetica());
+        // The declared family resolves to the web font, case-insensitively.
+        let regular = resolve_spec_with(
+            &primary,
+            &FontSpec { family: Some("brandfont".into()), bold: false, italic: false },
+            &web,
+        );
+        assert!(!Arc::ptr_eq(&regular.font, &primary));
+        assert!(!regular.faux_bold);
+        let bold = resolve_spec_with(
+            &primary,
+            &FontSpec { family: Some("BrandFont".into()), bold: true, italic: false },
+            &web,
+        );
+        if web.len() == 2 {
+            // A real bold rule was declared and loaded: no synthesis.
+            assert!(!bold.faux_bold);
+            assert!(!Arc::ptr_eq(&bold.font, &regular.font));
+        } else {
+            // Only the regular face loaded: bold is synthesized on it.
+            assert!(bold.faux_bold);
+        }
+        // An undeclared family still falls through to the system path.
+        let other = resolve_spec_with(
+            &primary,
+            &FontSpec { family: Some("NoSuchFamilyZZZ".into()), bold: false, italic: false },
+            &web,
+        );
+        assert!(Arc::ptr_eq(&other.font, &primary));
+    }
+
+    #[test]
+    fn font_face_remote_url_is_fail_closed() {
+        // Remote fetching is disabled by default; the rule must simply drop
+        // (no panic, no network) and the family falls back to system lookup.
+        let rules = vec![FontFaceRule {
+            family: "RemoteFace".into(),
+            sources: vec![FontFaceSource::Url {
+                url: "http://127.0.0.1:1/x.ttf".into(),
+                format: None,
+            }],
+            bold: false,
+            italic: false,
+        }];
+        let web = load_font_faces(&rules, None, &crate::image::RemoteImagePolicy::default());
+        assert!(web.is_empty());
+    }
+
+    #[test]
+    fn font_face_loads_a_real_woff_container() {
+        // Wrap a real system TrueType font into a WOFF1 container (each table
+        // zlib-compressed) and load it through the @font-face pipeline.
+        let path = "/System/Library/Fonts/Supplemental/Arial.ttf";
+        let Ok(sfnt) = std::fs::read(path) else {
+            return; // non-macOS box
+        };
+        let flavor = u32::from_be_bytes(sfnt[0..4].try_into().unwrap());
+        let num = u16::from_be_bytes(sfnt[4..6].try_into().unwrap()) as usize;
+
+        let mut dirs = Vec::new();
+        let mut blobs: Vec<u8> = Vec::new();
+        let data_start = 44 + 20 * num;
+        for i in 0..num {
+            let at = 12 + 16 * i;
+            let tag = &sfnt[at..at + 4];
+            let checksum = &sfnt[at + 4..at + 8];
+            let off = u32::from_be_bytes(sfnt[at + 8..at + 12].try_into().unwrap()) as usize;
+            let len = u32::from_be_bytes(sfnt[at + 12..at + 16].try_into().unwrap()) as usize;
+            let table = &sfnt[off..off + len];
+            let mut compressed = Vec::new();
+            {
+                use std::io::Write;
+                let mut encoder = flate2::write::ZlibEncoder::new(
+                    &mut compressed,
+                    flate2::Compression::default(),
+                );
+                encoder.write_all(table).unwrap();
+                encoder.finish().unwrap();
+            }
+            let blob = if compressed.len() < len { &compressed[..] } else { table };
+            dirs.extend_from_slice(tag);
+            dirs.extend_from_slice(&((data_start + blobs.len()) as u32).to_be_bytes());
+            dirs.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+            dirs.extend_from_slice(&(len as u32).to_be_bytes());
+            dirs.extend_from_slice(checksum);
+            blobs.extend_from_slice(blob);
+            while blobs.len() % 4 != 0 {
+                blobs.push(0);
+            }
+        }
+        let mut woff = Vec::new();
+        woff.extend_from_slice(b"wOFF");
+        woff.extend_from_slice(&flavor.to_be_bytes());
+        woff.extend_from_slice(&((data_start + blobs.len()) as u32).to_be_bytes());
+        woff.extend_from_slice(&(num as u16).to_be_bytes());
+        woff.extend_from_slice(&[0u8; 30]);
+        woff.extend_from_slice(&dirs);
+        woff.extend_from_slice(&blobs);
+
+        let sfnt_back = woff1_to_sfnt(&woff).expect("woff1 should convert");
+        assert!(
+            TrueTypeFont::parse(sfnt_back, 0).is_ok(),
+            "converted sfnt should parse"
+        );
+
+        let tmp = std::env::temp_dir().join("htmltopdf-test-brand.woff");
+        std::fs::write(&tmp, &woff).unwrap();
+        let rules = vec![FontFaceRule {
+            family: "WoffFace".into(),
+            sources: vec![FontFaceSource::Url {
+                url: tmp.to_string_lossy().into_owned(),
+                format: Some("woff".into()),
+            }],
+            bold: false,
+            italic: false,
+        }];
+        let web = load_font_faces(&rules, None, &crate::image::RemoteImagePolicy::default());
+        std::fs::remove_file(&tmp).ok();
+        assert_eq!(web.len(), 1, "woff url source should load");
+    }
+
+    #[test]
+    fn font_face_url_loads_a_font_file() {
+        let path = "/System/Library/Fonts/Supplemental/Arial.ttf";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let rules = vec![FontFaceRule {
+            family: "FileFace".into(),
+            sources: vec![FontFaceSource::Url { url: path.into(), format: None }],
+            bold: false,
+            italic: false,
+        }];
+        let web = load_font_faces(&rules, None, &crate::image::RemoteImagePolicy::default());
+        assert_eq!(web.len(), 1);
+    }
+
+    #[test]
+    fn font_face_renders_with_the_declared_face() {
+        if !std::path::Path::new("/System/Library/Fonts/Supplemental/Arial.ttf").exists() {
+            return;
+        }
+        let html = r#"<style>
+            @font-face { font-family: BrandFont; src: url(missing.woff2) format("woff2"), local("Arial"); }
+            p { font-family: BrandFont; }
+        </style><p>branded text</p>"#;
+        let pdf = crate::Engine::new()
+            .render_html(html, crate::RenderOptions::default())
+            .unwrap();
+        let raw = String::from_utf8_lossy(&pdf);
+        assert!(raw.contains("ArialMT"), "web font face not embedded");
+    }
 
     #[test]
     fn known_helvetica_widths() {

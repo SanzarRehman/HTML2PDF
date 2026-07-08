@@ -27,6 +27,10 @@ pub struct Document {
     /// Link targets (`<a href>` values) interned while building the box tree;
     /// `InlineRun::link` is a 1-based index into this list (0 = no link).
     pub links: Vec<String>,
+    /// `@font-face` rules from the stylesheet, in source order. Loaded once per
+    /// render (`font::load_font_faces`) and consulted ahead of system lookup
+    /// when resolving `font_specs`.
+    pub font_faces: Vec<crate::font::FontFaceRule>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -474,6 +478,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
         images: Vec::new(),
         font_specs: fonts.into_specs(),
         links: links.into_inner().into_targets(),
+        font_faces: stylesheet.font_faces,
     }
 }
 
@@ -1477,7 +1482,8 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
                     landscape: decls.landscape,
                 }])
             }
-            AtRuleKind::Other => Ok(Vec::new()),
+            // `@font-face` carries no page/table geometry.
+            AtRuleKind::FontFace | AtRuleKind::Other => Ok(Vec::new()),
         }
     }
 
@@ -2161,6 +2167,9 @@ fn parse_box_edges(value: &str) -> [Option<f32>; 4] {
 #[derive(Debug, Default)]
 struct Stylesheet {
     rules: Vec<StyleRule>,
+    /// `@font-face` rules in source order, carried onto the `Document` and
+    /// loaded once per render.
+    font_faces: Vec<crate::font::FontFaceRule>,
     tag_rules: HashMap<String, Vec<usize>>,
     class_rules: HashMap<String, Vec<usize>>,
     id_rules: HashMap<String, Vec<usize>>,
@@ -2868,7 +2877,7 @@ fn parse_stylesheet(css: &str) -> Stylesheet {
 
     let mut input = ParserInput::new(css);
     let mut parser = Parser::new(&mut input);
-    let mut rule_parser = RuleParser;
+    let mut rule_parser = RuleParser::default();
     let mut rules = StyleSheetParser::new(&mut parser, &mut rule_parser);
 
     while let Some(result) = rules.next() {
@@ -2884,6 +2893,7 @@ fn parse_stylesheet(css: &str) -> Stylesheet {
         }
     }
 
+    stylesheet.font_faces = std::mem::take(&mut rule_parser.font_faces);
     stylesheet.build_indexes();
     stylesheet
 }
@@ -2909,7 +2919,12 @@ fn parse_style_declarations(declarations: &str) -> StyleDeclarations {
 /// list. One comma-separated rule expands into several `(selector, decls)` pairs.
 type ParsedRule = (SimpleSelector, StyleDeclarations);
 
-struct RuleParser;
+#[derive(Default)]
+struct RuleParser {
+    /// `@font-face` rules collected while parsing (including inside an
+    /// applicable `@media` block), in source order.
+    font_faces: Vec<crate::font::FontFaceRule>,
+}
 
 enum AtRuleKind {
     /// `@media`: parse the nested block as top-level rules if the query applies
@@ -2917,6 +2932,8 @@ enum AtRuleKind {
     Media(bool),
     /// `@page`: parsed by the geometry parser for margins and orientation.
     Page,
+    /// `@font-face`: descriptors parsed into a `FontFaceRule`.
+    FontFace,
     /// Any other at-rule: ignored.
     Other,
 }
@@ -2976,6 +2993,8 @@ impl<'i> AtRuleParser<'i> for RuleParser {
         if name.eq_ignore_ascii_case("media") {
             let query = input.slice_from(query_start);
             Ok(AtRuleKind::Media(media_applies_to_print(query)))
+        } else if name.eq_ignore_ascii_case("font-face") {
+            Ok(AtRuleKind::FontFace)
         } else {
             Ok(AtRuleKind::Other)
         }
@@ -2990,7 +3009,7 @@ impl<'i> AtRuleParser<'i> for RuleParser {
         match prelude {
             // Only descend into `@media` blocks whose query applies to print.
             AtRuleKind::Media(true) => {
-                let mut inner = RuleParser;
+                let mut inner = RuleParser::default();
                 let mut rules = StyleSheetParser::new(input, &mut inner);
                 let mut collected = Vec::new();
                 while let Some(result) = rules.next() {
@@ -2998,7 +3017,14 @@ impl<'i> AtRuleParser<'i> for RuleParser {
                         collected.append(&mut parsed);
                     }
                 }
+                self.font_faces.append(&mut inner.font_faces);
                 Ok(collected)
+            }
+            AtRuleKind::FontFace => {
+                if let Some(rule) = parse_font_face_block(input) {
+                    self.font_faces.push(rule);
+                }
+                Ok(Vec::new())
             }
             // Screen-only `@media`, `@page` (no cascade rules; geometry is handled
             // by `parse_page_geometry`), and other at-rules contribute nothing.
@@ -3085,6 +3111,172 @@ impl<'i> RuleBodyItemParser<'i, (), ()> for DeclParser<'_> {
 
     fn parse_qualified(&self) -> bool {
         false
+    }
+}
+
+/// Captures a block's declarations as raw `(name, value)` strings. Used for
+/// `@font-face`, whose descriptor values (`src:` URLs, family names) must not
+/// go through the cascade's value normalization.
+struct RawDeclParser {
+    entries: Vec<(String, String)>,
+}
+
+impl<'i> DeclarationParser<'i> for RawDeclParser {
+    type Declaration = ();
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i, 't>,
+        _start: &ParserState,
+    ) -> Result<(), ParseError<'i, ()>> {
+        let value_start = input.position();
+        consume_remaining(input);
+        let raw_value = input.slice_from(value_start);
+        self.entries
+            .push((name.to_ascii_lowercase(), raw_value.trim().to_string()));
+        Ok(())
+    }
+}
+
+impl<'i> AtRuleParser<'i> for RawDeclParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+}
+
+impl<'i> QualifiedRuleParser<'i> for RawDeclParser {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = ();
+}
+
+impl<'i> RuleBodyItemParser<'i, (), ()> for RawDeclParser {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+/// Parse a `@font-face` block into a rule: `font-family` and a non-empty `src:`
+/// are required; `font-weight`/`font-style` descriptors pick this face among
+/// same-family rules (bold = keyword or numeric ≥ 600, italic = italic/oblique).
+fn parse_font_face_block(input: &mut Parser<'_, '_>) -> Option<crate::font::FontFaceRule> {
+    let mut decl_parser = RawDeclParser { entries: Vec::new() };
+    let mut items = RuleBodyParser::new(input, &mut decl_parser);
+    while let Some(result) = items.next() {
+        let _ = result;
+    }
+
+    let mut family = None;
+    let mut sources = Vec::new();
+    let mut bold = false;
+    let mut italic = false;
+    for (name, value) in &decl_parser.entries {
+        match name.as_str() {
+            "font-family" => {
+                let name = strip_css_quotes(value);
+                if !name.is_empty() {
+                    family = Some(name.to_string());
+                }
+            }
+            "src" => sources = parse_font_face_src(value),
+            "font-weight" => {
+                let first = value.split_whitespace().next().unwrap_or("");
+                bold = first.eq_ignore_ascii_case("bold")
+                    || first.eq_ignore_ascii_case("bolder")
+                    || first.parse::<f32>().is_ok_and(|weight| weight >= 600.0);
+            }
+            "font-style" => {
+                let value = value.to_ascii_lowercase();
+                italic = value.contains("italic") || value.contains("oblique");
+            }
+            _ => {}
+        }
+    }
+    let family = family?;
+    if sources.is_empty() {
+        return None;
+    }
+    Some(crate::font::FontFaceRule { family, sources, bold, italic })
+}
+
+/// Parse a `@font-face` `src:` list: comma-separated `local(<family>)` or
+/// `url(<target>)`, the latter with an optional trailing `format(<hint>)`.
+/// Unrecognized items are skipped (the list is a fallback chain by design).
+fn parse_font_face_src(value: &str) -> Vec<crate::font::FontFaceSource> {
+    let mut sources = Vec::new();
+    for item in split_top_level_commas(value) {
+        let item = item.trim();
+        if let Some((arg, _)) = split_css_function(item, "local") {
+            let name = strip_css_quotes(arg);
+            if !name.is_empty() {
+                sources.push(crate::font::FontFaceSource::Local(name.to_string()));
+            }
+        } else if let Some((arg, rest)) = split_css_function(item, "url") {
+            let url = strip_css_quotes(arg).to_string();
+            if url.is_empty() {
+                continue;
+            }
+            let format = split_css_function(rest.trim_start(), "format")
+                .map(|(hint, _)| strip_css_quotes(hint).to_ascii_lowercase());
+            sources.push(crate::font::FontFaceSource::Url { url, format });
+        }
+    }
+    sources
+}
+
+/// If `s` starts with `name(`, return the argument up to the first `)` and the
+/// remainder after it. Sufficient for `url()`/`local()`/`format()` arguments,
+/// which never contain parentheses (base64 `data:` URIs included).
+fn split_css_function<'a>(s: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+    if s.len() < name.len() || !s[..name.len()].eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let after = s[name.len()..].trim_start().strip_prefix('(')?;
+    let close = after.find(')')?;
+    Some((&after[..close], &after[close + 1..]))
+}
+
+/// Split on commas outside parentheses and quotes: a base64 `data:` URI inside
+/// `url(...)` carries a comma of its own.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Trim surrounding whitespace and one layer of matching CSS quotes.
+fn strip_css_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
     }
 }
 
@@ -5024,6 +5216,65 @@ mod tests {
         assert_eq!(document.page_style.margin_top, Some(54.0));
         assert_eq!(document.page_style.margin_bottom, Some(54.0));
         assert_eq!(document.table_style.row_height, Some(15.0));
+    }
+
+    #[test]
+    fn parses_font_face_rules() {
+        use crate::font::FontFaceSource;
+        let document = parse(
+            r#"
+            <style>
+            @font-face {
+                font-family: "Brand Font";
+                src: url(brand.woff2) format("WOFF2"),
+                     url("data:font/ttf;base64,AAEC,tail") format(truetype),
+                     local('Arial');
+                font-weight: 700;
+                font-style: italic;
+            }
+            @media print {
+                @font-face { font-family: PrintFace; src: url(print.ttf); }
+            }
+            @media screen {
+                @font-face { font-family: ScreenFace; src: url(screen.ttf); }
+            }
+            @font-face { font-family: NoSrc; }
+            body { color: black; }
+            </style>
+            <p>text</p>
+            "#,
+        );
+
+        let faces = &document.font_faces;
+        // The screen-only and src-less rules are dropped.
+        assert_eq!(faces.len(), 2, "{faces:?}");
+
+        let brand = &faces[0];
+        assert_eq!(brand.family, "Brand Font");
+        assert!(brand.bold && brand.italic);
+        assert_eq!(
+            brand.sources,
+            vec![
+                FontFaceSource::Url {
+                    url: "brand.woff2".into(),
+                    format: Some("woff2".into()),
+                },
+                // The base64 comma must not split the src list.
+                FontFaceSource::Url {
+                    url: "data:font/ttf;base64,AAEC,tail".into(),
+                    format: Some("truetype".into()),
+                },
+                FontFaceSource::Local("Arial".into()),
+            ]
+        );
+
+        let print_face = &faces[1];
+        assert_eq!(print_face.family, "PrintFace");
+        assert!(!print_face.bold && !print_face.italic);
+        assert_eq!(
+            print_face.sources,
+            vec![FontFaceSource::Url { url: "print.ttf".into(), format: None }]
+        );
     }
 
     #[test]

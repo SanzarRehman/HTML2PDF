@@ -77,9 +77,13 @@ fn run() -> Result<(), String> {
         Some("a4") | None => {}
         Some(other) => return Err(format!("unknown --paper value '{other}' (use a4 or letter)")),
     }
-    // Resolve relative <img src> paths against the input file's directory.
+    // Resolve relative <img src> / @font-face url() paths against the input
+    // file's directory. A bare filename has an empty parent, which means the
+    // current directory — not "no base dir" (that would break relative srcs).
     if let Some(parent) = input_path.parent() {
-        if !parent.as_os_str().is_empty() {
+        if parent.as_os_str().is_empty() {
+            options = options.with_base_dir(".");
+        } else {
             options = options.with_base_dir(parent);
         }
     }

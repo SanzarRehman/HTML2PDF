@@ -1,0 +1,22 @@
+<html><head><style>
+  @page { margin: 0.75in; }
+  @font-face {
+    font-family: BrandFont;
+    src: url(missing.woff2) format("woff2"), local("Arial");
+  }
+  @font-face {
+    font-family: BrandFont;
+    src: local("Arial Bold");
+    font-weight: bold;
+  }
+  body { font-family: BrandFont; font-size: 12pt; }
+  h1 { font-size: 20pt; }
+  .fallback { font-family: NeverDeclared; }
+</style></head><body>
+<h1>Branded heading</h1>
+<p>Body text set in a webfont family whose src chain skips the unsupported
+woff2 candidate and resolves the local() fallback. A <b>bold span</b> picks
+the second @font-face rule's real bold face.</p>
+<p class="fallback">This paragraph names a family with no @font-face rule and
+no system match, so it falls back to the document font.</p>
+</body></html>

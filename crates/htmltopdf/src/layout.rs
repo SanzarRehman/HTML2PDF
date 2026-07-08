@@ -158,12 +158,21 @@ impl RenderOptions {
             .row_height
             .unwrap_or(options.table_row_height);
 
+        // Load any `@font-face` fonts first — an author-declared family shadows
+        // a same-named system family. `url()` sources resolve like image srcs
+        // (data: / file via base_dir / policy-gated remote); a rule whose
+        // sources all fail falls back to system lookup.
+        let web_fonts = crate::font::load_font_faces(
+            &document.font_faces,
+            self.base_dir.as_deref(),
+            &self.remote_images,
+        );
         // Resolve the document's interned font specs to concrete faces (spec 0
         // is the default and always resolves to the primary font unchanged).
         options.fonts = document
             .font_specs
             .iter()
-            .map(|spec| crate::font::resolve_spec(&options.font, spec))
+            .map(|spec| crate::font::resolve_spec_with(&options.font, spec, &web_fonts))
             .collect();
         options.links = document.links.clone();
 
@@ -3433,6 +3442,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Line(vec![
@@ -3508,6 +3518,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Line(vec![image_run])],
@@ -3958,6 +3969,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
            font_specs: Vec::new(),
+           font_faces: Vec::new(),
            links: Vec::new(),
             flow: Some(FlowRoot { children }),
             blocks: Vec::new(),
@@ -3980,6 +3992,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
@@ -4107,6 +4120,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
            font_specs: Vec::new(),
+           font_faces: Vec::new(),
            links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![para("first"), para("second")],
@@ -4153,6 +4167,7 @@ mod tests {
                 table_columns: Vec::new(),
                 images: Vec::new(),
                 font_specs: Vec::new(),
+                font_faces: Vec::new(),
                 links: Vec::new(),
                 flow: Some(FlowRoot {
                     children: vec![BoxChild::Block(BlockBox {
@@ -4219,6 +4234,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
@@ -4307,6 +4323,7 @@ mod tests {
             table_columns: vec![30.0, 70.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4359,6 +4376,7 @@ mod tests {
             table_columns: vec![100.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4399,6 +4417,7 @@ mod tests {
             table_columns: vec![100.0, 100.0, 100.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4460,6 +4479,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4508,6 +4528,7 @@ mod tests {
             table_columns: vec![20.0, 200.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             flow: None,
             blocks: vec![Block {
@@ -4550,6 +4571,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4610,6 +4632,7 @@ mod tests {
             table_columns: vec![60.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4679,6 +4702,7 @@ mod tests {
             table_columns: Vec::new(),
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4740,6 +4764,7 @@ mod tests {
             table_columns: vec![400.0, 400.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4784,6 +4809,7 @@ mod tests {
             table_columns: vec![100.0, 300.0],
             images: Vec::new(),
             font_specs: Vec::new(),
+            font_faces: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -4899,6 +4925,7 @@ mod tests {
             table_columns: vec![20.0, 80.0],
             images: Vec::new(),
            font_specs: Vec::new(),
+           font_faces: Vec::new(),
            links: Vec::new(),
             blocks,
         };

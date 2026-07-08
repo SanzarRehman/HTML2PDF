@@ -44,7 +44,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Specificity + source-order cascade, `!important` | ✅ | |
 | `@media print` / `screen` | ✅ | Screen-only rules excluded. |
 | `@page` margins + orientation | ✅ | `size: landscape`, `margin`. |
-| `@font-face`, `@supports`, `@keyframes`, `@import` | ❌ | |
+| `@font-face` | 🟡 | Author families shadow system lookup. `src:` fallback chain honored: `url()` loads TrueType/OpenType/**WOFF1** from `data:` URIs and local files (remote `http(s)` behind the same opt-in `RemoteImagePolicy` as images); `local()` matches family, PostScript, and "Family Bold/Italic" full names; unsupported `format()` hints (WOFF2/EOT/SVG) skipped without fetching. Per-family `font-weight`/`font-style` descriptors select real bold/italic variants; missing variants synthesize bold. No WOFF2 (needs Brotli), `unicode-range`, `font-display`, or variable-font selection; fonts load per render (no cache). |
+| `@supports`, `@keyframes`, `@import` | ❌ | |
 
 ## CSS properties
 
@@ -107,6 +108,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Bidi reordering + RTL base (UAX #9) | 🟡 | Line pieces reorder visually against the paragraph's base level; shaping itemizes each string into directional runs (joining computed on logical text, glyphs emitted visually). **`dir="rtl"` / `direction: rtl`** set the base direction (inherited; block-level), flipping the base level to RTL and right-aligning by default; an explicit `text-align` overrides. Works for embedded fonts (base-14 has no RTL glyphs; the fallback chain supplies them). RTL base works inside table cells too (`dir` on the cell / CSS `direction`; right-aligned by default). No `dir="auto"`, bracket mirroring, or inline `<bdi>`/`<bdo>` embeddings; an ancestor's `dir` *attribute* doesn't reach cells (CSS `direction` inherits fine). |
 | **Font fallback chain** (CJK, Hangul, Cyrillic, …) | 🟡 | Characters the primary font lacks fall back to system faces (Arial Unicode MS / Noto Sans / DejaVu Sans, first that covers), each embedded as its own subset Type0 resource — works from the base-14 default *and* from an embedded `--font`. Measurement is chain-aware. Emoji excluded (color faces can't embed as outlines). Chain is fixed, not configurable; char-level line breaking still measures with the primary. |
 | Bold/italic faces, multiple families per document | ✅ | Resolved per element via `fontdb` (weight/style queries), each face embedded as its own subset resource; process-wide face cache. |
+| `@font-face` web fonts | 🟡 | Declared families resolve ahead of system lookup and embed/subset/shape like any other face (see the at-rules table for `src:` details). |
 
 ## JavaScript (opt-in: `--js` / `js` feature)
 

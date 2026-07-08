@@ -1,0 +1,22 @@
+{
+  "fixture": "font-face",
+  "layer": "features",
+  "description": "@font-face: family declared by the author, src chain with an unsupported woff2 candidate skipped and a local() fallback loaded; a second rule supplies the real bold face. Assertions use embedded face names: glyph ids in the content streams are not searchable as text.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "TJ",
+      "ArialMT",
+      "Arial-BoldMT"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Heading and body render in Arial (via the @font-face local() fallback), not Helvetica.",
+    "The bold span uses the real Arial Bold face from the second @font-face rule, not synthesized strokes.",
+    "The last paragraph (undeclared family) falls back to the document font."
+  ]
+}

@@ -119,6 +119,13 @@ Works today:
   and CSS generics resolve to real system faces (including true bold and
   italic variants — no more synthesized bold when a family is known), several
   subset faces per document; `pre`/`code` default to monospace.
+- **`@font-face` web fonts**: an author-declared family shadows system lookup.
+  `src:` chains work like a browser's — unsupported candidates (WOFF2) are
+  skipped, `url()` loads TrueType/OpenType/**WOFF** from `data:` URIs and
+  local files (remote `http(s)` behind the same opt-in policy as remote
+  images), `local()` resolves system faces by family, full, or PostScript
+  name. Multiple rules per family select real bold/italic variants by
+  `font-weight`/`font-style`.
 - **Clickable links and a document outline**: `<a href>` becomes a real PDF
   link annotation — external URIs, `mailto:`, and in-document `#fragment`
   jumps to `id` anchors — styled with browser UA defaults (blue, underlined;
@@ -166,9 +173,9 @@ Not complete yet:
   below the flow, but `opacity`/`transform` don't create contexts);
   `flex-shrink`/`order`/`align-self`; grid named lines/areas and
   `grid-template-rows`.
-- `@font-face` web fonts; synthetic italic when no italic face exists; emoji
-  (color fonts can't embed as outlines); `dir="auto"`, bracket mirroring, and
-  RTL text inside table cells.
+- WOFF2 `@font-face` sources (needs a Brotli decoder; TTF/OTF/WOFF1 work);
+  synthetic italic when no italic face exists; emoji (color fonts can't embed
+  as outlines); `dir="auto"` and bracket mirroring.
 - Complete CSS selector/property coverage (`%` heights/margins, `calc()`,
   custom properties are the big absences).
 - Tagged PDF; images and nested block layout inside table cells.

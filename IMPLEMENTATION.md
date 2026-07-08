@@ -883,9 +883,29 @@ design — the cascade already drops those selectors so they never over-apply.
 The queue below closes the CSS gaps that actually change what a printed page
 looks like. JS DOM breadth moves to the tail (decision: finish JS later).
 
-- [ ] **`@font-face`**: parse the at-rule, load `src:` (local files; remote
-      via the SSRF-guarded fetcher when enabled), register into the
-      `resolve_spec` pipeline ahead of system lookup.
+- [x] **`@font-face`** (2026-07-08): the stylesheet `RuleParser` collects
+      `@font-face` blocks (raw-value descriptor capture, so `src:` URLs skip
+      the cascade's value normalization) into `FontFaceRule { family, sources,
+      bold, italic }` on the `Document`; `with_document_hints` loads them once
+      per render (`font::load_font_faces`) and `resolve_spec_with` consults
+      them **ahead of system lookup** (best weight/style match per family;
+      missing bold synthesizes). `src:` is a real fallback chain: `url()`
+      resolves through the shared `image::load_bytes` (`data:` URI, file via
+      `base_dir`, or policy-gated SSRF-guarded remote — same
+      `RemoteImagePolicy` as images) and accepts TrueType/OpenType or
+      **WOFF1** (`woff1_to_sfnt`: directory rebuild + per-table zlib inflate
+      with the existing `flate2`); `format()` hints skip unsupported
+      containers (WOFF2/EOT) without fetching; `local()` matches family,
+      PostScript, and "Family Bold/Italic" full names. `@font-face` inside
+      `@media print` works; screen-only blocks are dropped. Also fixed: the
+      CLI now maps a bare-filename input's empty parent to `.` so relative
+      `url()`/`<img src>` paths resolve. Verified end-to-end: real
+      WOFF-wrapped Arial, base64 `data:` TTF, and a woff2→missing→`local()`
+      chain all embed as subset Type0 faces; 22k-cell fixture byte-identical,
+      wall/RAM unchanged (0.62 s / ~94 MB). `features/font-face` fixture (27
+      total). **Not yet done:** WOFF2 (needs a Brotli decoder),
+      `unicode-range`, `font-display`, per-render font cache (remote fonts
+      re-fetch every render), variable-font axis selection.
 - [ ] **Real border model**: per-side width/style/color, `box-sizing`,
       `border-radius` (stroked corners).
 - [ ] **`%` lengths everywhere + min/max sizing**: `%` heights, margins,

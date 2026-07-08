@@ -304,6 +304,12 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   composite with a ToUnicode CMap, so any Unicode renders and text stays
   selectable. Glyph **subsetting** (retain-GIDs) embeds only the used glyphs
   (e.g. a CJK doc dropped from 33 MB to 0.65 MB).
+- **`@font-face` web fonts** — author-declared families load ahead of system
+  lookup: `url()` sources accept TrueType/OpenType/WOFF1 from `data:` URIs,
+  local files, or (opt-in, SSRF-guarded) remote URLs; `local()` matches
+  family/full/PostScript names; unsupported `format()` candidates (WOFF2) are
+  skipped down the `src:` chain; per-family `font-weight`/`font-style` rules
+  select real bold/italic variants.
 - **JavaScript (opt-in)** — with the `js` build feature, a bounded pre-layout
   stage (Boa) runs inline `<script>`s against a live DOM: `getElementById`,
   `textContent`, `get/setAttribute`, `innerHTML` (get/set), `createElement`/
