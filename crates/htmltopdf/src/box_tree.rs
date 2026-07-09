@@ -169,6 +169,10 @@ pub struct BlockBox {
     /// Base paragraph direction (UAX #9 base level) for this block's inline
     /// content: `true` = right-to-left (`dir="rtl"` / `direction: rtl`).
     pub rtl: bool,
+    /// CSS `text-indent` (inherited): indent of the block's first formatted
+    /// line, in points / percent of the containing width.
+    pub text_indent: f32,
+    pub text_indent_percent: Option<f32>,
     /// CSS `position` (static when `None`) with its box offsets in points.
     pub position: Option<PositionKind>,
     /// CSS `z-index` (`None` = `auto` = 0): paint order among positioned boxes.
@@ -248,6 +252,11 @@ pub struct InlineRun {
     pub underline: bool,
     /// `text-decoration: line-through` (also `<s>`/`<strike>`/`<del>`).
     pub line_through: bool,
+    /// CSS `letter-spacing`: extra advance per character (points; may be
+    /// negative). Reproduced in the PDF via the `Tc` text state.
+    pub letter_spacing: f32,
+    /// CSS `word-spacing`: extra advance per inter-word space (points).
+    pub word_spacing: f32,
     pub color: Color,
 }
 

@@ -263,6 +263,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - **`calc()`** — `+ - * /`, parentheses, nested calc, unit mixing; a mixed
   `calc(100% - 20px)` resolves against the containing block at layout time and
   composes with `var()`.
+- **Typography**: `text-transform` (incl. plain `th` cells), `letter-spacing`
+  (PDF `Tc`, kerning preserved), `word-spacing`, `text-indent` (pt/`%`, first
+  line only).
 - `display: none` (tables and flow content).
 - Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
 - `font-weight` (bold / numeric ≥ 600) — a **real bold face** when the family

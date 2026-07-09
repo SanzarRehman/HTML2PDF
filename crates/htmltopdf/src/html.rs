@@ -73,6 +73,62 @@ pub struct TableCell {
     pub runs: Vec<crate::box_tree::InlineRun>,
 }
 
+/// CSS `text-transform` (inherited). `None` (the variant) is an explicit
+/// `text-transform: none`, which overrides an inherited transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
+/// Apply a `text-transform` to collected text. `Capitalize` uppercases the
+/// first letter of each whitespace-delimited word; `at_boundary` says whether
+/// the preceding character (possibly in an earlier run) was a word boundary,
+/// and is updated for the caller.
+pub(crate) fn apply_text_transform(
+    text: &str,
+    transform: TextTransform,
+    at_boundary: &mut bool,
+) -> String {
+    match transform {
+        TextTransform::None => {
+            if let Some(last) = text.chars().last() {
+                *at_boundary = last.is_whitespace();
+            }
+            text.to_string()
+        }
+        TextTransform::Uppercase => {
+            if let Some(last) = text.chars().last() {
+                *at_boundary = last.is_whitespace();
+            }
+            text.to_uppercase()
+        }
+        TextTransform::Lowercase => {
+            if let Some(last) = text.chars().last() {
+                *at_boundary = last.is_whitespace();
+            }
+            text.to_lowercase()
+        }
+        TextTransform::Capitalize => {
+            let mut out = String::with_capacity(text.len());
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    *at_boundary = true;
+                    out.push(ch);
+                } else if *at_boundary {
+                    *at_boundary = false;
+                    out.extend(ch.to_uppercase());
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        }
+    }
+}
+
 /// Rarely-set sizing declarations, boxed on [`CellStyle`] so the common cell
 /// (which sets none of these) pays a single pointer rather than a dozen
 /// `Option<f32>` slots — the 22k-cell spreadsheet path stays RAM-flat, the same
@@ -211,6 +267,18 @@ pub struct CellStyle {
     pub offset_right: Option<f32>,
     pub offset_bottom: Option<f32>,
     pub offset_left: Option<f32>,
+    /// CSS `text-transform` (inherited); applied when text is collected into
+    /// runs / cell text, so measurement sees the transformed string.
+    pub text_transform: Option<TextTransform>,
+    /// CSS `letter-spacing` (inherited): extra advance per character, points.
+    /// `Some(0.0)` is an explicit `normal` (overrides an inherited spacing).
+    pub letter_spacing: Option<f32>,
+    /// CSS `word-spacing` (inherited): extra advance per inter-word space.
+    pub word_spacing: Option<f32>,
+    /// CSS `text-indent` (inherited): first-line indent in points / percent of
+    /// the containing width.
+    pub text_indent: Option<f32>,
+    pub text_indent_percent: Option<f32>,
     /// Boxed sizing extras (`min-width`, `min/max-height`, `%` padding/margin/
     /// offsets). `None` for the overwhelmingly common cell that sets none.
     pub sizing: Option<Box<SizingCss>>,
@@ -276,6 +344,11 @@ impl Default for CellStyle {
             offset_right: None,
             offset_bottom: None,
             offset_left: None,
+            text_transform: None,
+            letter_spacing: None,
+            word_spacing: None,
+            text_indent: None,
+            text_indent_percent: None,
             sizing: None,
         }
     }
@@ -794,6 +867,9 @@ fn build_flow(dom: &crate::dom::Dom, env: &FlowEnv) -> Option<crate::box_tree::F
         align: TextAlign::Left,
         base_rtl: false,
         link: 0,
+        transform: TextTransform::None,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
     };
     let mut acc = ChildAcc::default();
     build_node(dom, dom.root(), env, root_ctx, &mut acc);
@@ -900,23 +976,57 @@ struct FlowCtx {
     base_rtl: bool,
     /// Interned link target the content sits inside (0 = none).
     link: u16,
+    /// Inherited `text-transform`, applied as text is collected into runs.
+    transform: TextTransform,
+    /// Inherited `letter-spacing` / `word-spacing`, points (0 = none).
+    letter_spacing: f32,
+    word_spacing: f32,
 }
 
 /// Accumulates one block's children, buffering inline text into a pending line
 /// box that is emitted whenever a block boundary (or `<br>`) is reached.
-#[derive(Default)]
 struct ChildAcc {
     children: Vec<crate::box_tree::BoxChild>,
     pending: Vec<crate::box_tree::InlineRun>,
+    /// Whether the previously collected character was a word boundary — the
+    /// cross-run state `text-transform: capitalize` needs (a word may split
+    /// across style runs).
+    word_boundary: bool,
+}
+
+impl Default for ChildAcc {
+    fn default() -> Self {
+        Self {
+            children: Vec::new(),
+            pending: Vec::new(),
+            word_boundary: true,
+        }
+    }
 }
 
 impl ChildAcc {
     /// Append inline text under the current style, merging into the previous run
-    /// when the style matches to keep the run count low.
+    /// when the style matches to keep the run count low. The context's
+    /// `text-transform` is applied here, so measurement and painting both see
+    /// the transformed string.
     fn push_text(&mut self, text: &str, ctx: &FlowCtx) {
         if text.is_empty() {
             return;
         }
+        // The no-transform path (the overwhelmingly common case) borrows the
+        // text; only an active transform allocates.
+        let text: std::borrow::Cow<str> = if ctx.transform == TextTransform::None {
+            if let Some(last) = text.chars().last() {
+                self.word_boundary = last.is_whitespace();
+            }
+            std::borrow::Cow::Borrowed(text)
+        } else {
+            std::borrow::Cow::Owned(apply_text_transform(
+                text,
+                ctx.transform,
+                &mut self.word_boundary,
+            ))
+        };
         if let Some(last) = self.pending.last_mut() {
             if last.image.is_none()
                 && last.font_size == ctx.font_size
@@ -926,19 +1036,23 @@ impl ChildAcc {
                 && last.line_through == ctx.line_through
                 && last.color == ctx.color
                 && last.link == ctx.link
+                && last.letter_spacing == ctx.letter_spacing
+                && last.word_spacing == ctx.word_spacing
             {
-                last.text.push_str(text);
+                last.text.push_str(&text);
                 return;
             }
         }
         self.pending.push(crate::box_tree::InlineRun {
-            text: text.to_string(),
+            text: text.into_owned(),
             font_size: ctx.font_size,
             bold: ctx.bold,
             font: ctx.font,
             link: ctx.link,
             underline: ctx.underline,
             line_through: ctx.line_through,
+            letter_spacing: ctx.letter_spacing,
+            word_spacing: ctx.word_spacing,
             color: ctx.color,
             image: None,
         });
@@ -947,6 +1061,7 @@ impl ChildAcc {
     /// Append an inline image, flowing with the surrounding text (its run
     /// carries the context's link so a linked image stays clickable).
     fn push_image(&mut self, image: crate::box_tree::ImageBox, ctx: &FlowCtx) {
+        self.word_boundary = true;
         self.pending.push(crate::box_tree::InlineRun {
             text: String::new(),
             font_size: ctx.font_size,
@@ -955,6 +1070,8 @@ impl ChildAcc {
             link: ctx.link,
             underline: false,
             line_through: false,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
             color: ctx.color,
             image: Some(Box::new(image)),
         });
@@ -963,6 +1080,7 @@ impl ChildAcc {
     /// Emit the pending inline content as a line box, if it carries any text
     /// (or an inline image, which is content in its own right).
     fn flush_line(&mut self) {
+        self.word_boundary = true;
         if self
             .pending
             .iter()
@@ -1182,6 +1300,12 @@ fn build_block(
         align,
         base_rtl,
         link: parent.link,
+        // Inherited text properties: the computed style already folded the
+        // ancestors in, so `own` is authoritative (ctx fallback is belt+braces
+        // for styles built outside the inheritance pass).
+        transform: own.text_transform.unwrap_or(parent.transform),
+        letter_spacing: own.letter_spacing.unwrap_or(parent.letter_spacing),
+        word_spacing: own.word_spacing.unwrap_or(parent.word_spacing),
     };
 
     let mut acc = ChildAcc::default();
@@ -1289,6 +1413,8 @@ fn build_block(
         center: own.margin_left_auto && own.margin_right_auto,
         line_height: own.line_height,
         rtl: base_rtl,
+        text_indent: own.text_indent.unwrap_or(0.0),
+        text_indent_percent: own.text_indent_percent,
         position: own.position,
         z_index: own.z_index,
         offset_top: own.offset_top,
@@ -1359,6 +1485,9 @@ fn inline_ctx(
         // flow builder) sets the base direction inherited by descendant blocks.
         base_rtl: own_direction(dom, id, own).unwrap_or(parent.base_rtl),
         link,
+        transform: own.text_transform.unwrap_or(parent.transform),
+        letter_spacing: own.letter_spacing.unwrap_or(parent.letter_spacing),
+        word_spacing: own.word_spacing.unwrap_or(parent.word_spacing),
     }
 }
 
@@ -1940,7 +2069,15 @@ fn cells_from_row(
 
         let mut text = String::new();
         collect_text(dom, child, &mut text);
-        let text = collapse_whitespace(&text);
+        let mut text = collapse_whitespace(&text);
+        // `text-transform` applies to the flattened cell text (the classic
+        // `th { text-transform: uppercase }`), so column sizing measures the
+        // transformed string. Descendant-specific transforms flatten to the
+        // cell's own (rich cells transform per run instead).
+        if let Some(transform) = computed.style[child].text_transform {
+            let mut boundary = true;
+            text = apply_text_transform(&text, transform, &mut boundary);
+        }
 
         let colspan = node
             .attr("colspan")
@@ -2031,6 +2168,9 @@ fn collect_cell_runs(
         align: style.align.unwrap_or(TextAlign::Left),
         base_rtl: style.direction.unwrap_or(false),
         link: 0,
+        transform: style.text_transform.unwrap_or(TextTransform::None),
+        letter_spacing: style.letter_spacing.unwrap_or(0.0),
+        word_spacing: style.word_spacing.unwrap_or(0.0),
     };
     let mut acc = ChildAcc::default();
     collect_cell_runs_into(dom, cell_id, &env, ctx, &mut acc);
@@ -2232,6 +2372,11 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         overflow_wrap: own.overflow_wrap.or(parent.overflow_wrap),
         word_break: own.word_break.or(parent.word_break),
         bold: own.bold || parent.bold,
+        text_transform: own.text_transform.or(parent.text_transform),
+        letter_spacing: own.letter_spacing.or(parent.letter_spacing),
+        word_spacing: own.word_spacing.or(parent.word_spacing),
+        text_indent: own.text_indent.or(parent.text_indent),
+        text_indent_percent: own.text_indent_percent.or(parent.text_indent_percent),
         // Text decoration propagates to descendant inline content (see field docs).
         underline: own.underline || parent.underline,
         line_through: own.line_through || parent.line_through,
@@ -2728,6 +2873,15 @@ impl CalcParser<'_> {
             }
             _ => None,
         }
+    }
+}
+
+/// A signed CSS length in points (no percent) — letter-/word-spacing values.
+fn parse_offset_signed(value: &str) -> Option<f32> {
+    let value = value.trim();
+    match value.strip_prefix('-') {
+        Some(rest) => parse_css_length(rest).map(|v| -v),
+        None => parse_css_length(value),
     }
 }
 
@@ -4741,6 +4895,36 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             };
         }
         "line-height" => target.cell.line_height = parse_line_height(value),
+        "text-transform" => {
+            target.cell.text_transform = match value.trim().to_ascii_lowercase().as_str() {
+                "uppercase" => Some(TextTransform::Uppercase),
+                "lowercase" => Some(TextTransform::Lowercase),
+                "capitalize" => Some(TextTransform::Capitalize),
+                "none" => Some(TextTransform::None),
+                _ => target.cell.text_transform,
+            };
+        }
+        "letter-spacing" => {
+            // `normal` is an explicit 0 so it overrides an inherited spacing;
+            // negative lengths tighten tracking.
+            target.cell.letter_spacing = if value.trim().eq_ignore_ascii_case("normal") {
+                Some(0.0)
+            } else {
+                parse_offset_signed(value)
+            };
+        }
+        "word-spacing" => {
+            target.cell.word_spacing = if value.trim().eq_ignore_ascii_case("normal") {
+                Some(0.0)
+            } else {
+                parse_offset_signed(value)
+            };
+        }
+        "text-indent" => {
+            let (pt, pct) = parse_offset_lp(value);
+            target.cell.text_indent = pt;
+            target.cell.text_indent_percent = pct;
+        }
         "width" => {
             // `calc()` may set both a point and a percent component (summed at
             // layout); a plain length or percent sets one.
@@ -5327,6 +5511,11 @@ impl CellStyle {
         self.offset_right = other.offset_right.or(self.offset_right);
         self.offset_bottom = other.offset_bottom.or(self.offset_bottom);
         self.offset_left = other.offset_left.or(self.offset_left);
+        self.text_transform = other.text_transform.or(self.text_transform);
+        self.letter_spacing = other.letter_spacing.or(self.letter_spacing);
+        self.word_spacing = other.word_spacing.or(self.word_spacing);
+        self.text_indent = other.text_indent.or(self.text_indent);
+        self.text_indent_percent = other.text_indent_percent.or(self.text_indent_percent);
         self.sizing = match (self.sizing.take(), other.sizing) {
             (Some(mut a), Some(b)) => {
                 a.merge(*b);
@@ -6423,6 +6612,62 @@ mod tests {
         assert_eq!(plain.padding_percent, crate::box_tree::EdgesPercent::default());
         assert_eq!(plain.min_width, None);
         assert!((plain.padding.left - 6.0).abs() < 0.01, "8px → 6pt");
+    }
+
+    #[test]
+    fn text_transform_and_spacing_reach_runs_and_blocks() {
+        let document = parse(
+            r#"
+            <style>
+              .up { text-transform: uppercase; }
+              .cap { text-transform: capitalize; }
+              .undo { text-transform: none; }
+              .track { letter-spacing: 2pt; word-spacing: 4pt; }
+              .indent { text-indent: 24pt; }
+              .indentpct { text-indent: 10%; }
+            </style>
+            <p class="up">shout <span class="undo">quietly</span></p>
+            <p class="cap">two <b>wo</b>rds</p>
+            <p class="track">spaced text</p>
+            <p class="indent">indented</p>
+            <p class="indentpct">pct</p>
+            "#,
+        );
+        let flow = document.flow.expect("flow doc");
+        let blocks = flow_blocks(&flow);
+        let by_text = |needle: &str| {
+            blocks
+                .iter()
+                .find(|b| block_text(b).contains(needle))
+                .unwrap_or_else(|| panic!("no block containing {needle}"))
+        };
+
+        // Uppercase applies; an explicit `none` on a descendant overrides it.
+        assert_eq!(block_text(by_text("SHOUT")), "SHOUT quietly");
+        // Capitalize uppercases word starts, and the boundary state carries
+        // across a run split mid-word (`wo` bold + `rds`): only "Two Words".
+        assert_eq!(block_text(by_text("Two")), "Two Words");
+        // Spacing lands on the runs.
+        let track = by_text("spaced");
+        let run = first_run(track);
+        assert_eq!(run.letter_spacing, 2.0);
+        assert_eq!(run.word_spacing, 4.0);
+        // text-indent lands on the block (points / percent).
+        assert_eq!(by_text("indented").text_indent, 24.0);
+        assert_eq!(by_text("pct").text_indent_percent, Some(10.0));
+    }
+
+    #[test]
+    fn text_transform_reaches_plain_table_cells() {
+        let document = parse(
+            r#"
+            <style>th { text-transform: uppercase; }</style>
+            <table><tr><th>hello</th><td>world</td></tr></table>
+            "#,
+        );
+        let row = &document.blocks[0];
+        assert_eq!(row.cells[0].text, "HELLO");
+        assert_eq!(row.cells[1].text, "world");
     }
 
     #[test]

@@ -246,7 +246,13 @@ impl Page {
         }
     }
 
-    pub(crate) fn push_colored_line(&mut self, line: Line, color: Color, bold: bool) {
+    pub(crate) fn push_colored_line(
+        &mut self,
+        line: Line,
+        color: Color,
+        bold: bool,
+        letter_spacing: f32,
+    ) {
         self.commands.push(PaintCommand::SetFillColor(color));
         self.commands.push(PaintCommand::Text(TextCommand {
             text: line.text.clone(),
@@ -255,6 +261,7 @@ impl Page {
             font_size: line.font_size,
             font: line.font,
             bold,
+            letter_spacing,
         }));
         self.lines.push(line);
     }
@@ -505,6 +512,7 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
         TextAlign::Left,
         None,
         false,
+        0.0,
         &mut pages,
         &mut y,
         &mut carried,
@@ -528,7 +536,6 @@ fn flush_margin(y: &mut f32, carried: &mut f32) {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn layout_box_children(
     children: &[crate::box_tree::BoxChild],
     x: f32,
@@ -536,6 +543,8 @@ fn layout_box_children(
     align: TextAlign,
     line_height: Option<crate::html::LineHeight>,
     base_rtl: bool,
+    // `text-indent` of the owning block, consumed by its first line box.
+    text_indent: f32,
     pages: &mut Vec<Page>,
     y: &mut f32,
     carried: &mut f32,
@@ -546,6 +555,7 @@ fn layout_box_children(
 ) {
     use crate::box_tree::BoxChild;
 
+    let mut pending_indent = text_indent;
     for child in children {
         match child {
             BoxChild::Block(block)
@@ -643,7 +653,8 @@ fn layout_box_children(
             BoxChild::Line(runs) => {
                 // Content flushes any pending margin above it.
                 flush_margin(y, carried);
-                layout_line_box(runs, x, width, align, line_height, base_rtl, pages, y, floats, options);
+                let indent = std::mem::take(&mut pending_indent);
+                layout_line_box(runs, x, width, align, line_height, base_rtl, indent, pages, y, floats, options);
             }
             BoxChild::Image(image) if image.float_dir.is_some() => {
                 flush_margin(y, carried);
@@ -1141,6 +1152,7 @@ impl FlexItem<'_> {
                     Some(image) => image.width,
                     None => {
                         estimate_text_width(&run.text, run.font_size, options.run_font(run.font))
+                            + run.letter_spacing * run.text.chars().count() as f32
                     }
                 })
                 .sum(),
@@ -1165,7 +1177,7 @@ impl FlexItem<'_> {
                 b, x, width, pages, y, carried, &mut floats, overlays, containing, options,
             ),
             FlexItem::Line(runs) => {
-                layout_line_box(runs, x, width, TextAlign::Left, None, false, pages, y, &mut floats, options)
+                layout_line_box(runs, x, width, TextAlign::Left, None, false, 0.0, pages, y, &mut floats, options)
             }
         }
     }
@@ -1481,6 +1493,7 @@ fn measure_max_content(children: &[crate::box_tree::BoxChild], options: &RenderO
                     Some(image) => image.width,
                     None => {
                         estimate_text_width(&run.text, run.font_size, options.run_font(run.font))
+                            + run.letter_spacing * run.text.chars().count() as f32
                     }
                 })
                 .sum(),
@@ -1699,6 +1712,12 @@ fn layout_block_box(
             block, grid, inner_x, inner_width, pages, y, overlays, child_containing, options,
         );
     } else {
+        // `text-indent` (points + percent of the containing width) applies to
+        // the block's first line box.
+        let indent = block.text_indent
+            + block
+                .text_indent_percent
+                .map_or(0.0, |pct| pct / 100.0 * cb_width);
         layout_box_children(
             &block.children,
             inner_x,
@@ -1706,6 +1725,7 @@ fn layout_block_box(
             block.align,
             block.line_height,
             block.rtl,
+            indent,
             pages,
             y,
             carried,
@@ -2059,14 +2079,22 @@ fn layout_line_box(
     align: TextAlign,
     line_height: Option<crate::html::LineHeight>,
     base_rtl: bool,
+    // `text-indent`: shifts the first line's start edge (consumed once). A
+    // negative value produces a hanging indent into the padding.
+    first_indent: f32,
     pages: &mut Vec<Page>,
     y: &mut f32,
     floats: &mut Vec<FloatBand>,
     options: &RenderOptions,
 ) {
     let mut breaker = LineBreaker::new(runs);
+    let mut indent = first_indent;
     while !breaker.is_done() {
         let (band_x, band_width) = float_band_at(floats, *y, x, width);
+        // Apply the first-line indent by narrowing the band from its start
+        // edge; later lines reset to the full band.
+        let band_x = band_x + indent;
+        let band_width = (band_width - indent).max(1.0);
 
         // A word that does not fit beside a float but would fit at full width
         // drops below the float instead of being broken mid-word.
@@ -2088,6 +2116,7 @@ fn layout_line_box(
         if visual.is_empty() {
             break;
         }
+        indent = 0.0;
         // UAX #9: put the line's pieces in visual order when it mixes
         // directions (each piece's own glyph order is handled by shaping).
         let visual = reorder_pieces_bidi(visual, base_rtl);
@@ -2170,8 +2199,7 @@ fn layout_line_box(
                 px += image_w;
                 continue;
             }
-            let mut piece_width =
-                estimate_text_width(&piece.text, piece.font_size, options.run_font(piece.font));
+            let mut piece_width = piece.advance(options);
             if piece.text == " " {
                 piece_width += justify_bonus;
             }
@@ -2187,6 +2215,7 @@ fn layout_line_box(
                 piece.color,
                 // Synthesize bold only when the resolved face isn't truly bold.
                 options.run_faux_bold(piece.font, piece.bold),
+                piece.letter_spacing,
             );
             page.push_text_decoration(
                 px,
@@ -2242,15 +2271,31 @@ struct LinePiece {
     /// An inline image: `(image_index, width, height)` in points. The piece
     /// occupies `width` on the line and sits with its bottom on the baseline.
     image: Option<(usize, f32, f32)>,
+    /// CSS `letter-spacing`: extra advance per character (may be negative).
+    letter_spacing: f32,
+    /// CSS `word-spacing`: extra advance on inter-word space pieces.
+    word_spacing: f32,
 }
 
 impl LinePiece {
     /// The horizontal space this piece occupies: its image width, or the
-    /// measured text width.
+    /// measured text width plus letter-spacing per character (matching the PDF
+    /// `Tc` semantics, which also pads after the final glyph) and word-spacing
+    /// on inter-word spaces.
     fn advance(&self, options: &RenderOptions) -> f32 {
         match self.image {
             Some((_, width, _)) => width,
-            None => estimate_text_width(&self.text, self.font_size, options.run_font(self.font)),
+            None => {
+                let mut width =
+                    estimate_text_width(&self.text, self.font_size, options.run_font(self.font));
+                if self.letter_spacing != 0.0 {
+                    width += self.letter_spacing * self.text.chars().count() as f32;
+                }
+                if self.word_spacing != 0.0 && self.text == " " {
+                    width += self.word_spacing;
+                }
+                width
+            }
         }
     }
 }
@@ -2377,10 +2422,18 @@ impl LineBreaker {
                 break;
             }
 
+            // The inter-word space widens by the following word's letter- and
+            // word-spacing (CSS applies both to space characters).
+            let lead_spacing = token
+                .pieces
+                .first()
+                .map(|p| p.letter_spacing + p.word_spacing)
+                .unwrap_or(0.0);
             let space_width = if current.is_empty() {
                 0.0
             } else {
                 estimate_text_width(" ", token.space_font_size, options.run_font(token.pieces.first().map(|p| p.font).unwrap_or(0)))
+                    + lead_spacing
             };
             if !current.is_empty()
                 && current_width + space_width + token_width > max_width + WRAP_TOLERANCE
@@ -2415,6 +2468,8 @@ impl LineBreaker {
                     line_through,
                     link,
                     image: None,
+                    letter_spacing: lead.map(|p| p.letter_spacing).unwrap_or(0.0),
+                    word_spacing: lead.map(|p| p.word_spacing).unwrap_or(0.0),
                 });
                 current_width += space_width;
             }
@@ -2451,6 +2506,7 @@ fn fill_from_long_token(
                 && last.underline == piece.underline
                 && last.line_through == piece.line_through
                 && last.link == piece.link
+                && last.letter_spacing == piece.letter_spacing
             {
                 last.text.push(ch);
                 return;
@@ -2466,6 +2522,8 @@ fn fill_from_long_token(
             line_through: piece.line_through,
             link: piece.link,
             image: None,
+            letter_spacing: piece.letter_spacing,
+            word_spacing: piece.word_spacing,
         });
     };
 
@@ -2475,7 +2533,9 @@ fn fill_from_long_token(
                 push_merged(&mut leftover, piece, ch);
                 continue;
             }
-            let char_width = estimate_text_width(&ch.to_string(), piece.font_size, options.run_font(piece.font));
+            let char_width =
+                estimate_text_width(&ch.to_string(), piece.font_size, options.run_font(piece.font))
+                    + piece.letter_spacing;
             if !current.is_empty() && *current_width + char_width > max_width {
                 full = true;
                 push_merged(&mut leftover, piece, ch);
@@ -2537,6 +2597,8 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                             line_through: false,
                             link: run.link,
                             image: Some((index, image.width, image.height)),
+                            letter_spacing: 0.0,
+                            word_spacing: 0.0,
                         }],
                         space_font_size: pending_space.take().unwrap_or(0.0),
                     });
@@ -2566,6 +2628,8 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                     && last.underline == run.underline
                     && last.line_through == run.line_through
                     && last.link == run.link
+                    && last.letter_spacing == run.letter_spacing
+                    && last.word_spacing == run.word_spacing
                 {
                     last.text.push(ch);
                     continue;
@@ -2581,6 +2645,8 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 line_through: run.line_through,
                 link: run.link,
                 image: None,
+                letter_spacing: run.letter_spacing,
+                word_spacing: run.word_spacing,
             });
         }
     }
@@ -2758,6 +2824,7 @@ fn render_planned_table_row(
                         },
                         piece.color,
                         options.run_faux_bold(piece.font, piece.bold),
+                        piece.letter_spacing,
                     );
                     page.push_text_decoration(
                         px,
@@ -2824,6 +2891,7 @@ fn render_planned_table_row(
                 },
                 text_color,
                 options.run_faux_bold(planned.source.font, planned.source.style.bold),
+                0.0,
             );
             page.push_text_decoration(
                 text_x,
@@ -3556,6 +3624,58 @@ mod tests {
     };
 
     #[test]
+    fn text_indent_shifts_only_the_first_line() {
+        // A long paragraph with a 40pt indent: the first painted line starts
+        // 40pt right of the content edge, later lines at the edge.
+        let document = crate::html::parse(
+            "<style>p { text-indent: 40pt; }</style>\
+             <p>alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu \
+             nu xi omicron pi rho sigma tau upsilon phi chi psi omega and more words \
+             to force a second wrapped line of output text</p>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+        assert!(lines.len() >= 2, "need at least two wrapped lines");
+        let first_y = lines[0].y;
+        let first_x = lines
+            .iter()
+            .filter(|l| l.y == first_y)
+            .map(|l| l.x)
+            .fold(f32::INFINITY, f32::min);
+        let second_x = lines
+            .iter()
+            .filter(|l| l.y != first_y)
+            .map(|l| l.x)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            (first_x - second_x - 40.0).abs() < 0.5,
+            "first line indented 40pt over later lines: {first_x} vs {second_x}"
+        );
+    }
+
+    #[test]
+    fn letter_spacing_widens_measured_lines() {
+        // The same word with 3pt tracking must carry the spacing into its text
+        // command (the PDF `Tc` state); the untracked copy carries none.
+        let document = crate::html::parse(
+            "<style>.t { letter-spacing: 3pt; }</style><p class=\"t\">wide</p><p>wide</p>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let spacings: Vec<f32> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                PaintCommand::Text(t) if t.text == "wide" => Some(t.letter_spacing),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spacings.len(), 2);
+        assert!((spacings[0] - 3.0).abs() < 0.01 && spacings[1] == 0.0, "{spacings:?}");
+    }
+
+    #[test]
     fn calc_width_mixes_percent_and_length() {
         // `width: calc(100% - 100pt)` on the ~499pt A4 content width gives a
         // ~399pt content box; the painted background spans that (no padding).
@@ -3812,6 +3932,8 @@ mod tests {
         use crate::box_tree::{BoxChild, FlowRoot, ImageBox, InlineRun};
 
         let run = |text: &str| InlineRun {
+            letter_spacing: 0.0,
+        word_spacing: 0.0,
             text: text.to_string(),
             font_size: 12.0,
             bold: false,
@@ -3823,6 +3945,8 @@ mod tests {
             image: None,
         };
         let image_run = |w: f32, h: f32| InlineRun {
+            letter_spacing: 0.0,
+        word_spacing: 0.0,
             image: Some(Box::new(ImageBox {
                 src: String::new(),
                 attr_width: None,
@@ -3893,6 +4017,8 @@ mod tests {
     fn oversized_inline_images_scale_to_the_line() {
         use crate::box_tree::{BoxChild, FlowRoot, ImageBox, InlineRun};
         let image_run = InlineRun {
+            letter_spacing: 0.0,
+        word_spacing: 0.0,
             text: String::new(),
             font_size: 12.0,
             bold: false,
@@ -4173,6 +4299,8 @@ mod tests {
     fn bidi_reorders_rtl_pieces_within_a_line() {
         use super::{reorder_pieces_bidi, LinePiece};
         let piece = |text: &str| LinePiece {
+            letter_spacing: 0.0,
+        word_spacing: 0.0,
             text: text.to_string(),
             font_size: 10.0,
             font: 0,
@@ -4429,6 +4557,8 @@ mod tests {
         let children = (0..200)
             .map(|index| {
                 BoxChild::Block(BlockBox {
+                    text_indent: 0.0,
+        text_indent_percent: None,
                     kind: BlockKind::Paragraph,
                     margin: crate::box_tree::Edges::default(),
                     padding: crate::box_tree::Edges::default(),
@@ -4470,6 +4600,8 @@ mod tests {
                     offset_percent: Default::default(),
                     anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
+                        letter_spacing: 0.0,
+        word_spacing: 0.0,
                         text: format!("Paragraph {index}"),
                         font_size: 11.0,
                         bold: false,
@@ -4516,6 +4648,8 @@ mod tests {
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
+                    text_indent: 0.0,
+        text_indent_percent: None,
                     kind: BlockKind::Paragraph,
                     margin: Edges::default(),
                     padding: Edges::default(),
@@ -4557,6 +4691,8 @@ mod tests {
                     offset_percent: Default::default(),
                     anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
+                        letter_spacing: 0.0,
+        word_spacing: 0.0,
                         text: long,
                         font_size: 12.0,
                         bold: false,
@@ -4596,6 +4732,8 @@ mod tests {
 
         let para = |text: &str| {
             BoxChild::Block(BlockBox {
+                text_indent: 0.0,
+        text_indent_percent: None,
                 kind: BlockKind::Paragraph,
                 margin: Edges {
                     top: 20.0,
@@ -4642,6 +4780,8 @@ mod tests {
                 offset_percent: Default::default(),
                 anchor: None,
                 children: vec![BoxChild::Line(vec![InlineRun {
+                    letter_spacing: 0.0,
+        word_spacing: 0.0,
                     text: text.to_string(),
                     font_size: 10.0,
                     bold: false,
@@ -4690,6 +4830,8 @@ mod tests {
         let render = |line_height: Option<LineHeight>| {
             let line = |text: &str| {
                 BoxChild::Line(vec![InlineRun {
+                    letter_spacing: 0.0,
+        word_spacing: 0.0,
                     text: text.to_string(),
                     font_size: 10.0,
                     bold: false,
@@ -4711,6 +4853,8 @@ mod tests {
                 links: Vec::new(),
                 flow: Some(FlowRoot {
                     children: vec![BoxChild::Block(BlockBox {
+                        text_indent: 0.0,
+        text_indent_percent: None,
                         kind: BlockKind::Paragraph,
                         margin: Edges::default(),
                         padding: Edges::default(),
@@ -4788,6 +4932,8 @@ mod tests {
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
+                    text_indent: 0.0,
+        text_indent_percent: None,
                     kind: BlockKind::Paragraph,
                     margin: Edges::default(),
                     padding: Edges {
@@ -4839,6 +4985,8 @@ mod tests {
                     offset_percent: Default::default(),
                     anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
+                        letter_spacing: 0.0,
+        word_spacing: 0.0,
                         text: "boxed".to_string(),
                         font_size: 11.0,
                         bold: false,

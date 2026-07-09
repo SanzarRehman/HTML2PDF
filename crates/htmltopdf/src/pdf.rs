@@ -809,6 +809,11 @@ fn page_content(page: &Page, options: &RenderOptions, font_plans: &[FontPlan]) -
             }
             PaintCommand::Text(text) => {
                 content.push_str("BT\n");
+                if text.letter_spacing != 0.0 {
+                    // `Tc` pads every shown glyph (2-byte CIDs included). It is
+                    // graphics state, not text-object state, so reset after ET.
+                    content.push_str(&format!("{:.3} Tc\n", text.letter_spacing));
+                }
                 if text.bold {
                     // Faux-bold: fill + stroke the glyphs in the same color with a
                     // thin outline, since only a regular font face is embedded.
@@ -851,6 +856,9 @@ fn page_content(page: &Page, options: &RenderOptions, font_plans: &[FontPlan]) -
                 }
                 if text.bold {
                     content.push_str("0 Tr\n"); // restore normal fill render mode
+                }
+                if text.letter_spacing != 0.0 {
+                    content.push_str("0 Tc\n");
                 }
                 content.push_str("ET\n");
             }
@@ -1057,7 +1065,7 @@ mod tests {
                 font: 0,
                 leading: 16.0,
             },
-            Color::BLACK, false,
+            Color::BLACK, false, 0.0,
         );
 
         let pdf = write_pdf(&[page], &[], &options).expect("render");
@@ -1135,7 +1143,7 @@ mod tests {
                 font: 0,
                 leading: 16.0,
             },
-            Color::BLACK, false,
+            Color::BLACK, false, 0.0,
         );
 
         assert_eq!(escape_text("A (test) \\ value"), "A \\(test\\) \\\\ value");
@@ -1168,6 +1176,7 @@ mod tests {
         }));
         page.commands
             .push(PaintCommand::Text(crate::paint::TextCommand {
+                letter_spacing: 0.0,
                 text: "inside".to_string(),
                 x: 12.0,
                 y: 45.0,

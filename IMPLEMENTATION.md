@@ -862,9 +862,8 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **CSS text polish**: `letter-spacing`, `word-spacing`,
-      `text-transform`, `text-indent`; `::before`/`::after` with text
-      `content` (generated content matters for print).
+- [ ] **`::before`/`::after` with text `content`** (generated content matters
+      for print; the text-polish properties shipped, see below).
 - [ ] **Backgrounds beyond solid color**: `background-image` (PNG/JPEG via
       the existing decoder), `linear-gradient()`, `background-size` /
       `background-position` / `background-repeat`.
@@ -877,6 +876,33 @@ Details for each item are in the feature list below and in
       `parentNode`/`children` traversal.
 
 #### Recently shipped (2026-07)
+
+- [x] **CSS text polish** (2026-07-10): `text-transform`
+      (uppercase/lowercase/capitalize/none, inherited; applied as text is
+      collected into runs — `ChildAcc::push_text` via `apply_text_transform`,
+      with cross-run word-boundary state so `capitalize` survives a mid-word
+      style split; plain table cells transform their flattened text, so
+      `th { text-transform: uppercase }` works and column sizing measures the
+      transformed string; the no-transform path borrows via `Cow` — no new
+      allocation). `letter-spacing` (± lengths; `normal` = explicit 0):
+      carried on `InlineRun`/`LinePiece`, added per character in
+      `LinePiece::advance` (matching PDF `Tc` semantics, which also pad after
+      the final glyph), reproduced in the PDF as the `Tc` char-spacing state
+      set after `BT` and reset before `ET` (graphics state, not text-object
+      state!) — so shaping/kerning are preserved; piece-merge guards extended.
+      `word-spacing`: widens inter-word space pieces (the space piece takes
+      the following word's spacing), composing with justify. `text-indent`
+      (pt / `%` of containing width, inherited): `BlockBox.text_indent`,
+      threaded through `layout_box_children` as a one-shot value consumed by
+      the block's first line box (`layout_line_box` narrows the first line's
+      band); negative = hanging indent. Flow text + rich cells get all four;
+      plain cells get `text-transform` only. 22k-cell A/B: byte-identical,
+      wall unchanged, RAM +1.6 MB (+1.7%) — five inherited `CellStyle` fields
+      (inherited properties can't ride the boxed-extras trick without
+      per-clone allocations). `features/text-polish` fixture (32 total).
+      **Not yet done:** letter/word-spacing in plain single-style cells,
+      `text-indent` reaching a nested block's first line, `em` lengths,
+      `text-transform: full-width`, spacing-aware max-content column sizing.
 
 - [x] **`calc()` expressions** (2026-07-10): a recursive-descent evaluator
       (`evaluate_calc` → `CalcParser`: `expr`/`term`/`factor`, `+ - * /`,

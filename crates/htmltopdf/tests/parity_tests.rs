@@ -47,6 +47,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "pct-sizing"),
     ("features", "custom-properties"),
     ("features", "calc"),
+    ("features", "text-polish"),
     ("features", "links"),
     ("features", "flex-wrap"),
     ("features", "rtl"),

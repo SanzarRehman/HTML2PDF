@@ -1,0 +1,27 @@
+<html><head><style>
+  @page { margin: 0.5in; }
+  body { font-size: 11pt; }
+  h2 { text-transform: uppercase; letter-spacing: 2pt; font-size: 13pt; }
+  .cap { text-transform: capitalize; }
+  .low { text-transform: lowercase; }
+  .tracked { letter-spacing: 1.5pt; }
+  .tight { letter-spacing: -0.4pt; }
+  .spread { word-spacing: 8pt; }
+  .indent { text-indent: 30pt; background: #f4f4f4; }
+  .indentpct { text-indent: 10%; background: #eef4ff; }
+  th { text-transform: uppercase; }
+</style></head><body>
+<h2>tracked uppercase heading</h2>
+<p class="cap">these words should each start with a capital letter</p>
+<p class="low">MiXeD CaSe becomes ALL lowercase TEXT</p>
+<p class="tracked">Letter spacing spreads these glyphs apart visibly.</p>
+<p class="tight">Negative letter spacing tightens this line of text slightly.</p>
+<p class="spread">Word spacing pushes words apart without changing glyphs.</p>
+<p class="indent">This paragraph has a 30pt first-line indent. The text wraps to a
+second line which starts back at the left content edge, showing that only the
+first line is indented by the property.</p>
+<p class="indentpct">A ten percent first-line indent resolved against the containing
+width, wrapping onto a second line at the normal edge.</p>
+<table><tr><th>column header</th><th>second header</th></tr>
+<tr><td>plain cell</td><td>data</td></tr></table>
+</body></html>

@@ -1,0 +1,30 @@
+{
+  "fixture": "text-polish",
+  "layer": "features",
+  "description": "text-transform (uppercase/capitalize/lowercase, incl. a plain th cell), letter-spacing (positive via PDF Tc, negative), word-spacing on inter-word spaces, and text-indent (points and percent, first line only). Default base-14 font so transformed text stays searchable.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "2.000 Tc",
+      "0 Tc"
+    ],
+    "must_contain_text": [
+      "TRACKED",
+      "Capital",
+      "lowercase",
+      "COLUMN"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The heading is uppercase with visibly tracked (letter-spaced) glyphs.",
+    "The capitalize paragraph starts every word with a capital letter.",
+    "The lowercase paragraph has no capitals.",
+    "The word-spacing paragraph shows wide inter-word gaps with normal glyph spacing.",
+    "The 30pt and 10% indent paragraphs indent only their first lines.",
+    "The plain table header cells render uppercase (COLUMN HEADER / SECOND HEADER)."
+  ]
+}

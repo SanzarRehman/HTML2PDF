@@ -61,6 +61,9 @@ pub struct TextCommand {
     pub font: u16,
     /// Render with faux-bold (fill+stroke) when no bold font face is embedded.
     pub bold: bool,
+    /// CSS `letter-spacing` in points (0 = none), emitted as the PDF `Tc`
+    /// character-spacing text state (and reset afterwards).
+    pub letter_spacing: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
