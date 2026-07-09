@@ -1,0 +1,21 @@
+<html><head><style>
+  @page { margin: 0.5in; }
+  :root {
+    --brand: #c0392b;
+    --ink: #222;
+    --space: 14pt;
+    --alias: var(--brand);
+  }
+  body { font-size: 12pt; color: var(--ink); }
+  .brand { color: var(--brand); padding: var(--space); background: #f6f6f6; }
+  .alias { color: var(--alias); }
+  .fallback { color: var(--missing, #008000); }
+  /* A component-scoped override: --brand redefined on the subtree. */
+  .themed { --brand: #1f6feb; }
+  .themed .brand { color: var(--brand); }
+</style></head><body>
+<p class="brand">Brand color and variable padding from custom properties.</p>
+<p class="alias">This uses a variable that aliases another variable.</p>
+<p class="fallback">Missing variable falls back to green.</p>
+<div class="themed"><p class="brand">Scoped override recolors this line blue.</p></div>
+</body></html>

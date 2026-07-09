@@ -257,6 +257,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   `:not`), specificity, source order, `!important`, **`@media print` evaluation**,
   comments/strings, multiple `<style>` blocks.
 - Inheritance (color, font-size, text-align, etc. flow from parents).
+- **Custom properties** (`--x`) and `var(--x, fallback)` — cascade + inherit,
+  nested/aliased variables, missing-variable fallbacks, and component-scoped
+  overrides (a redefined `--x` on an ancestor recolors its subtree).
 - `display: none` (tables and flow content).
 - Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
 - `font-weight` (bold / numeric ≥ 600) — a **real bold face** when the family

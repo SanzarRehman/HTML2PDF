@@ -82,7 +82,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `transform`, `opacity`, `box-shadow`, `filter` | ❌ | |
 | `max-width` (pt / `%`) | 🟡 | On blocks and images (`max-width: 100%` works). |
 | `object-fit` | ❌ | |
-| `calc()`, custom properties (`--var`, `var()`) | ❌ | |
+| Custom properties (`--var`, `var()`) | 🟡 | Custom properties cascade and inherit; `var(--name, fallback)` resolves (nested/aliased vars, component-scoped overrides, fallbacks). Values referencing a var are resolved in the top-down pass, so scoped redefinitions recolor subtrees. No `@property`, no `var()` in selectors, and `!important` custom properties don't override a normal one. |
+| `calc()` | ❌ | |
 | `%` lengths | 🟡 | `width`/`min-width`/`max-width`, padding, and margin on blocks (of the containing width); box offsets on positioned boxes; images. Not yet on `height`/`min-height`/`max-height` (indefinite containing height in flow). |
 
 ## Images

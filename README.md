@@ -101,6 +101,10 @@ Works today:
   `min-width`/`max-width` (points or `%`) and `min-height`/`max-height` (points)
   clamp the box; `overflow: hidden` with a fixed height clips content to the
   border box; `box-sizing: border-box`.
+- **CSS custom properties**: `--name: value` declarations cascade and inherit,
+  and `var(--name, fallback)` resolves — including variables that alias other
+  variables, fallbacks for missing variables, and component-scoped overrides
+  that recolor a subtree by redefining a variable on an ancestor.
 - **Real borders**: per-side `border-top/right/bottom/left` with independent
   width, style, and color — `solid`, `dashed`, and `dotted` (double/groove/
   ridge render solid), `thin/medium/thick`, `currentColor` defaults. Borders
@@ -184,7 +188,8 @@ Out of scope by design (static print target):
 
 Not complete yet (queued, CSS-first):
 
-- `calc()` and custom properties (`var()`) in the cascade — the next item up.
+- `calc()` expressions (mixed `%`/length arithmetic) — the next item up
+  (custom properties and `var()` already work).
 - `%` **heights** (`%` widths/padding/margins/offsets and `min-width`/
   `min-height`/`max-height` already work; height percentages need a definite
   containing height, which is indefinite in normal flow).
@@ -406,7 +411,7 @@ The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 surface is deferred. The front of the queue, in order (see
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
 
-1. `calc()` and custom properties (`var()`).
+1. `calc()` expressions (custom properties and `var()` already ship).
 2. Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
    `text-indent`, and `::before`/`::after` generated content.
 3. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.

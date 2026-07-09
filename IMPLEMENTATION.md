@@ -862,7 +862,8 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **`calc()` + custom properties (`var()`)** in the cascade.
+- [ ] **`calc()`** expressions in the cascade (custom properties + `var()`
+      already shipped, see below).
 - [ ] **CSS text polish**: `letter-spacing`, `word-spacing`,
       `text-transform`, `text-indent`; `::before`/`::after` with text
       `content` (generated content matters for print).
@@ -878,6 +879,25 @@ Details for each item are in the feature list below and in
       `parentNode`/`children` traversal.
 
 #### Recently shipped (2026-07)
+
+- [x] **CSS custom properties + `var()`** (2026-07-10): declaration values that
+      declare (`--x: …`) or reference (`var(--x, fallback)`) a custom property
+      can't be parsed at stylesheet-parse time (the environment is unknown), so
+      `DeclParser` routes them to `custom`/`deferred` vecs on the
+      `DeclarationLayer` (both merge by appending, so higher-priority entries
+      apply last). A `Stylesheet.uses_custom` flag is set when any rule uses
+      them; when false (every existing fixture, incl. the 22k-cell doc), the
+      cascade takes its cached fast path **unchanged / byte-identical**. When
+      true, the top-down pass (`compute_inherited_node`) threads an inherited
+      custom-property environment and, per element (`element_own_with_env`, not
+      cached — the result depends on ancestors), builds the effective
+      environment (inherited + own `--x`, each resolved) and resolves every
+      deferred value against it (`substitute_vars`: nested/aliased vars,
+      fallbacks, bounded recursion for cycles). Custom properties inherit, so a
+      component-scoped `--brand` override recolors a whole subtree.
+      `features/custom-properties` fixture (30 total). **Not yet done:**
+      `@property`, `var()` in selectors, `!important` custom-property priority,
+      `calc()` (next).
 
 - [x] **`%` lengths + min/max sizing + overflow clipping** (2026-07-09): a
       boxed `SizingCss` on `CellStyle` (`Option<Box<…>>`, allocated only when a

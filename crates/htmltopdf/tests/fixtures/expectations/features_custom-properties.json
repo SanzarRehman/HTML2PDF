@@ -1,0 +1,29 @@
+{
+  "fixture": "custom-properties",
+  "layer": "features",
+  "description": "CSS custom properties and var(): a value from :root, a variable aliasing another variable, a fallback for a missing variable, and a component-scoped --brand override that recolors a nested subtree. Default base-14 font so text stays searchable.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "0.7529 0.2235 0.1686 rg",
+      "0.0000 0.5020 0.0000 rg",
+      "0.1216 0.4353 0.9216 rg"
+    ],
+    "must_contain_text": [
+      "Brand",
+      "aliases",
+      "Missing",
+      "Scoped"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The first paragraph is brand red (#c0392b) with padding from --space.",
+    "The alias paragraph is also brand red (variable-references-variable).",
+    "The fallback paragraph is green (missing variable → fallback).",
+    "Inside .themed, the .brand line is blue (#1f6feb) from the scoped --brand override."
+  ]
+}

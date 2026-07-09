@@ -2099,6 +2099,7 @@ fn compute_inherited_styles(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> C
         hidden: vec![false; dom.nodes.len()],
     };
     let mut cache = HashMap::new();
+    let root_env = HashMap::new();
     compute_inherited_node(
         dom,
         dom.root(),
@@ -2106,11 +2107,13 @@ fn compute_inherited_styles(dom: &crate::dom::Dom, stylesheet: &Stylesheet) -> C
         false,
         stylesheet,
         &mut cache,
+        &root_env,
         &mut out,
     );
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_inherited_node(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
@@ -2118,24 +2121,100 @@ fn compute_inherited_node(
     parent_hidden: bool,
     stylesheet: &Stylesheet,
     cache: &mut HashMap<String, (CellStyle, bool)>,
+    // Inherited custom-property environment (empty unless the stylesheet uses
+    // custom properties). Threaded down so `var()` resolves against ancestors.
+    env: &HashMap<String, String>,
     out: &mut ComputedStyles,
 ) {
     let node = dom.node(id);
-    let (style, hidden) = match &node.data {
-        crate::dom::NodeData::Element { .. } => {
+    let is_element = matches!(&node.data, crate::dom::NodeData::Element { .. });
+    // `own_env` is materialized only on the custom-property path; otherwise the
+    // parent's `env` (empty) is threaded down unchanged and the fast cached
+    // `element_own` runs exactly as before.
+    let (style, hidden, own_env) = if is_element {
+        if stylesheet.uses_custom {
+            let (own, display_none, own_env) = element_own_with_env(dom, id, stylesheet, env);
+            (
+                inherit_style(&inherited, &own),
+                parent_hidden || display_none,
+                Some(own_env),
+            )
+        } else {
             let (own, display_none) = element_own(dom, id, stylesheet, cache);
-            (inherit_style(&inherited, &own), parent_hidden || display_none)
+            (inherit_style(&inherited, &own), parent_hidden || display_none, None)
         }
+    } else {
         // Text and document nodes carry no cascade of their own; they inherit
         // their parent's style and hidden state.
-        _ => (inherited, parent_hidden),
+        (inherited, parent_hidden, None)
     };
     out.style[id] = style.clone();
     out.hidden[id] = hidden;
 
+    let child_env = own_env.as_ref().unwrap_or(env);
     for &child in &node.children {
-        compute_inherited_node(dom, child, style.clone(), hidden, stylesheet, cache, out);
+        compute_inherited_node(
+            dom,
+            child,
+            style.clone(),
+            hidden,
+            stylesheet,
+            cache,
+            child_env,
+            out,
+        );
     }
+}
+
+/// The custom-property slow path: like [`element_own`] but not cached, because
+/// the result depends on the inherited custom-property environment. Builds this
+/// element's environment (inherited + own `--x` declarations), resolves every
+/// deferred `var()` value against it, and returns the environment for children.
+fn element_own_with_env(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    stylesheet: &Stylesheet,
+    env: &HashMap<String, String>,
+) -> (CellStyle, bool, HashMap<String, String>) {
+    let node = dom.node(id);
+    let tag = node.tag().unwrap_or_default();
+    let class_attr = node.attr("class").unwrap_or_default();
+    let inline_style = node.attr("style").unwrap_or_default();
+    let classes = class_attr.split_whitespace().collect::<Vec<_>>();
+
+    let mut decls = stylesheet.computed_declarations(dom, id, tag, &classes);
+    if !inline_style.is_empty() {
+        // Inline declarations (incl. their own custom/deferred) layer on top.
+        decls.merge_inline(parse_style_declarations(inline_style));
+    }
+
+    // Environment = inherited, then this element's own `--x` (normal then
+    // important), each resolved against the environment built so far.
+    let mut own_env = env.clone();
+    for (name, raw) in decls.normal.custom.iter().chain(decls.important.custom.iter()) {
+        let resolved = substitute_vars(raw, &own_env, 0);
+        own_env.insert(name.clone(), resolved);
+    }
+
+    // Typed (non-var) declarations resolve as usual; then deferred (var-bearing)
+    // ones resolve against the environment and apply on top, normal before
+    // important.
+    let mut resolved = decls.resolved();
+    let mut style = std::mem::take(&mut resolved.cell);
+    let mut display = resolved.display;
+    for (prop, raw) in decls.normal.deferred.iter().chain(decls.important.deferred.iter()) {
+        let value = substitute_vars(raw, &own_env, 0);
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let mut layer = DeclarationLayer::default();
+        apply_style_declaration(&mut layer, prop, value);
+        style.merge(layer.cell);
+        display = layer.display.or(display);
+    }
+
+    (style, display == Some(CssDisplay::None), own_env)
 }
 
 /// Combine a parent's computed style with an element's own cascaded style.
@@ -2400,6 +2479,77 @@ fn parse_box_edges_lp(value: &str) -> ([Option<f32>; 4], [Option<f32>; 4]) {
     (pt, pct)
 }
 
+/// Substitute `var(--name[, fallback])` references in a raw declaration value
+/// using the element's custom-property environment. An unknown name falls back
+/// to its fallback (itself resolved) or, absent one, to empty. Bounded
+/// recursion guards against custom-property reference cycles.
+fn substitute_vars(value: &str, env: &std::collections::HashMap<String, String>, depth: u8) -> String {
+    if depth > 16 || !value.contains("var(") {
+        return value.to_string();
+    }
+    let bytes = value.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < value.len() {
+        let at_boundary = i == 0 || {
+            let prev = bytes[i - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'-' && prev != b'_'
+        };
+        if at_boundary && value[i..].starts_with("var(") {
+            // Find the matching close paren for this `var(`.
+            let mut paren = 1i32;
+            let mut j = i + 4;
+            while j < value.len() && paren > 0 {
+                match bytes[j] {
+                    b'(' => paren += 1,
+                    b')' => paren -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if paren != 0 {
+                // Unbalanced: emit the rest verbatim and stop.
+                out.push_str(&value[i..]);
+                break;
+            }
+            let args = &value[i + 4..j - 1];
+            let (name, fallback) = split_first_top_comma(args);
+            let replacement = match env.get(name.trim()) {
+                Some(v) => substitute_vars(v, env, depth + 1),
+                None => fallback
+                    .map(|fb| substitute_vars(fb.trim(), env, depth + 1))
+                    .unwrap_or_default(),
+            };
+            out.push_str(&replacement);
+            i = j;
+        } else {
+            let ch = value[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Split at the first top-level comma (outside parens and quotes): `var()`'s
+/// `name, fallback` split, where the fallback may itself contain commas.
+fn split_first_top_comma(s: &str) -> (&str, Option<&str>) {
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        match (quote, b) {
+            (Some(q), _) if b == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'"' | b'\'') => quote = Some(b),
+            (None, b'(') => depth += 1,
+            (None, b')') => depth -= 1,
+            (None, b',') if depth == 0 => return (&s[..i], Some(&s[i + 1..])),
+            _ => {}
+        }
+    }
+    (s, None)
+}
+
 /// Which boxed `SizingCss` percent array a declaration writes to.
 #[derive(Clone, Copy)]
 enum PctGroup {
@@ -2456,6 +2606,11 @@ struct Stylesheet {
     /// shared cache key cannot represent, so the style cache falls back to a
     /// per-element key when this is set.
     needs_precise_match: bool,
+    /// Whether any rule declares a custom property (`--x`) or references one
+    /// (`var()`). When false (the overwhelming majority, incl. the spreadsheet
+    /// fixtures), the cascade takes its cached fast path unchanged; when true,
+    /// the top-down pass resolves the custom-property environment per element.
+    uses_custom: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2573,6 +2728,15 @@ struct StyleDeclarations {
 struct DeclarationLayer {
     cell: CellStyle,
     display: Option<CssDisplay>,
+    /// Custom-property declarations (`--name: value`) in cascade order (lowest
+    /// priority first). Resolved to the element's custom-property environment
+    /// during the top-down pass; empty for the overwhelmingly common stylesheet
+    /// that declares none, so the fast cascade path is untouched.
+    custom: Vec<(String, String)>,
+    /// Declarations whose value contains `var()` and so cannot be parsed until
+    /// the custom-property environment is known — `(property, raw value)` in
+    /// cascade order. Resolved and applied in the top-down pass.
+    deferred: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2593,6 +2757,10 @@ impl Stylesheet {
         self.has_structural_combinator = false;
         self.has_sibling_combinator = false;
         self.needs_precise_match = false;
+        self.uses_custom = self.rules.iter().any(|rule| {
+            let layer = |l: &DeclarationLayer| !l.custom.is_empty() || !l.deferred.is_empty();
+            layer(&rule.declarations.normal) || layer(&rule.declarations.important)
+        });
 
         for (index, rule) in self.rules.iter().enumerate() {
             // Index by the subject (rightmost) compound. A subject with a tag,
@@ -3105,9 +3273,13 @@ impl StyleDeclarations {
 }
 
 impl DeclarationLayer {
-    fn merge(&mut self, other: DeclarationLayer) {
+    fn merge(&mut self, mut other: DeclarationLayer) {
         self.cell.merge(other.cell);
         self.display = other.display.or(self.display);
+        // Higher-priority (later-merged) custom/deferred entries append after,
+        // so they apply last and win when the environment is built/resolved.
+        self.custom.append(&mut other.custom);
+        self.deferred.append(&mut other.deferred);
     }
 }
 
@@ -3340,7 +3512,14 @@ impl<'i> DeclarationParser<'i> for DeclParser<'_> {
         consume_remaining(input);
         let raw_value = input.slice_from(value_start);
 
-        let property = name.to_ascii_lowercase();
+        // Custom-property names are case-sensitive and keep their `--` prefix;
+        // ordinary property names are ASCII-lowercased.
+        let is_custom = name.starts_with("--");
+        let property = if is_custom {
+            name.to_string()
+        } else {
+            name.to_ascii_lowercase()
+        };
         let (value, important) = normalize_declaration_value(raw_value);
         let layer = if important {
             &mut self.declarations.important
@@ -3348,7 +3527,17 @@ impl<'i> DeclarationParser<'i> for DeclParser<'_> {
             &mut self.declarations.normal
         };
 
-        apply_style_declaration(layer, &property, &value);
+        if is_custom {
+            // A custom property carries an arbitrary token stream; store it raw
+            // for later resolution into the environment.
+            layer.custom.push((property, value));
+        } else if value.contains("var(") {
+            // Defer any value that references a custom property: it can only be
+            // parsed once the environment is known (top-down pass).
+            layer.deferred.push((property, value));
+        } else {
+            apply_style_declaration(layer, &property, &value);
+        }
         Ok(())
     }
 }
@@ -5939,6 +6128,46 @@ mod tests {
         assert_eq!(plain.padding_percent, crate::box_tree::EdgesPercent::default());
         assert_eq!(plain.min_width, None);
         assert!((plain.padding.left - 6.0).abs() < 0.01, "8px → 6pt");
+    }
+
+    #[test]
+    fn resolves_custom_properties_and_var() {
+        use crate::color::Color;
+        let document = parse(
+            r#"
+            <style>
+              :root { --brand: #c0392b; --pad: 12pt; --gap: var(--pad); }
+              .brand { color: var(--brand); padding-left: var(--pad); }
+              .fallback { color: var(--missing, #008000); }
+              .chain { margin-left: var(--gap); }
+              .inherited { padding-left: var(--pad); }
+            </style>
+            <p class="brand">brand</p>
+            <p class="fallback">fallback</p>
+            <p class="chain">chain</p>
+            <div class="brand"><p class="inherited">nested</p></div>
+            "#,
+        );
+        let flow = document.flow.expect("flow doc");
+        let blocks = flow_blocks(&flow);
+        let find = |t: &str| {
+            blocks
+                .iter()
+                .find(|b| block_text(b) == t)
+                .unwrap_or_else(|| panic!("no block {t}"))
+        };
+
+        // `var(--brand)` → #c0392b (192,57,43).
+        let brand = find("brand");
+        assert_eq!(first_run(brand).color, Color::from_rgb_u8(192, 57, 43));
+        // `padding-left: var(--pad)` → 12pt.
+        assert!((brand.padding.left - 12.0).abs() < 0.01, "{}", brand.padding.left);
+        // A missing var falls back to the second argument, #008000 (green).
+        assert_eq!(first_run(find("fallback")).color, Color::from_rgb_u8(0, 128, 0));
+        // `--gap: var(--pad)` — a custom property referencing another resolves.
+        assert!((find("chain").margin.left - 12.0).abs() < 0.01);
+        // Custom properties inherit: the child reads the ancestor's `--pad`.
+        assert!((find("nested").padding.left - 12.0).abs() < 0.01);
     }
 
     #[test]
