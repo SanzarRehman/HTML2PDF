@@ -260,6 +260,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - **Custom properties** (`--x`) and `var(--x, fallback)` — cascade + inherit,
   nested/aliased variables, missing-variable fallbacks, and component-scoped
   overrides (a redefined `--x` on an ancestor recolors its subtree).
+- **`calc()`** — `+ - * /`, parentheses, nested calc, unit mixing; a mixed
+  `calc(100% - 20px)` resolves against the containing block at layout time and
+  composes with `var()`.
 - `display: none` (tables and flow content).
 - Colors: hex (3/4/6/8-digit), `rgb()`/`rgba()`/`hsl()`/`hsla()`, named colors.
 - `font-weight` (bold / numeric ≥ 600) — a **real bold face** when the family

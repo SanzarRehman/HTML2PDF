@@ -105,6 +105,9 @@ Works today:
   and `var(--name, fallback)` resolves — including variables that alias other
   variables, fallbacks for missing variables, and component-scoped overrides
   that recolor a subtree by redefining a variable on an ancestor.
+- **`calc()` expressions**: `+ - * /`, parentheses, nested `calc()`, and unit
+  mixing. A mixed `calc(100% - 20px)` resolves against the containing block at
+  layout time (width, padding, margin, offsets); `calc()` composes with `var()`.
 - **Real borders**: per-side `border-top/right/bottom/left` with independent
   width, style, and color — `solid`, `dashed`, and `dotted` (double/groove/
   ridge render solid), `thin/medium/thick`, `currentColor` defaults. Borders
@@ -188,8 +191,8 @@ Out of scope by design (static print target):
 
 Not complete yet (queued, CSS-first):
 
-- `calc()` expressions (mixed `%`/length arithmetic) — the next item up
-  (custom properties and `var()` already work).
+- Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
+  `text-indent`, and `::before`/`::after` generated content — the next item up.
 - `%` **heights** (`%` widths/padding/margins/offsets and `min-width`/
   `min-height`/`max-height` already work; height percentages need a definite
   containing height, which is indefinite in normal flow).
@@ -411,14 +414,13 @@ The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 surface is deferred. The front of the queue, in order (see
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
 
-1. `calc()` expressions (custom properties and `var()` already ship).
-2. Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
+1. Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
    `text-indent`, and `::before`/`::after` generated content.
-3. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.
-4. `display: inline-block` and table `rowspan`.
-5. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
-6. `%` heights (needs a definite containing height) and multi-page overflow
-   clipping.
+2. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.
+3. `display: inline-block` and table `rowspan`.
+4. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
+5. `min()`/`max()`/`clamp()` math functions; `%` heights (needs a definite
+   containing height) and multi-page overflow clipping.
 
 Then, further out: WOFF2 web fonts, SVG, the broader scriptable DOM surface
 (`querySelector`, traversal) on demand, and HTTP server hardening for

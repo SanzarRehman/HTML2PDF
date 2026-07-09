@@ -1,0 +1,16 @@
+<html><head><style>
+  @page { margin: 0.5in; }
+  body { font-size: 11pt; }
+  :root { --w: 200pt; --pad: 8pt; }
+  .fill { width: calc(100% - 100pt); background: #dde5ff; padding: 6pt; margin-bottom: 10pt; }
+  .half { width: calc(50% + 40pt); background: #dfeadd; padding: 6pt; margin-bottom: 10pt; }
+  .prod { margin-left: calc(2 * 30pt); background: #f0e0d8; padding: 6pt; margin-bottom: 10pt; }
+  .div { padding-left: calc(1in / 2); background: #efe6d8; margin-bottom: 10pt; }
+  .var { width: calc(var(--w) + 20pt); padding: var(--pad); background: #dde9e9; }
+</style></head><body>
+<div class="fill">width calc(100% - 100pt): full content minus 100pt.</div>
+<div class="half">width calc(50% + 40pt).</div>
+<div class="prod">margin-left calc(2 * 30pt) = 60pt.</div>
+<div class="div">padding-left calc(1in / 2) = 36pt.</div>
+<div class="var">width calc(var(--w) + 20pt) = 220pt, with variable padding.</div>
+</body></html>

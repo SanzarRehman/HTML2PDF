@@ -1,0 +1,28 @@
+{
+  "fixture": "calc",
+  "layer": "features",
+  "description": "calc() expressions: mixed percent-minus-length and percent-plus-length widths (resolved against the containing width at layout), a unitless multiply for a margin, a divide for padding, and calc() composed with var(). Default base-14 font so text stays searchable.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "re",
+      "f"
+    ],
+    "must_contain_text": [
+      "full",
+      "minus",
+      "variable"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The first box spans the content width minus 100pt.",
+    "The second box is half the content width plus 40pt.",
+    "The third box is indented 60pt (2 × 30pt).",
+    "The fourth box's text is indented 36pt (1in ÷ 2).",
+    "The last box is 220pt wide (var(--w) + 20pt) with 8pt padding from --pad."
+  ]
+}

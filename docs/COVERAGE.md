@@ -83,7 +83,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `max-width` (pt / `%`) | 🟡 | On blocks and images (`max-width: 100%` works). |
 | `object-fit` | ❌ | |
 | Custom properties (`--var`, `var()`) | 🟡 | Custom properties cascade and inherit; `var(--name, fallback)` resolves (nested/aliased vars, component-scoped overrides, fallbacks). Values referencing a var are resolved in the top-down pass, so scoped redefinitions recolor subtrees. No `@property`, no `var()` in selectors, and `!important` custom properties don't override a normal one. |
-| `calc()` | ❌ | |
+| `calc()` | 🟡 | `+ - * /`, parentheses, nested `calc()`, and unit mixing (px/pt/in/cm/mm/%). Resolves to a point + percent pair, so a mixed `calc(100% - 20px)` resolves against the containing block at layout — on `width`/`min-width`/`max-width`, padding, margin, and positioned-box offsets. Point-only calc also works for `height`/`min-height`/`max-height`. `*`/`/` require a unitless operand (per spec). No math functions (`min()`/`max()`/`clamp()`), no unit types beyond length/percent, and calc percentages on the height family aren't resolved (indefinite containing height). |
 | `%` lengths | 🟡 | `width`/`min-width`/`max-width`, padding, and margin on blocks (of the containing width); box offsets on positioned boxes; images. Not yet on `height`/`min-height`/`max-height` (indefinite containing height in flow). |
 
 ## Images

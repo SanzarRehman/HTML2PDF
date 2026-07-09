@@ -862,8 +862,6 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **`calc()`** expressions in the cascade (custom properties + `var()`
-      already shipped, see below).
 - [ ] **CSS text polish**: `letter-spacing`, `word-spacing`,
       `text-transform`, `text-indent`; `::before`/`::after` with text
       `content` (generated content matters for print).
@@ -879,6 +877,24 @@ Details for each item are in the feature list below and in
       `parentNode`/`children` traversal.
 
 #### Recently shipped (2026-07)
+
+- [x] **`calc()` expressions** (2026-07-10): a recursive-descent evaluator
+      (`evaluate_calc` → `CalcParser`: `expr`/`term`/`factor`, `+ - * /`,
+      parens, unary sign) over a value modeled as a **point + percent pair**
+      (`CalcVal::Len { pt, pct }`) plus unitless `Num`. `+`/`-` combine
+      componentwise; `*`/`/` require a unitless operand (spec); nested `calc(`
+      normalizes to `(`. `parse_calc` returns `(Option<pt>, Option<pct>)`, so a
+      mixed `calc(100% - 20px)` sets both — resolved additively at layout
+      (`resolve_len`, a new helper that replaced the old `either/or` width and
+      offset resolution; single-component values stay **byte-identical**).
+      Wired into `parse_len_or_pct` (width/min-width/max-width, padding/margin,
+      offsets), `parse_offset_lp` (signed), and `parse_css_length` (pure-length
+      calc for the height family); shorthands use a paren-aware
+      `split_ws_top_level` so a calc term with spaces stays one component.
+      Composes with `var()` (the deferred value is var-substituted first, then
+      calc-parsed). `features/calc` fixture (31 total). **Not yet done:**
+      `min()`/`max()`/`clamp()`, calc percentages on the height family
+      (indefinite containing height), calc in `<img>` sizing.
 
 - [x] **CSS custom properties + `var()`** (2026-07-10): declaration values that
       declare (`--x: …`) or reference (`var(--x, fallback)`) a custom property

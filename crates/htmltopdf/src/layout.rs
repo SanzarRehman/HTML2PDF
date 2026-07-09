@@ -622,12 +622,8 @@ fn layout_box_children(
                 // `%` offsets resolve against the containing block: width for
                 // left/right; top/bottom `%` need a definite CB height (absent
                 // in flow) and are ignored here.
-                let off_left = block
-                    .offset_left
-                    .or(block.offset_percent.left.map(|p| p / 100.0 * width));
-                let off_right = block
-                    .offset_right
-                    .or(block.offset_percent.right.map(|p| p / 100.0 * width));
+                let off_left = resolve_len(block.offset_left, block.offset_percent.left, width);
+                let off_right = resolve_len(block.offset_right, block.offset_percent.right, width);
                 let dx = off_left.or(off_right.map(|r| -r)).unwrap_or(0.0);
                 let dy = block
                     .offset_top
@@ -684,9 +680,7 @@ fn layout_float(
     // Shrink-to-fit: CSS width (points or percent) if declared, else
     // max-content + own edges, clamped to the containing width. With
     // `border-box` sizing the declared width already includes the padding.
-    let float_width = block
-        .css_width
-        .or(block.css_width_percent.map(|pct| pct / 100.0 * width))
+    let float_width = resolve_len(block.css_width, block.css_width_percent, width)
         .map(|w| {
             if block.border_box {
                 w.max(block.padding.left + block.padding.right)
@@ -770,9 +764,7 @@ fn layout_absolute_box(
         None => (options.margin_left, page_content_width, page_top),
     };
 
-    let width = block
-        .css_width
-        .or(block.css_width_percent.map(|pct| pct / 100.0 * content_width))
+    let width = resolve_len(block.css_width, block.css_width_percent, content_width)
         .map(|w| {
             if block.border_box {
                 w.max(block.padding.left + block.padding.right)
@@ -794,16 +786,18 @@ fn layout_absolute_box(
     // `%` offsets resolve against the containing block: width for left/right;
     // height for top/bottom. The positioned-ancestor CB height isn't tracked,
     // so top/bottom `%` are only resolved when the CB is the page.
-    let pct_w = |p: f32| p / 100.0 * content_width;
     let cb_height = containing.is_none().then_some(top_edge - page_bottom);
-    let off_left = block.offset_left.or(block.offset_percent.left.map(pct_w));
-    let off_right = block.offset_right.or(block.offset_percent.right.map(pct_w));
-    let off_top = block
-        .offset_top
-        .or(block.offset_percent.top.zip(cb_height).map(|(p, h)| p / 100.0 * h));
-    let off_bottom = block
-        .offset_bottom
-        .or(block.offset_percent.bottom.zip(cb_height).map(|(p, h)| p / 100.0 * h));
+    let off_left = resolve_len(block.offset_left, block.offset_percent.left, content_width);
+    let off_right = resolve_len(block.offset_right, block.offset_percent.right, content_width);
+    // top/bottom `%` need the CB height (only known for the page).
+    let off_top = resolve_len(block.offset_top, block.offset_percent.top, cb_height.unwrap_or(0.0))
+        .filter(|_| block.offset_top.is_some() || cb_height.is_some());
+    let off_bottom = resolve_len(
+        block.offset_bottom,
+        block.offset_percent.bottom,
+        cb_height.unwrap_or(0.0),
+    )
+    .filter(|_| block.offset_bottom.is_some() || cb_height.is_some());
 
     let x = if let Some(left) = off_left {
         content_x + left
@@ -1561,6 +1555,17 @@ fn layout_image_box(
     *y -= draw_height;
 }
 
+/// Resolve a length that may carry a point component, a percent component (of
+/// `base`), or both (a mixed `calc()` such as `100% - 20px`). `None` only when
+/// neither is set. For a plain length or plain percent this equals the old
+/// either/or resolution, so single-component values stay byte-identical.
+fn resolve_len(pt: Option<f32>, pct: Option<f32>, base: f32) -> Option<f32> {
+    if pt.is_none() && pct.is_none() {
+        return None;
+    }
+    Some(pt.unwrap_or(0.0) + pct.map_or(0.0, |p| p / 100.0 * base))
+}
+
 /// Fold `%` edges (of the containing block's width) into the point edges. A
 /// side is set in at most one of the two; the point side already carries any
 /// folded border width, so the sum is the used edge.
@@ -1610,17 +1615,11 @@ fn layout_block_box(
     } else {
         padding.left + padding.right + margin.left + margin.right
     };
-    let css_width = block
-        .css_width
-        .or(block.css_width_percent.map(|pct| pct / 100.0 * width));
-    let max_outer = block
-        .max_width
-        .or(block.max_width_percent.map(|pct| pct / 100.0 * width))
-        .map(|max| max + css_extra);
-    let min_outer = block
-        .min_width
-        .or(block.min_width_percent.map(|pct| pct / 100.0 * width))
-        .map(|min| min + css_extra);
+    let css_width = resolve_len(block.css_width, block.css_width_percent, width);
+    let max_outer =
+        resolve_len(block.max_width, block.max_width_percent, width).map(|max| max + css_extra);
+    let min_outer =
+        resolve_len(block.min_width, block.min_width_percent, width).map(|min| min + css_extra);
     let outer = match css_width {
         Some(css) => (css + css_extra).min(width),
         None => width,
@@ -3555,6 +3554,33 @@ mod tests {
         estimate_text_width, justify_offsets, layout_document, table_geometry, PageSize,
         RenderOptions,
     };
+
+    #[test]
+    fn calc_width_mixes_percent_and_length() {
+        // `width: calc(100% - 100pt)` on the ~499pt A4 content width gives a
+        // ~399pt content box; the painted background spans that (no padding).
+        let document = crate::html::parse(
+            "<style>.card { width: calc(100% - 100pt); background: #eee; }</style>\
+             <div class=\"card\">hi</div>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let fill = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                PaintCommand::FillRect(r) => Some(r),
+                _ => None,
+            })
+            .expect("background fill");
+        let content = options.page_size.width - options.margin_left - options.margin_right;
+        assert!(
+            (fill.width - (content - 100.0)).abs() < 1.0,
+            "calc(100% - 100pt) should be ~{}pt, got {}",
+            content - 100.0,
+            fill.width
+        );
+    }
 
     #[test]
     fn min_width_widens_a_narrow_background_box() {

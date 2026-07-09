@@ -2401,6 +2401,14 @@ fn parse_css_percent(value: &str) -> Option<f32> {
 }
 
 fn parse_css_length(value: &str) -> Option<f32> {
+    // A `calc()` reducing to a pure length yields its point value; one that
+    // still carries a percentage can't be represented in a points-only context.
+    if starts_with_calc(value.trim()) {
+        return match parse_calc(value) {
+            (Some(pt), None) => Some(pt),
+            _ => None,
+        };
+    }
     let number = value
         .chars()
         .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
@@ -2423,10 +2431,38 @@ fn parse_css_length(value: &str) -> Option<f32> {
     }
 }
 
+/// Split on whitespace outside parentheses, so a `calc(...)` term (which
+/// contains spaces) stays a single component in a shorthand.
+fn split_ws_top_level(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = None;
+    for (i, c) in value.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = (depth - 1).max(0),
+            _ if c.is_whitespace() && depth == 0 => {
+                if let Some(s) = start.take() {
+                    parts.push(&value[s..i]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        parts.push(&value[s..]);
+    }
+    parts
+}
+
 /// Parse a `margin`/`padding` shorthand into `[top, right, bottom, left]` using
 /// the CSS 1-to-4 value rule. Non-length tokens (e.g. `auto`) become `None`.
 fn parse_box_edges(value: &str) -> [Option<f32>; 4] {
-    let parts: Vec<Option<f32>> = value.split_whitespace().map(parse_css_length).collect();
+    let parts: Vec<Option<f32>> = split_ws_top_level(value).into_iter().map(parse_css_length).collect();
     match parts.as_slice() {
         [a] => [*a, *a, *a, *a],
         [a, b] => [*a, *b, *a, *b],
@@ -2436,19 +2472,274 @@ fn parse_box_edges(value: &str) -> [Option<f32>; 4] {
     }
 }
 
-/// Parse a value that may be a length or a percentage into `(points, percent)`;
-/// exactly one is `Some` (or both `None` for `auto`/invalid).
+/// Parse a value that may be a length, a percentage, or a `calc()` expression
+/// into `(points, percent)`. A plain length/percent sets one component; a
+/// `calc()` mixing them (e.g. `calc(100% - 20px)`) sets both, summed at layout
+/// (`points + percent% × base`). Both `None` for `auto`/invalid.
 fn parse_len_or_pct(value: &str) -> (Option<f32>, Option<f32>) {
+    let value = value.trim();
+    if starts_with_calc(value) {
+        return parse_calc(value);
+    }
     match parse_css_percent(value) {
         Some(pct) => (None, Some(pct)),
         None => (parse_css_length(value), None),
     }
 }
 
+fn starts_with_calc(value: &str) -> bool {
+    let v = value.trim_start();
+    v.len() >= 5 && v[..5].eq_ignore_ascii_case("calc(")
+}
+
+/// A `calc()` sub-value: either a unitless number or a length with independent
+/// point and percentage components (`points + percent% × base`).
+#[derive(Clone, Copy)]
+enum CalcVal {
+    Num(f32),
+    Len { pt: f32, pct: f32 },
+}
+
+impl CalcVal {
+    fn add(self, rhs: CalcVal, sign: f32) -> Option<CalcVal> {
+        match (self, rhs) {
+            (CalcVal::Num(a), CalcVal::Num(b)) => Some(CalcVal::Num(a + sign * b)),
+            (CalcVal::Len { pt: a, pct: p }, CalcVal::Len { pt: b, pct: q }) => Some(CalcVal::Len {
+                pt: a + sign * b,
+                pct: p + sign * q,
+            }),
+            // Adding a bare number to a length is invalid in CSS `calc()`.
+            _ => None,
+        }
+    }
+
+    fn mul(self, rhs: CalcVal) -> Option<CalcVal> {
+        match (self, rhs) {
+            (CalcVal::Num(a), CalcVal::Num(b)) => Some(CalcVal::Num(a * b)),
+            (CalcVal::Num(n), CalcVal::Len { pt, pct }) | (CalcVal::Len { pt, pct }, CalcVal::Num(n)) => {
+                Some(CalcVal::Len { pt: pt * n, pct: pct * n })
+            }
+            // length × length is invalid.
+            _ => None,
+        }
+    }
+
+    fn div(self, rhs: CalcVal) -> Option<CalcVal> {
+        match (self, rhs) {
+            (_, CalcVal::Num(0.0)) => None,
+            (CalcVal::Num(a), CalcVal::Num(b)) => Some(CalcVal::Num(a / b)),
+            (CalcVal::Len { pt, pct }, CalcVal::Num(n)) => Some(CalcVal::Len { pt: pt / n, pct: pct / n }),
+            // dividing by a length is invalid.
+            _ => None,
+        }
+    }
+}
+
+/// Evaluate a `calc()` value into `(points, percent)`: each component is `Some`
+/// when non-zero (or when it is the value's only component), so a pure length,
+/// a pure percent, and a mix all round-trip through the additive resolver.
+fn parse_calc(value: &str) -> (Option<f32>, Option<f32>) {
+    let inner = match evaluate_calc(value) {
+        Some(v) => v,
+        None => return (None, None),
+    };
+    match inner {
+        // A bare number is not a valid length; ignore.
+        CalcVal::Num(_) => (None, None),
+        CalcVal::Len { pt, pct } => {
+            let pt_c = (pt != 0.0 || pct == 0.0).then_some(pt);
+            let pct_c = (pct != 0.0).then_some(pct);
+            (pt_c, pct_c)
+        }
+    }
+}
+
+/// Strip the outer `calc(...)`, normalize nested `calc(` to `(`, and evaluate.
+fn evaluate_calc(value: &str) -> Option<CalcVal> {
+    let value = value.trim();
+    if !starts_with_calc(value) {
+        return None;
+    }
+    // Take the balanced body of the outermost calc().
+    let after = &value[4..]; // includes the leading '('
+    let body = balanced_paren_body(after)?;
+    // Nested calc() acts as a parenthesized sub-expression.
+    let normalized = body.replace("calc(", "(").replace("CALC(", "(");
+    let tokens = tokenize_calc(&normalized)?;
+    let mut parser = CalcParser { tokens: &tokens, pos: 0 };
+    let result = parser.expr()?;
+    (parser.pos == parser.tokens.len()).then_some(result)
+}
+
+/// Given a string starting with `(`, return the substring inside the matching
+/// close paren.
+fn balanced_paren_body(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum CalcTok {
+    Num(CalcVal),
+    Plus,
+    Minus,
+    Mul,
+    Div,
+    LParen,
+    RParen,
+}
+
+fn tokenize_calc(s: &str) -> Option<Vec<CalcTok>> {
+    let bytes = s.as_bytes();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            b'+' => toks.push(CalcTok::Plus),
+            b'-' => toks.push(CalcTok::Minus),
+            b'*' => toks.push(CalcTok::Mul),
+            b'/' => toks.push(CalcTok::Div),
+            b'(' => toks.push(CalcTok::LParen),
+            b')' => toks.push(CalcTok::RParen),
+            _ if c.is_ascii_digit() || c == b'.' => {
+                let start = i;
+                while i < s.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+                    i += 1;
+                }
+                let num: f32 = s[start..i].parse().ok()?;
+                let ustart = i;
+                while i < s.len() && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'%') {
+                    i += 1;
+                }
+                toks.push(CalcTok::Num(calc_unit_value(num, &s[ustart..i])?));
+                continue; // already advanced past the number+unit
+            }
+            _ => return None,
+        }
+        i += 1;
+    }
+    Some(toks)
+}
+
+fn calc_unit_value(num: f32, unit: &str) -> Option<CalcVal> {
+    Some(match unit.to_ascii_lowercase().as_str() {
+        "" => CalcVal::Num(num),
+        "pt" => CalcVal::Len { pt: num, pct: 0.0 },
+        "px" => CalcVal::Len { pt: num * 0.75, pct: 0.0 },
+        "in" => CalcVal::Len { pt: num * 72.0, pct: 0.0 },
+        "cm" => CalcVal::Len { pt: num * 72.0 / 2.54, pct: 0.0 },
+        "mm" => CalcVal::Len { pt: num * 72.0 / 25.4, pct: 0.0 },
+        "%" => CalcVal::Len { pt: 0.0, pct: num },
+        _ => return None,
+    })
+}
+
+/// A recursive-descent parser over `calc()` tokens:
+/// `expr = term (('+'|'-') term)*`, `term = factor (('*'|'/') factor)*`,
+/// `factor = ['+'|'-'] (number | '(' expr ')')`.
+struct CalcParser<'a> {
+    tokens: &'a [CalcTok],
+    pos: usize,
+}
+
+impl CalcParser<'_> {
+    fn peek(&self) -> Option<CalcTok> {
+        self.tokens.get(self.pos).copied()
+    }
+
+    fn expr(&mut self) -> Option<CalcVal> {
+        let mut acc = self.term()?;
+        while let Some(tok) = self.peek() {
+            let sign = match tok {
+                CalcTok::Plus => 1.0,
+                CalcTok::Minus => -1.0,
+                _ => break,
+            };
+            self.pos += 1;
+            let rhs = self.term()?;
+            acc = acc.add(rhs, sign)?;
+        }
+        Some(acc)
+    }
+
+    fn term(&mut self) -> Option<CalcVal> {
+        let mut acc = self.factor()?;
+        while let Some(tok) = self.peek() {
+            match tok {
+                CalcTok::Mul => {
+                    self.pos += 1;
+                    acc = acc.mul(self.factor()?)?;
+                }
+                CalcTok::Div => {
+                    self.pos += 1;
+                    acc = acc.div(self.factor()?)?;
+                }
+                _ => break,
+            }
+        }
+        Some(acc)
+    }
+
+    fn factor(&mut self) -> Option<CalcVal> {
+        match self.peek()? {
+            CalcTok::Plus => {
+                self.pos += 1;
+                self.factor()
+            }
+            CalcTok::Minus => {
+                self.pos += 1;
+                self.factor()?.mul(CalcVal::Num(-1.0))
+            }
+            CalcTok::LParen => {
+                self.pos += 1;
+                let inner = self.expr()?;
+                match self.peek()? {
+                    CalcTok::RParen => {
+                        self.pos += 1;
+                        Some(inner)
+                    }
+                    _ => None,
+                }
+            }
+            CalcTok::Num(v) => {
+                self.pos += 1;
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Parse a box offset (`top`/`right`/`bottom`/`left`) that may be a signed
-/// length or a signed percentage into `(points, percent)`.
+/// length, a signed percentage, or a `calc()` expression into `(points,
+/// percent)`.
 fn parse_offset_lp(value: &str) -> (Option<f32>, Option<f32>) {
     let value = value.trim();
+    // `calc()` handles its own internal signs.
+    if starts_with_calc(value) {
+        return parse_calc(value);
+    }
     let (sign, body) = match value.strip_prefix('-') {
         Some(rest) => (-1.0, rest),
         None => (1.0, value),
@@ -2462,7 +2753,7 @@ fn parse_offset_lp(value: &str) -> (Option<f32>, Option<f32>) {
 /// `([points; 4], [percent; 4])`, both `[top, right, bottom, left]`.
 fn parse_box_edges_lp(value: &str) -> ([Option<f32>; 4], [Option<f32>; 4]) {
     let parts: Vec<(Option<f32>, Option<f32>)> =
-        value.split_whitespace().map(parse_len_or_pct).collect();
+        split_ws_top_level(value).into_iter().map(parse_len_or_pct).collect();
     let e = match parts.as_slice() {
         [a] => [*a, *a, *a, *a],
         [a, b] => [*a, *b, *a, *b],
@@ -4450,14 +4741,18 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             };
         }
         "line-height" => target.cell.line_height = parse_line_height(value),
-        "width" => match parse_css_percent(value) {
-            Some(pct) => target.cell.width_percent = Some(pct),
-            None => target.cell.width = parse_css_length(value),
-        },
-        "max-width" => match parse_css_percent(value) {
-            Some(pct) => target.cell.max_width_percent = Some(pct),
-            None => target.cell.max_width = parse_css_length(value),
-        },
+        "width" => {
+            // `calc()` may set both a point and a percent component (summed at
+            // layout); a plain length or percent sets one.
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.width = pt;
+            target.cell.width_percent = pct;
+        }
+        "max-width" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.max_width = pt;
+            target.cell.max_width_percent = pct;
+        }
         "min-width" => {
             let (pt, pct) = parse_len_or_pct(value);
             let s = target.cell.sizing.get_or_insert_with(Default::default);
@@ -6128,6 +6423,36 @@ mod tests {
         assert_eq!(plain.padding_percent, crate::box_tree::EdgesPercent::default());
         assert_eq!(plain.min_width, None);
         assert!((plain.padding.left - 6.0).abs() < 0.01, "8px → 6pt");
+    }
+
+    #[test]
+    fn evaluates_calc_expressions() {
+        use super::parse_calc;
+        let approx = |a: Option<f32>, b: Option<f32>| match (a, b) {
+            (Some(x), Some(y)) => (x - y).abs() < 0.01,
+            (None, None) => true,
+            _ => false,
+        };
+        let check = |expr: &str, pt: Option<f32>, pct: Option<f32>| {
+            let (gpt, gpct) = parse_calc(expr);
+            assert!(approx(gpt, pt) && approx(gpct, pct), "{expr} → ({gpt:?}, {gpct:?})");
+        };
+        // Pure length (15px = 11.25pt), pure percent, and mixed.
+        check("calc(10px + 5px)", Some(11.25), None);
+        check("calc(50% - 10%)", None, Some(40.0));
+        check("calc(100% - 20px)", Some(-15.0), Some(100.0));
+        // Multiplication and division by a unitless number.
+        check("calc(2 * 30pt)", Some(60.0), None);
+        check("calc(1in / 2)", Some(36.0), None);
+        // Parentheses and precedence: (10+20)*2 = 60, not 10+40.
+        check("calc((10pt + 20pt) * 2)", Some(60.0), None);
+        check("calc(10pt + 20pt * 2)", Some(50.0), None);
+        // Nested calc() acts as a parenthesized sub-expression.
+        check("calc(calc(40pt) + 5pt)", Some(45.0), None);
+        // Invalid: length × length, a bare number as a length, divide by zero.
+        check("calc(10pt * 20pt)", None, None);
+        check("calc(5 + 3)", None, None);
+        check("calc(100% / 0)", None, None);
     }
 
     #[test]
