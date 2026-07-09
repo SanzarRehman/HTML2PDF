@@ -73,6 +73,41 @@ pub struct TableCell {
     pub runs: Vec<crate::box_tree::InlineRun>,
 }
 
+/// Rarely-set sizing declarations, boxed on [`CellStyle`] so the common cell
+/// (which sets none of these) pays a single pointer rather than a dozen
+/// `Option<f32>` slots — the 22k-cell spreadsheet path stays RAM-flat, the same
+/// tactic as the boxed border sides. All percentages are of the containing
+/// block (width for `min-width`/padding/margin/left/right offsets; height for
+/// top/bottom offsets), resolved at layout time. Padding/margin/offset arrays
+/// are ordered `[top, right, bottom, left]`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SizingCss {
+    pub min_width: Option<f32>,
+    pub min_width_percent: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_height: Option<f32>,
+    pub padding_percent: [Option<f32>; 4],
+    pub margin_percent: [Option<f32>; 4],
+    pub offset_percent: [Option<f32>; 4],
+}
+
+impl SizingCss {
+    /// Cascade merge: a later layer's set sub-properties win, field by field, so
+    /// setting only `min-width` in one rule does not wipe a `max-height` from
+    /// another (mirrors the per-side border merge).
+    fn merge(&mut self, other: SizingCss) {
+        self.min_width = other.min_width.or(self.min_width);
+        self.min_width_percent = other.min_width_percent.or(self.min_width_percent);
+        self.min_height = other.min_height.or(self.min_height);
+        self.max_height = other.max_height.or(self.max_height);
+        for i in 0..4 {
+            self.padding_percent[i] = other.padding_percent[i].or(self.padding_percent[i]);
+            self.margin_percent[i] = other.margin_percent[i].or(self.margin_percent[i]);
+            self.offset_percent[i] = other.offset_percent[i].or(self.offset_percent[i]);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellStyle {
     pub align: Option<TextAlign>,
@@ -176,6 +211,9 @@ pub struct CellStyle {
     pub offset_right: Option<f32>,
     pub offset_bottom: Option<f32>,
     pub offset_left: Option<f32>,
+    /// Boxed sizing extras (`min-width`, `min/max-height`, `%` padding/margin/
+    /// offsets). `None` for the overwhelmingly common cell that sets none.
+    pub sizing: Option<Box<SizingCss>>,
 }
 
 impl Default for CellStyle {
@@ -238,6 +276,7 @@ impl Default for CellStyle {
             offset_right: None,
             offset_bottom: None,
             offset_left: None,
+            sizing: None,
         }
     }
 }
@@ -1200,6 +1239,15 @@ fn build_block(
         column_gap: own.gap.unwrap_or(0.0),
         row_gap: own.row_gap.unwrap_or(0.0),
     });
+    // Boxed sizing extras (`min-width`, `min/max-height`, `%` padding/margin/
+    // offsets). Almost always `None`, so the mapping is cheap.
+    let sizing = own.sizing.as_deref();
+    let edges_pct = |arr: [Option<f32>; 4]| crate::box_tree::EdgesPercent {
+        top: arr[0],
+        right: arr[1],
+        bottom: arr[2],
+        left: arr[3],
+    };
     Some(crate::box_tree::BlockBox {
         kind,
         margin,
@@ -1227,6 +1275,17 @@ fn build_block(
         max_width: own.max_width,
         max_width_percent: own.max_width_percent,
         css_height: own.height,
+        min_width: sizing.and_then(|s| s.min_width),
+        min_width_percent: sizing.and_then(|s| s.min_width_percent),
+        min_height: sizing.and_then(|s| s.min_height),
+        max_height: sizing.and_then(|s| s.max_height),
+        padding_percent: sizing
+            .map(|s| edges_pct(s.padding_percent))
+            .unwrap_or_default(),
+        margin_percent: sizing
+            .map(|s| edges_pct(s.margin_percent))
+            .unwrap_or_default(),
+        overflow_hidden: own.overflow == Some(Overflow::Hidden),
         center: own.margin_left_auto && own.margin_right_auto,
         line_height: own.line_height,
         rtl: base_rtl,
@@ -1236,6 +1295,9 @@ fn build_block(
         offset_right: own.offset_right,
         offset_bottom: own.offset_bottom,
         offset_left: own.offset_left,
+        offset_percent: sizing
+            .map(|s| edges_pct(s.offset_percent))
+            .unwrap_or_default(),
         anchor: dom
             .node(id)
             .attr("id")
@@ -2140,6 +2202,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         offset_right: own.offset_right,
         offset_bottom: own.offset_bottom,
         offset_left: own.offset_left,
+        sizing: own.sizing.clone(),
     }
 }
 
@@ -2211,15 +2274,6 @@ fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
 }
 
 /// A CSS offset length that may be negative (`top: -4pt`), for position offsets.
-fn parse_css_offset(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if let Some(rest) = value.strip_prefix('-') {
-        parse_css_length(rest).map(|v| -v)
-    } else {
-        parse_css_length(value)
-    }
-}
-
 /// First usable family from a CSS `font-family` stack: quotes stripped,
 /// generic keywords kept (resolved at render time). `inherit`/empty → `None`.
 fn parse_font_family(value: &str) -> Option<String> {
@@ -2300,6 +2354,77 @@ fn parse_box_edges(value: &str) -> [Option<f32>; 4] {
         [a, b, c] => [*a, *b, *c, *b],
         [a, b, c, d, ..] => [*a, *b, *c, *d],
         [] => [None; 4],
+    }
+}
+
+/// Parse a value that may be a length or a percentage into `(points, percent)`;
+/// exactly one is `Some` (or both `None` for `auto`/invalid).
+fn parse_len_or_pct(value: &str) -> (Option<f32>, Option<f32>) {
+    match parse_css_percent(value) {
+        Some(pct) => (None, Some(pct)),
+        None => (parse_css_length(value), None),
+    }
+}
+
+/// Parse a box offset (`top`/`right`/`bottom`/`left`) that may be a signed
+/// length or a signed percentage into `(points, percent)`.
+fn parse_offset_lp(value: &str) -> (Option<f32>, Option<f32>) {
+    let value = value.trim();
+    let (sign, body) = match value.strip_prefix('-') {
+        Some(rest) => (-1.0, rest),
+        None => (1.0, value),
+    };
+    let (pt, pct) = parse_len_or_pct(body);
+    (pt.map(|v| v * sign), pct.map(|v| v * sign))
+}
+
+/// Like [`parse_box_edges`] but keeps `%` sides separate from length sides, so a
+/// shorthand mixing units (`padding: 5% 10px`) resolves each correctly. Returns
+/// `([points; 4], [percent; 4])`, both `[top, right, bottom, left]`.
+fn parse_box_edges_lp(value: &str) -> ([Option<f32>; 4], [Option<f32>; 4]) {
+    let parts: Vec<(Option<f32>, Option<f32>)> =
+        value.split_whitespace().map(parse_len_or_pct).collect();
+    let e = match parts.as_slice() {
+        [a] => [*a, *a, *a, *a],
+        [a, b] => [*a, *b, *a, *b],
+        [a, b, c] => [*a, *b, *c, *b],
+        [a, b, c, d, ..] => [*a, *b, *c, *d],
+        [] => [(None, None); 4],
+    };
+    let mut pt = [None; 4];
+    let mut pct = [None; 4];
+    for i in 0..4 {
+        pt[i] = e[i].0;
+        pct[i] = e[i].1;
+    }
+    (pt, pct)
+}
+
+/// Which boxed `SizingCss` percent array a declaration writes to.
+#[derive(Clone, Copy)]
+enum PctGroup {
+    Padding,
+    Margin,
+    Offset,
+}
+
+/// Write a percent value into one side of a boxed sizing array (index order
+/// `[top, right, bottom, left]`), allocating the `SizingCss` box only when a
+/// `%` is actually present — so plain length declarations never grow a cell's
+/// footprint. A `None` on a side that has a box clears any earlier `%` in the
+/// same cascade layer (last-declaration-wins).
+fn set_pct_slot(cell: &mut CellStyle, group: PctGroup, index: usize, pct: Option<f32>) {
+    fn arr(s: &mut SizingCss, group: PctGroup) -> &mut [Option<f32>; 4] {
+        match group {
+            PctGroup::Padding => &mut s.padding_percent,
+            PctGroup::Margin => &mut s.margin_percent,
+            PctGroup::Offset => &mut s.offset_percent,
+        }
+    }
+    if pct.is_some() {
+        arr(cell.sizing.get_or_insert_with(Default::default), group)[index] = pct;
+    } else if let Some(s) = cell.sizing.as_deref_mut() {
+        arr(s, group)[index] = None;
     }
 }
 
@@ -4009,12 +4134,26 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         // `auto` (and any non-integer) stays `None`; fractional z-indexes are
         // invalid CSS and likewise ignored.
         "z-index" => target.cell.z_index = value.trim().parse::<i32>().ok(),
-        "top" => target.cell.offset_top = parse_css_offset(value),
-        "right" if parse_css_offset(value).is_some() => {
-            target.cell.offset_right = parse_css_offset(value);
+        "top" => {
+            let (pt, pct) = parse_offset_lp(value);
+            target.cell.offset_top = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Offset, 0, pct);
         }
-        "bottom" => target.cell.offset_bottom = parse_css_offset(value),
-        "left" => target.cell.offset_left = parse_css_offset(value),
+        "right" if parse_offset_lp(value) != (None, None) => {
+            let (pt, pct) = parse_offset_lp(value);
+            target.cell.offset_right = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Offset, 1, pct);
+        }
+        "bottom" => {
+            let (pt, pct) = parse_offset_lp(value);
+            target.cell.offset_bottom = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Offset, 2, pct);
+        }
+        "left" => {
+            let (pt, pct) = parse_offset_lp(value);
+            target.cell.offset_left = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Offset, 3, pct);
+        }
         "float" => {
             target.cell.float_dir = match value.trim().to_ascii_lowercase().as_str() {
                 "left" => Some(FloatDir::Left),
@@ -4130,37 +4269,93 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             Some(pct) => target.cell.max_width_percent = Some(pct),
             None => target.cell.max_width = parse_css_length(value),
         },
+        "min-width" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            let s = target.cell.sizing.get_or_insert_with(Default::default);
+            s.min_width = pt;
+            s.min_width_percent = pct;
+        }
+        "min-height" => {
+            // `%` needs a definite containing height (indefinite in flow); points
+            // only for now.
+            if let Some(pt) = parse_css_length(value) {
+                target.cell.sizing.get_or_insert_with(Default::default).min_height = Some(pt);
+            }
+        }
+        "max-height" => {
+            if let Some(pt) = parse_css_length(value) {
+                target.cell.sizing.get_or_insert_with(Default::default).max_height = Some(pt);
+            }
+        }
         "height" => target.cell.height = parse_css_length(value),
         "color" => target.cell.color = parse_css_color(value),
         "background-color" => target.cell.background_color = parse_css_color(value),
         "background" => target.cell.background_color = parse_css_background_color(value),
-        "padding-left" => target.cell.padding_left = parse_css_length(value),
-        "padding-right" => target.cell.padding_right = parse_css_length(value),
-        "padding-top" => target.cell.padding_top = parse_css_length(value),
-        "padding-bottom" => target.cell.padding_bottom = parse_css_length(value),
+        "padding-top" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.padding_top = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Padding, 0, pct);
+        }
+        "padding-right" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.padding_right = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Padding, 1, pct);
+        }
+        "padding-bottom" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.padding_bottom = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Padding, 2, pct);
+        }
+        "padding-left" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.padding_left = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Padding, 3, pct);
+        }
         "padding" => {
-            let [top, right, bottom, left] = parse_box_edges(value);
-            target.cell.padding_top = top;
-            target.cell.padding_right = right;
-            target.cell.padding_bottom = bottom;
-            target.cell.padding_left = left;
+            let (pt, pct) = parse_box_edges_lp(value);
+            target.cell.padding_top = pt[0];
+            target.cell.padding_right = pt[1];
+            target.cell.padding_bottom = pt[2];
+            target.cell.padding_left = pt[3];
+            for (i, &p) in pct.iter().enumerate() {
+                set_pct_slot(&mut target.cell, PctGroup::Padding, i, p);
+            }
         }
         "margin-left" if value.trim().eq_ignore_ascii_case("auto") => {
             target.cell.margin_left_auto = true;
         }
-        "margin-left" => target.cell.margin_left = parse_css_length(value),
+        "margin-left" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.margin_left = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Margin, 3, pct);
+        }
         "margin-right" if value.trim().eq_ignore_ascii_case("auto") => {
             target.cell.margin_right_auto = true;
         }
-        "margin-right" => target.cell.margin_right = parse_css_length(value),
-        "margin-top" => target.cell.margin_top = parse_css_length(value),
-        "margin-bottom" => target.cell.margin_bottom = parse_css_length(value),
+        "margin-right" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.margin_right = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Margin, 1, pct);
+        }
+        "margin-top" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.margin_top = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Margin, 0, pct);
+        }
+        "margin-bottom" => {
+            let (pt, pct) = parse_len_or_pct(value);
+            target.cell.margin_bottom = pt;
+            set_pct_slot(&mut target.cell, PctGroup::Margin, 2, pct);
+        }
         "margin" => {
-            let [top, right, bottom, left] = parse_box_edges(value);
-            target.cell.margin_top = top;
-            target.cell.margin_right = right;
-            target.cell.margin_bottom = bottom;
-            target.cell.margin_left = left;
+            let (ptv, pctv) = parse_box_edges_lp(value);
+            target.cell.margin_top = ptv[0];
+            target.cell.margin_right = ptv[1];
+            target.cell.margin_bottom = ptv[2];
+            target.cell.margin_left = ptv[3];
+            for (i, &p) in pctv.iter().enumerate() {
+                set_pct_slot(&mut target.cell, PctGroup::Margin, i, p);
+            }
             // `margin: 0 auto` (and friends): detect `auto` in the expanded
             // right/left slots of the 1-to-4 shorthand.
             let parts: Vec<&str> = value.split_whitespace().collect();
@@ -4648,6 +4843,13 @@ impl CellStyle {
         self.offset_right = other.offset_right.or(self.offset_right);
         self.offset_bottom = other.offset_bottom.or(self.offset_bottom);
         self.offset_left = other.offset_left.or(self.offset_left);
+        self.sizing = match (self.sizing.take(), other.sizing) {
+            (Some(mut a), Some(b)) => {
+                a.merge(*b);
+                Some(a)
+            }
+            (a, b) => b.or(a),
+        };
     }
 }
 
@@ -5680,6 +5882,85 @@ mod tests {
             print_face.sources,
             vec![FontFaceSource::Url { url: "print.ttf".into(), format: None }]
         );
+    }
+
+    #[test]
+    fn parses_percent_edges_and_min_max_sizing() {
+        let document = parse(
+            r#"
+            <style>
+              .card {
+                padding: 5% 10px;
+                margin-left: 25%;
+                min-width: 40%;
+                min-height: 120px;
+                max-height: 200px;
+              }
+              .abs { position: absolute; top: 10%; left: 5%; }
+              .plain { padding: 8px; margin: 4px; }
+            </style>
+            <div class="card">sized</div>
+            <div class="abs">positioned</div>
+            <div class="plain">plain</div>
+            "#,
+        );
+        let flow = document.flow.expect("flow doc");
+        let blocks = flow_blocks(&flow);
+
+        let card = blocks
+            .iter()
+            .find(|b| block_text(b) == "sized")
+            .expect("card block");
+        // `padding: 5% 10px` → top/bottom 5% (percent), right/left 10px (points).
+        assert_eq!(card.padding_percent.top, Some(5.0));
+        assert_eq!(card.padding_percent.bottom, Some(5.0));
+        assert_eq!(card.padding_percent.right, None);
+        assert_eq!(card.padding_percent.left, None);
+        assert!((card.padding.right - 7.5).abs() < 0.01, "10px → 7.5pt");
+        // `margin-left: 25%` is a percent side; the point margin stays 0.
+        assert_eq!(card.margin_percent.left, Some(25.0));
+        assert_eq!(card.min_width_percent, Some(40.0));
+        assert!((card.min_height.unwrap() - 90.0).abs() < 0.01, "120px → 90pt");
+        assert!((card.max_height.unwrap() - 150.0).abs() < 0.01, "200px → 150pt");
+
+        let abs = blocks
+            .iter()
+            .find(|b| block_text(b) == "positioned")
+            .expect("abs block");
+        assert_eq!(abs.offset_percent.top, Some(10.0));
+        assert_eq!(abs.offset_percent.left, Some(5.0));
+
+        // A plain length-only block carries no boxed sizing extras (RAM stays
+        // flat for the common case).
+        let plain = blocks
+            .iter()
+            .find(|b| block_text(b) == "plain")
+            .expect("plain block");
+        assert_eq!(plain.padding_percent, crate::box_tree::EdgesPercent::default());
+        assert_eq!(plain.min_width, None);
+        assert!((plain.padding.left - 6.0).abs() < 0.01, "8px → 6pt");
+    }
+
+    #[test]
+    fn percent_padding_cascade_merges_per_property() {
+        // A high-priority rule setting only `min-width` must not wipe a
+        // lower-priority `max-height` from another rule (boxed-sizing merge).
+        let document = parse(
+            r#"
+            <style>
+              .box { max-height: 100px; }
+              div.box { min-width: 50%; }
+            </style>
+            <div class="box">merged</div>
+            "#,
+        );
+        let flow = document.flow.expect("flow doc");
+        let block = flow_blocks(&flow)
+            .into_iter()
+            .find(|b| block_text(b) == "merged")
+            .expect("box block");
+        assert_eq!(block.min_width_percent, Some(50.0));
+        assert!((block.max_height.unwrap() - 75.0).abs() < 0.01, "both survive");
     }
 
     #[test]

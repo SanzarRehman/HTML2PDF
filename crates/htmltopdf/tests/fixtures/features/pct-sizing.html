@@ -1,0 +1,39 @@
+<html><head><style>
+  @page { margin: 0.5in; }
+  body { font-size: 11pt; }
+
+  /* % padding resolves against the containing width; % margin centers via
+     asymmetric side. min-width clamps a narrow box up. */
+  .pad { background: #eef; padding: 4% 8%; margin-bottom: 12pt; }
+  .narrow { width: 80pt; min-width: 260pt; background: #dfd;
+            padding: 6pt; margin-bottom: 12pt; }
+  .indent { margin-left: 15%; background: #fed; padding: 6pt;
+            margin-bottom: 12pt; }
+
+  /* overflow: hidden + a fixed height caps and clips the content. */
+  .clip { height: 40pt; overflow: hidden; background: #fee;
+          border: 1px solid #900; padding: 4pt; margin-bottom: 12pt; }
+
+  /* max-height with overflow: hidden. */
+  .capped { max-height: 30pt; overflow: hidden; background: #eef0ff;
+            padding: 4pt; }
+
+  /* % offsets on a positioned box. */
+  .rel { position: relative; left: 10%; background: #ffd; padding: 4pt; }
+</style></head><body>
+<div class="pad">Percentage padding: this box has 4% vertical and 8% horizontal
+padding, resolved against the containing block width.</div>
+
+<div class="narrow">min-width widens this box: the declared width is 80pt but
+min-width 260pt wins.</div>
+
+<div class="indent">This block is pushed in by a 15% left margin.</div>
+
+<div class="clip"><p>Clipped line one.</p><p>Clipped line two.</p>
+<p>Clipped line three should be cut off.</p><p>And line four.</p></div>
+
+<div class="capped"><p>max-height caps this.</p><p>Second line is clipped.</p>
+<p>Third line gone.</p></div>
+
+<div class="rel">Relatively positioned, shifted right by 10%.</div>
+</body></html>

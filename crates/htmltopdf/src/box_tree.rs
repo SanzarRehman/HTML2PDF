@@ -141,8 +141,26 @@ pub struct BlockBox {
     pub max_width_percent: Option<f32>,
     /// CSS `height` (points, content-box). Treated as a *minimum* box height:
     /// the block extends to it when its content is shorter (content taller
-    /// than the height overflows visibly, as in CSS `overflow: visible`).
+    /// than the height overflows visibly, as in CSS `overflow: visible`) —
+    /// unless `overflow_hidden`, when it also caps and clips the box.
     pub css_height: Option<f32>,
+    /// CSS `min-width` (points / percent of the containing width). Clamps the
+    /// used width up, winning over `max-width`.
+    pub min_width: Option<f32>,
+    pub min_width_percent: Option<f32>,
+    /// CSS `min-height` (points): extends the box down like `css_height`.
+    pub min_height: Option<f32>,
+    /// CSS `max-height` (points): with `overflow_hidden`, caps and clips the
+    /// box height on its start page.
+    pub max_height: Option<f32>,
+    /// `%` padding / margin (of the containing block's width), resolved and
+    /// folded into `padding` / `margin` at layout time. Point values live in
+    /// `Edges`; a side is set in at most one of the two.
+    pub padding_percent: EdgesPercent,
+    pub margin_percent: EdgesPercent,
+    /// `overflow: hidden` (or `clip`): content past a definite box height is
+    /// clipped rather than overflowing.
+    pub overflow_hidden: bool,
     /// `margin-left: auto` + `margin-right: auto` + a width = centered.
     pub center: bool,
     /// CSS `line-height` (inherited): overrides the default leading of this
@@ -159,6 +177,9 @@ pub struct BlockBox {
     pub offset_right: Option<f32>,
     pub offset_bottom: Option<f32>,
     pub offset_left: Option<f32>,
+    /// `%` box offsets (of the containing block: width for left/right, height
+    /// for top/bottom). Resolved at layout time on positioned boxes.
+    pub offset_percent: EdgesPercent,
     /// The element's HTML `id`, kept as a destination for `#fragment` links.
     pub anchor: Option<String>,
     pub children: Vec<BoxChild>,
@@ -191,6 +212,19 @@ pub struct Edges {
     pub right: f32,
     pub bottom: f32,
     pub left: f32,
+}
+
+/// Per-side percentages (of the containing block) for edges declared with a
+/// `%` unit — padding/margin (of the containing width) and box offsets. `None`
+/// = the side used a length (in `Edges` / `offset_*`) or was unset. Resolved
+/// and folded into the point values at layout time, when the containing block
+/// dimensions are known.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EdgesPercent {
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
 }
 
 /// A contiguous run of inline text sharing one computed style. Text is stored

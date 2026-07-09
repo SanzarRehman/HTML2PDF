@@ -96,6 +96,11 @@ Works today:
   alignment (including `text-align: justify`), text decoration
   (underline/line-through), margins, padding (with vertical margin collapse),
   `line-height`, and block backgrounds.
+- **Percentage lengths and min/max sizing**: `%` widths, padding, margins, and
+  positioned-box offsets resolve against the containing block;
+  `min-width`/`max-width` (points or `%`) and `min-height`/`max-height` (points)
+  clamp the box; `overflow: hidden` with a fixed height clips content to the
+  border box; `box-sizing: border-box`.
 - **Real borders**: per-side `border-top/right/bottom/left` with independent
   width, style, and color — `solid`, `dashed`, and `dotted` (double/groove/
   ridge render solid), `thin/medium/thick`, `currentColor` defaults. Borders
@@ -179,9 +184,10 @@ Out of scope by design (static print target):
 
 Not complete yet (queued, CSS-first):
 
-- `%` heights, margins, padding, and offsets; `min-width`/`min-height`/
-  `max-height`; `overflow: hidden` clipping — the next item up.
-- `calc()` and custom properties (`var()`) in the cascade.
+- `calc()` and custom properties (`var()`) in the cascade — the next item up.
+- `%` **heights** (`%` widths/padding/margins/offsets and `min-width`/
+  `min-height`/`max-height` already work; height percentages need a definite
+  containing height, which is indefinite in normal flow).
 - `::before`/`::after` generated `content`, `letter-spacing`, `word-spacing`,
   `text-transform`, `text-indent`.
 - Backgrounds beyond a solid color: `background-image`, `linear-gradient()`,
@@ -400,14 +406,14 @@ The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 surface is deferred. The front of the queue, in order (see
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
 
-1. `%` heights/margins/padding/offsets, `min-width`/`min-height`/`max-height`,
-   and `overflow: hidden` clipping.
-2. `calc()` and custom properties (`var()`).
-3. Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
+1. `calc()` and custom properties (`var()`).
+2. Text polish: `letter-spacing`, `word-spacing`, `text-transform`,
    `text-indent`, and `::before`/`::after` generated content.
-4. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.
-5. `display: inline-block` and table `rowspan`.
-6. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
+3. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.
+4. `display: inline-block` and table `rowspan`.
+5. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
+6. `%` heights (needs a definite containing height) and multi-page overflow
+   clipping.
 
 Then, further out: WOFF2 web fonts, SVG, the broader scriptable DOM surface
 (`querySelector`, traversal) on demand, and HTTP server hardening for

@@ -619,10 +619,16 @@ fn layout_box_children(
             {
                 // Visual offset only: lay out at the shifted position, then put
                 // the flow cursor back where an unshifted box would have left it.
-                let dx = block
+                // `%` offsets resolve against the containing block: width for
+                // left/right; top/bottom `%` need a definite CB height (absent
+                // in flow) and are ignored here.
+                let off_left = block
                     .offset_left
-                    .or(block.offset_right.map(|r| -r))
-                    .unwrap_or(0.0);
+                    .or(block.offset_percent.left.map(|p| p / 100.0 * width));
+                let off_right = block
+                    .offset_right
+                    .or(block.offset_percent.right.map(|p| p / 100.0 * width));
+                let dx = off_left.or(off_right.map(|r| -r)).unwrap_or(0.0);
                 let dy = block
                     .offset_top
                     .or(block.offset_bottom.map(|b| -b))
@@ -785,16 +791,30 @@ fn layout_absolute_box(
     let item = FlexItem::Block(block);
     let height = item.measure_height(width, options);
 
-    let x = if let Some(left) = block.offset_left {
+    // `%` offsets resolve against the containing block: width for left/right;
+    // height for top/bottom. The positioned-ancestor CB height isn't tracked,
+    // so top/bottom `%` are only resolved when the CB is the page.
+    let pct_w = |p: f32| p / 100.0 * content_width;
+    let cb_height = containing.is_none().then_some(top_edge - page_bottom);
+    let off_left = block.offset_left.or(block.offset_percent.left.map(pct_w));
+    let off_right = block.offset_right.or(block.offset_percent.right.map(pct_w));
+    let off_top = block
+        .offset_top
+        .or(block.offset_percent.top.zip(cb_height).map(|(p, h)| p / 100.0 * h));
+    let off_bottom = block
+        .offset_bottom
+        .or(block.offset_percent.bottom.zip(cb_height).map(|(p, h)| p / 100.0 * h));
+
+    let x = if let Some(left) = off_left {
         content_x + left
-    } else if let Some(right) = block.offset_right {
+    } else if let Some(right) = off_right {
         content_x + content_width - right - width
     } else {
         static_x
     };
-    let top = if let Some(offset) = block.offset_top {
+    let top = if let Some(offset) = off_top {
         top_edge - offset
-    } else if let Some(offset) = block.offset_bottom {
+    } else if let Some(offset) = off_bottom {
         page_bottom + offset + height
     } else {
         cursor_y
@@ -1541,6 +1561,23 @@ fn layout_image_box(
     *y -= draw_height;
 }
 
+/// Fold `%` edges (of the containing block's width) into the point edges. A
+/// side is set in at most one of the two; the point side already carries any
+/// folded border width, so the sum is the used edge.
+fn resolve_edges(
+    base: &crate::box_tree::Edges,
+    pct: &crate::box_tree::EdgesPercent,
+    cb_width: f32,
+) -> crate::box_tree::Edges {
+    let add = |b: f32, p: Option<f32>| b + p.map_or(0.0, |p| p / 100.0 * cb_width);
+    crate::box_tree::Edges {
+        top: add(base.top, pct.top),
+        right: add(base.right, pct.right),
+        bottom: add(base.bottom, pct.bottom),
+        left: add(base.left, pct.left),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_block_box(
     block: &crate::box_tree::BlockBox,
@@ -1554,16 +1591,24 @@ fn layout_block_box(
     containing: Option<ContainingBlock>,
     options: &RenderOptions,
 ) {
+    // Resolve `%` padding/margin against the containing block's width (the
+    // incoming `width`, before any own-width narrowing below). The point sides
+    // already include folded border widths; a `%` side had a 0 point value, so
+    // adding the resolved percentage reconstructs the used edge.
+    let cb_width = width;
+    let padding = resolve_edges(&block.padding, &block.padding_percent, cb_width);
+    let margin = resolve_edges(&block.margin, &block.margin_percent, cb_width);
+
     // An explicit CSS `width` (content-box; points or a percentage of the
     // containing block) narrows the block to `width + padding + margins`,
-    // clamped to the containing width; `max-width` clamps further. With
-    // `margin: auto` on both sides, the leftover space centers the box.
-    // With `box-sizing: border-box`, the declared width already covers padding
-    // and borders, so only the margins are added on top of it.
+    // clamped to the containing width; `min-width`/`max-width` clamp further
+    // (min wins over max). With `margin: auto` on both sides, the leftover
+    // space centers the box. With `box-sizing: border-box`, the declared width
+    // already covers padding and borders, so only the margins add on top.
     let css_extra = if block.border_box {
-        block.margin.left + block.margin.right
+        margin.left + margin.right
     } else {
-        block.padding.left + block.padding.right + block.margin.left + block.margin.right
+        padding.left + padding.right + margin.left + margin.right
     };
     let css_width = block
         .css_width
@@ -1572,12 +1617,22 @@ fn layout_block_box(
         .max_width
         .or(block.max_width_percent.map(|pct| pct / 100.0 * width))
         .map(|max| max + css_extra);
+    let min_outer = block
+        .min_width
+        .or(block.min_width_percent.map(|pct| pct / 100.0 * width))
+        .map(|min| min + css_extra);
     let outer = match css_width {
         Some(css) => (css + css_extra).min(width),
         None => width,
     };
     let outer = match max_outer {
         Some(max) => outer.min(max),
+        None => outer,
+    };
+    // `min-width` wins over `max-width`; clamp to the containing width so the
+    // box never draws off the page.
+    let outer = match min_outer {
+        Some(min) => outer.max(min).min(width),
         None => outer,
     };
     let x = if block.center && outer < width {
@@ -1597,28 +1652,27 @@ fn layout_block_box(
     }
 
     // This block's top margin collapses with the margin carried from above.
-    *carried = carried.max(block.margin.top);
+    *carried = carried.max(margin.top);
 
     let decorated = block.border.is_some() || block.background.is_some();
-    let inner_x = x + block.margin.left + block.padding.left;
+    let inner_x = x + margin.left + padding.left;
     let inner_width =
-        (width - block.margin.left - block.margin.right - block.padding.left - block.padding.right)
-            .max(1.0);
+        (width - margin.left - margin.right - padding.left - padding.right).max(1.0);
 
     // Top padding — or any border/background — is a barrier: it ends the collapse
     // and separates the block's margin from its first child's margin.
-    if block.padding.top > 0.0 || decorated {
+    if padding.top > 0.0 || decorated {
         flush_margin(y, carried);
-        *y -= block.padding.top;
+        *y -= padding.top;
     }
 
     // Record the border box's top edge so its background/border can be painted
     // per page fragment once the content height is known.
     let start_page = pages.len() - 1;
     let start_index = pages[start_page].commands.len();
-    let start_y = *y + block.padding.top;
-    let box_x = x + block.margin.left;
-    let box_width = (width - block.margin.left - block.margin.right).max(1.0);
+    let start_y = *y + padding.top;
+    let box_x = x + margin.left;
+    let box_width = (width - margin.left - margin.right).max(1.0);
 
     // A positioned block (relative/absolute/fixed) establishes the containing
     // block that its absolutely-positioned descendants resolve offsets against.
@@ -1665,27 +1719,58 @@ fn layout_block_box(
 
     // Bottom padding (or a border/background) likewise contains the last child's
     // margin rather than letting it collapse out of the box.
-    if block.padding.bottom > 0.0 || decorated {
+    if padding.bottom > 0.0 || decorated {
         flush_margin(y, carried);
-        *y -= block.padding.bottom;
+        *y -= padding.bottom;
     }
 
-    // CSS `height`: extend the border box to at least the declared height when
-    // the content is shorter (an empty background-layer div, a fixed-height
-    // hero band). Taller content simply overflows, like `overflow: visible`.
+    // Definite box height. `height`/`min-height` extend the border box down to
+    // at least that height when the content is shorter; taller content
+    // overflows visibly (`overflow: visible`) — unless `overflow: hidden`,
+    // where `height`/`max-height` also cap the box and its content is clipped.
     // No pagination of the extension: a fragment never grows past its page.
-    if let Some(height) = block.css_height {
-        flush_margin(y, carried);
-        // `border-box` sizing: the declared height already includes padding
-        // and borders (both folded into `padding` here).
-        let outer = if block.border_box {
-            height.max(block.padding.top + block.padding.bottom)
+    let pad_v = padding.top + padding.bottom;
+    // border-box: the declared height already includes padding+borders (folded
+    // into `padding`); content-box adds them.
+    let to_outer = |h: f32| {
+        if block.border_box {
+            h.max(pad_v)
         } else {
-            height + block.padding.top + block.padding.bottom
-        };
-        let target = start_y - outer;
+            h + pad_v
+        }
+    };
+    let min_h = [block.css_height, block.min_height]
+        .into_iter()
+        .flatten()
+        .fold(None, |acc: Option<f32>, h| Some(acc.map_or(h, |a| a.max(h))));
+    if let Some(height) = min_h {
+        flush_margin(y, carried);
+        let target = start_y - to_outer(height);
         if target < *y && pages.len() - 1 == start_page {
             *y = target;
+        }
+    }
+    // `overflow: hidden` + a definite height caps the box on its start page and
+    // clips content to the border box. Multi-page clipped boxes are not handled
+    // (the clip would need to re-establish per page), so this only fires when
+    // the content stayed on the start page.
+    if block.overflow_hidden {
+        if let Some(cap) = block.max_height.or(block.css_height) {
+            flush_margin(y, carried);
+            let target = start_y - to_outer(cap);
+            if pages.len() - 1 == start_page && *y < target {
+                *y = target;
+                let clip = RectCommand {
+                    x: box_x,
+                    y: target,
+                    width: box_width,
+                    height: to_outer(cap),
+                };
+                pages[start_page]
+                    .commands
+                    .insert(start_index, PaintCommand::PushClipRect(clip));
+                pages[start_page].commands.push(PaintCommand::PopClip);
+            }
         }
     }
 
@@ -3472,6 +3557,77 @@ mod tests {
     };
 
     #[test]
+    fn min_width_widens_a_narrow_background_box() {
+        // `width: 100pt` would make the card 100pt wide, but `min-width: 300pt`
+        // wins and widens it — the painted background fill spans ~300pt.
+        let document = crate::html::parse(
+            "<style>.card { width: 100pt; min-width: 300pt; background: #eee; }</style>\
+             <div class=\"card\">hi</div>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let fill = pages[0]
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                PaintCommand::FillRect(r) => Some(r),
+                _ => None,
+            })
+            .expect("background fill");
+        assert!(
+            (fill.width - 300.0).abs() < 1.0,
+            "min-width should widen the box to ~300pt, got {}",
+            fill.width
+        );
+    }
+
+    #[test]
+    fn percent_padding_resolves_against_containing_width() {
+        // `padding-left: 10%` of the ~499pt A4 content width ≈ 49.9pt, so the
+        // paragraph's text starts about that far in from the content edge.
+        let document = crate::html::parse(
+            "<style>.p { padding-left: 10%; }</style><p class=\"p\">indented</p>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let line = pages[0]
+            .lines
+            .iter()
+            .find(|l| l.text == "indented")
+            .expect("text line");
+        let content_left = options.margin_left;
+        let indent = line.x - content_left;
+        let expected = 0.10 * (options.page_size.width - options.margin_left - options.margin_right);
+        assert!(
+            (indent - expected).abs() < 2.0,
+            "expected ~{expected}pt percent indent, got {indent}"
+        );
+    }
+
+    #[test]
+    fn overflow_hidden_clips_a_fixed_height_box() {
+        // A short fixed-height box with `overflow: hidden` and lots of content
+        // caps its height and wraps the start-page content in a clip rect.
+        let document = crate::html::parse(
+            "<style>.clip { height: 30pt; overflow: hidden; background: #eee; }</style>\
+             <div class=\"clip\"><p>line one</p><p>line two</p><p>line three</p>\
+             <p>line four</p><p>line five</p></div>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let clips = pages[0]
+            .commands
+            .iter()
+            .filter(|c| matches!(c, PaintCommand::PushClipRect(_)))
+            .count();
+        let pops = pages[0]
+            .commands
+            .iter()
+            .filter(|c| matches!(c, PaintCommand::PopClip))
+            .count();
+        assert!(clips >= 1, "overflow:hidden should push a clip rect");
+        assert_eq!(clips, pops, "every clip is popped");
+    }
+
+    #[test]
     fn flex_wrap_breaks_items_onto_new_lines() {
         let document = crate::html::parse(
             "<style>.row { display: flex; flex-wrap: wrap; gap: 10pt; } \
@@ -4269,6 +4425,13 @@ mod tests {
                     max_width: None,
                     max_width_percent: None,
                     css_height: None,
+                    min_width: None,
+                    min_width_percent: None,
+                    min_height: None,
+                    max_height: None,
+                    padding_percent: Default::default(),
+                    margin_percent: Default::default(),
+                    overflow_hidden: false,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -4278,6 +4441,7 @@ mod tests {
                     offset_right: None,
                     offset_bottom: None,
                     offset_left: None,
+                    offset_percent: Default::default(),
                     anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: format!("Paragraph {index}"),
@@ -4348,6 +4512,13 @@ mod tests {
                     max_width: None,
                     max_width_percent: None,
                     css_height: None,
+                    min_width: None,
+                    min_width_percent: None,
+                    min_height: None,
+                    max_height: None,
+                    padding_percent: Default::default(),
+                    margin_percent: Default::default(),
+                    overflow_hidden: false,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -4357,6 +4528,7 @@ mod tests {
                     offset_right: None,
                     offset_bottom: None,
                     offset_left: None,
+                    offset_percent: Default::default(),
                     anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: long,
@@ -4425,6 +4597,13 @@ mod tests {
                 max_width: None,
                 max_width_percent: None,
                 css_height: None,
+                min_width: None,
+                min_width_percent: None,
+                min_height: None,
+                max_height: None,
+                padding_percent: Default::default(),
+                margin_percent: Default::default(),
+                overflow_hidden: false,
                 center: false,
                 line_height: None,
                 rtl: false,
@@ -4434,6 +4613,7 @@ mod tests {
                 offset_right: None,
                 offset_bottom: None,
                 offset_left: None,
+                offset_percent: Default::default(),
                 anchor: None,
                 children: vec![BoxChild::Line(vec![InlineRun {
                     text: text.to_string(),
@@ -4527,6 +4707,13 @@ mod tests {
                         max_width: None,
                         max_width_percent: None,
                         css_height: None,
+                        min_width: None,
+                        min_width_percent: None,
+                        min_height: None,
+                        max_height: None,
+                        padding_percent: Default::default(),
+                        margin_percent: Default::default(),
+                        overflow_hidden: false,
                         center: false,
                         line_height,
                         rtl: false,
@@ -4536,6 +4723,7 @@ mod tests {
                         offset_right: None,
                         offset_bottom: None,
                         offset_left: None,
+                        offset_percent: Default::default(),
                         anchor: None,
                         children: vec![line("one"), line("two")],
                     })],
@@ -4606,6 +4794,13 @@ mod tests {
                     max_width: None,
                     max_width_percent: None,
                     css_height: None,
+                    min_width: None,
+                    min_width_percent: None,
+                    min_height: None,
+                    max_height: None,
+                    padding_percent: Default::default(),
+                    margin_percent: Default::default(),
+                    overflow_hidden: false,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -4615,6 +4810,7 @@ mod tests {
                     offset_right: None,
                     offset_bottom: None,
                     offset_left: None,
+                    offset_percent: Default::default(),
                     anchor: None,
                     children: vec![BoxChild::Line(vec![InlineRun {
                         text: "boxed".to_string(),

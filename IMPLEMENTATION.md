@@ -862,9 +862,6 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **`%` lengths everywhere + min/max sizing**: `%` heights, margins,
-      padding, and position offsets; `min-width`/`min-height`/`max-height`;
-      `overflow: hidden` clipping of over-tall fixed-height blocks.
 - [ ] **`calc()` + custom properties (`var()`)** in the cascade.
 - [ ] **CSS text polish**: `letter-spacing`, `word-spacing`,
       `text-transform`, `text-indent`; `::before`/`::after` with text
@@ -881,6 +878,27 @@ Details for each item are in the feature list below and in
       `parentNode`/`children` traversal.
 
 #### Recently shipped (2026-07)
+
+- [x] **`%` lengths + min/max sizing + overflow clipping** (2026-07-09): a
+      boxed `SizingCss` on `CellStyle` (`Option<Box<…>>`, allocated only when a
+      cell sets one of these — the 22k-cell doc stays **byte-identical** and
+      RAM-flat, same tactic as boxed border sides) carries `min-width`
+      (pt/`%`), `min-height`/`max-height` (pt), and per-side `%` for
+      padding/margin/offsets (`[top,right,bottom,left]`). Sub-properties merge
+      per field across cascade layers. `%` padding/margin resolve against the
+      containing block's width at layout time (`resolve_edges`, folded into the
+      point `Edges` — the point side already holds folded border width, the
+      `%` side had a 0 point value, so the sum is the used edge). `min-width`
+      clamps the used outer width up, winning over `max-width`, clamped to the
+      containing width. `min-height` folds into the existing `height`
+      min-extension (max of the two). `max-height`/`height` + `overflow:
+      hidden` cap the box on its start page and wrap its content in a `re W n`
+      clip (spliced before content, popped after). `%` offsets: left/right vs
+      containing width (relative + absolute); top/bottom vs containing height
+      only when the CB is the page. `features/pct-sizing` fixture (29 total).
+      **Not yet done:** `%` height/min-height/max-height (indefinite
+      containing height in flow), multi-page clipped boxes, horizontal-only
+      overflow clip, `%` top/bottom offsets against a positioned ancestor.
 
 - [x] **Rich table cell content** (the big one): `TableCell::runs:
       Vec<InlineRun>` — built only when a cell contains inline markup

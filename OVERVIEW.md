@@ -274,10 +274,13 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - Flow content: a **nested block/inline box tree** — nested blocks, list and
   blockquote indentation, list markers (`•` / `1.`), and per-run inline
   `color`/`font-size`/bold within a paragraph, all wrapped and aligned.
-- **CSS box model on blocks**: `margin`/`padding` (shorthands + longhands),
-  vertical margin collapse, block `background-color` + `border` painted behind
-  content (per page fragment), `line-height`, CSS `width`/`max-width` in points
-  or **percentages**, and **`margin: auto` centering**.
+- **CSS box model on blocks**: `margin`/`padding` (shorthands + longhands, in
+  points or **percentages** of the containing width), vertical margin collapse,
+  block `background-color` + real per-side `border` painted behind content (per
+  page fragment), `border-radius`, `box-sizing`, `line-height`,
+  `width`/`min-width`/`max-width` (points or `%`), `min-height`/`max-height`
+  (points), **`margin: auto` centering**, and `overflow: hidden` clipping of a
+  fixed-height box.
 - **Modern layout, first pass each**: flexbox (`display: flex` — grow/basis,
   justify/align, gaps, row+column), grid (`display: grid` — `fr`/`auto`/
   `repeat()` tracks, spans, gaps), **floats** with real text wrap and `clear`,
