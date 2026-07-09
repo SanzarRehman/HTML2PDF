@@ -862,8 +862,6 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **`::before`/`::after` with text `content`** (generated content matters
-      for print; the text-polish properties shipped, see below).
 - [ ] **Backgrounds beyond solid color**: `background-image` (PNG/JPEG via
       the existing decoder), `linear-gradient()`, `background-size` /
       `background-position` / `background-repeat`.
@@ -876,6 +874,30 @@ Details for each item are in the feature list below and in
       `parentNode`/`children` traversal.
 
 #### Recently shipped (2026-07)
+
+- [x] **`::before`/`::after` generated content** (2026-07-10): the selector
+      parser accepts pseudo-elements instead of rejecting them — `::` arrives
+      as two `Colon` tokens (the guard now permits the second), `before`/
+      `after` accepted in both the `::` and legacy `:` forms, valid only on
+      the subject compound (a following combinator rejects), counted like a
+      type selector for specificity. Such rules are **partitioned into
+      `Stylesheet::pseudo_rules`** so they never style the element itself;
+      lookups are a linear scan gated by `has_pseudo` (false for every
+      existing fixture → cascade untouched, 22k-cell doc byte-identical).
+      The raw `content` value is captured on the `DeclarationLayer` and
+      resolved by `parse_content_value`: quoted strings with **CSS hex
+      escapes** (`\201C` → “, trailing space = escape terminator),
+      `attr(name)` against the originating element, concatenation;
+      `none`/`normal`/unsupported components (`counter()`, `open-quote`)
+      generate nothing. Generation (`pseudo_run`): the merged pseudo
+      declarations fold onto the element's flow context like an inline
+      element's style (color/weight/size/family/decoration/spacing/transform)
+      and the text is pushed before/after the element's children — blocks
+      (`build_block`) and inline elements (`build_node`) both; a div with
+      only `::before` content now renders. `features/generated-content`
+      fixture (33 total). **Not yet done:** `counter()`/`quotes`, generated
+      content in table cells, `display`/box properties on the pseudo (text
+      runs only), `::marker`/`::first-line`/`::first-letter`.
 
 - [x] **CSS text polish** (2026-07-10): `text-transform`
       (uppercase/lowercase/capitalize/none, inherited; applied as text is

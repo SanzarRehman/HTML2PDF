@@ -1,0 +1,29 @@
+{
+  "fixture": "generated-content",
+  "layer": "features",
+  "description": "::before/::after generated content: styled required-field asterisks (::after on inline elements), a ::before badge with letter-spacing, attr(href) printed after links, CSS hex escapes (curly quotes and the section sign), legacy single-colon :before, and content:none / unsupported counter() generating nothing.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "1.000 Tc"
+    ],
+    "must_contain_text": [
+      "NEW",
+      "required",
+      "example.com",
+      "\\223"
+    ],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Red bold asterisks follow the two required field names (::after on spans).",
+    "A small green letter-spaced NEW precedes the badge paragraph.",
+    "The link is followed by its href in small gray parentheses (attr()).",
+    "The h3 starts with a blue section sign from the legacy :before form.",
+    "18pt curly quotes from hex escapes wrap the quote sentence.",
+    "The content:none and counter() paragraphs generate nothing."
+  ]
+}

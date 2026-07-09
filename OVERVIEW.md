@@ -119,8 +119,8 @@ CSS matching works the proper way browsers do it:
   `:not(...)`). **Combinators** are matched precisely by walking the real tree
   right-to-left: `.gridlines td` (descendant), `tr > td` (child), `td + td`
   (adjacent sibling), and `.mark ~ td` (general sibling). Dynamic pseudo-classes
-  (`:hover`) and pseudo-elements (`::before`) are dropped since they never apply
-  to static print output. This respects specificity, source order, `!important`,
+  (`:hover`) are dropped since they never fire in static print output;
+  `::before`/`::after` rules generate styled text content. This respects specificity, source order, `!important`,
   and `@media print` (screen-only rules are excluded from the PDF), like a real
   cascade.
 

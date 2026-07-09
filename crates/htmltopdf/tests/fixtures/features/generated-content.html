@@ -1,0 +1,20 @@
+<html><head><style>
+  @page { margin: 0.5in; }
+  body { font-size: 11pt; }
+  .req::after { content: " *"; color: #c00; font-weight: bold; }
+  .badge::before { content: "NEW "; color: #060; letter-spacing: 1pt; font-size: 8pt; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; color: #666; font-size: 9pt; }
+  .quote::before { content: "\201C"; font-size: 18pt; }
+  .quote::after { content: "\201D"; font-size: 18pt; }
+  h3:before { content: "\00A7 "; color: #369; }
+  .none::before { content: none; }
+  .counterish::before { content: counter(x) ". "; }
+</style></head><body>
+<h3>Legacy single-colon section marker</h3>
+<p><span class="req">Name</span> and <span class="req">Email</span> are required fields.</p>
+<p class="badge">Badge text preceded by generated small green caps.</p>
+<p>Visit <a href="https://example.com">our site</a> for details.</p>
+<p class="quote">Generated curly quotes wrap this sentence.</p>
+<p class="none">No generated content here (content: none).</p>
+<p class="counterish">Counter() is unsupported, so nothing generates before this.</p>
+</body></html>

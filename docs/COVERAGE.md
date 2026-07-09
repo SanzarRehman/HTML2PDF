@@ -40,7 +40,8 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Descendant, child `>`, sibling `+` / `~` | ✅ | |
 | `:nth-child`, `:first/last-child`, `:*-of-type`, `:empty`, `:root`, `:not()` | ✅ | |
 | `:hover`, `:active`, `:focus` (dynamic pseudo-classes) | — | Out of scope by design: the target is static print, so these can never fire. Selectors using them are dropped, never over-applied. |
-| `:link`/`:visited`, `::before`/`::after` + `content` | ❌ | Generated content does matter for print; queued. |
+| `::before`/`::after` + `content` | 🟡 | Generated text content (both `::` and legacy `:` forms): quoted strings with CSS hex escapes (`\201C` → “), `attr(name)`, string concatenation, `content: none`/`normal`. The pseudo rule's own declarations style the generated run (color/weight/size/family/decoration/spacing/transform); rules never leak onto the element itself. On block and inline elements in flow; a div with only `::before` content renders. No `counter()`/quotes keywords (such values generate nothing), no generated content in table cells, no `display`/box properties on the pseudo (text runs only). |
+| `:link`/`:visited` | ❌ | |
 | Specificity + source-order cascade, `!important` | ✅ | |
 | `@media print` / `screen` | ✅ | Screen-only rules excluded. |
 | `@page` margins + orientation | ✅ | `size: landscape`, `margin`. |

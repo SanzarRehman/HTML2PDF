@@ -1094,6 +1094,46 @@ impl ChildAcc {
     }
 }
 
+/// Generated-content text and context for an element's `::before`/`::after`:
+/// `Some` when a pseudo rule matches and its `content` resolves to text. The
+/// rule's declarations fold onto the element's context the way an inline
+/// element's style would (color, weight, size, family, decoration, spacing).
+fn pseudo_run(
+    env: &FlowEnv,
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    base: &FlowCtx,
+    which: PseudoElement,
+) -> Option<(String, FlowCtx)> {
+    let layer = env.stylesheet.pseudo_declarations(dom, id, which)?;
+    let text = parse_content_value(layer.content.as_deref()?, dom, id)?;
+    let style = &layer.cell;
+    let bold = base.bold || style.bold;
+    let italic = style.italic.unwrap_or(base.italic);
+    let family = match &style.font_family {
+        Some(name) => Some(env.fonts.borrow_mut().family(name)),
+        None => base.family,
+    };
+    let font = env.fonts.borrow_mut().spec(family, bold, italic);
+    let ctx = FlowCtx {
+        font_size: style.font_size.unwrap_or(base.font_size),
+        bold,
+        italic,
+        family,
+        font,
+        underline: base.underline || style.underline,
+        line_through: base.line_through || style.line_through,
+        color: style.color.unwrap_or(base.color),
+        align: base.align,
+        base_rtl: base.base_rtl,
+        link: base.link,
+        transform: style.text_transform.unwrap_or(base.transform),
+        letter_spacing: style.letter_spacing.unwrap_or(base.letter_spacing),
+        word_spacing: style.word_spacing.unwrap_or(base.word_spacing),
+    };
+    Some((text, ctx))
+}
+
 fn build_node(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
@@ -1200,10 +1240,25 @@ fn build_node(
                 }
             } else {
                 // Inline element: fold its computed style into the context and
-                // let its children contribute to the enclosing line.
+                // let its children contribute to the enclosing line — with any
+                // `::before`/`::after` generated text around them.
                 let child_ctx = inline_ctx(&ctx, env, dom, id, tag);
+                if env.stylesheet.has_pseudo {
+                    if let Some((text, pseudo_ctx)) =
+                        pseudo_run(env, dom, id, &child_ctx, PseudoElement::Before)
+                    {
+                        acc.push_text(&text, &pseudo_ctx);
+                    }
+                }
                 for &child in &node.children {
                     build_node(dom, child, env, child_ctx, acc);
+                }
+                if env.stylesheet.has_pseudo {
+                    if let Some((text, pseudo_ctx)) =
+                        pseudo_run(env, dom, id, &child_ctx, PseudoElement::After)
+                    {
+                        acc.push_text(&text, &pseudo_ctx);
+                    }
                 }
             }
         }
@@ -1313,6 +1368,14 @@ fn build_block(
         let marker = li_marker(dom, id);
         acc.push_text(&marker, &child_ctx);
     }
+    // `::before` generated content leads the block's own children.
+    if env.stylesheet.has_pseudo {
+        if let Some((text, pseudo_ctx)) =
+            pseudo_run(env, dom, id, &child_ctx, PseudoElement::Before)
+        {
+            acc.push_text(&text, &pseudo_ctx);
+        }
+    }
     if own.display_flex || own.display_grid {
         // Every element child of a flex/grid container becomes an item (per the
         // flexbox/grid models), so inline elements like <span> are built as
@@ -1338,6 +1401,14 @@ fn build_block(
     } else {
         for &child in &dom.node(id).children {
             build_node(dom, child, env, child_ctx, &mut acc);
+        }
+    }
+    // `::after` generated content trails the block's own children.
+    if env.stylesheet.has_pseudo {
+        if let Some((text, pseudo_ctx)) =
+            pseudo_run(env, dom, id, &child_ctx, PseudoElement::After)
+        {
+            acc.push_text(&text, &pseudo_ctx);
         }
     }
     acc.flush_line();
@@ -3056,6 +3127,11 @@ struct Stylesheet {
     /// fixtures), the cascade takes its cached fast path unchanged; when true,
     /// the top-down pass resolves the custom-property environment per element.
     uses_custom: bool,
+    /// `::before`/`::after` rules, kept out of the element cascade: they style
+    /// generated content, matched per element at box-build time. Rare, so they
+    /// are scanned linearly, gated by `has_pseudo`.
+    pseudo_rules: Vec<StyleRule>,
+    has_pseudo: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3161,6 +3237,18 @@ enum Combinator {
 struct SimpleSelector {
     subject: Compound,
     context: Vec<(Combinator, Compound)>,
+    /// `::before`/`::after` on the subject: the rule styles *generated
+    /// content* of the matched element rather than the element itself. Such
+    /// rules live in `Stylesheet::pseudo_rules`, never in the element cascade.
+    pseudo_element: Option<PseudoElement>,
+}
+
+/// A generated-content pseudo-element (`::before` / `::after`; the legacy
+/// single-colon forms parse too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PseudoElement {
+    Before,
+    After,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3182,6 +3270,9 @@ struct DeclarationLayer {
     /// the custom-property environment is known — `(property, raw value)` in
     /// cascade order. Resolved and applied in the top-down pass.
     deferred: Vec<(String, String)>,
+    /// The raw `content` value — meaningful only on `::before`/`::after`
+    /// rules, consumed when generated content is built.
+    content: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3319,6 +3410,121 @@ impl Stylesheet {
     }
 }
 
+impl Stylesheet {
+    /// The merged declarations of every `::before`/`::after` rule matching
+    /// element `id`, in cascade order — `None` when nothing matches. Linear
+    /// over the (rare) pseudo rules; callers gate on `has_pseudo`.
+    fn pseudo_declarations(
+        &self,
+        dom: &crate::dom::Dom,
+        id: crate::dom::NodeId,
+        which: PseudoElement,
+    ) -> Option<DeclarationLayer> {
+        let mut matched: Vec<&StyleRule> = self
+            .pseudo_rules
+            .iter()
+            .filter(|rule| {
+                rule.selector.pseudo_element == Some(which) && rule.selector.matches(dom, id)
+            })
+            .collect();
+        if matched.is_empty() {
+            return None;
+        }
+        matched.sort_by_key(|rule| (rule.specificity, rule.order));
+        let mut declarations = StyleDeclarations::default();
+        for rule in matched {
+            declarations.merge(rule.declarations.clone());
+        }
+        Some(declarations.resolved())
+    }
+}
+
+/// Resolve a `content` value into the text to generate: quoted strings (with
+/// `\` escapes) concatenate, `attr(name)` reads the originating element's
+/// attribute, and `none`/`normal` (or anything unsupported, e.g. `counter()`)
+/// generates nothing.
+fn parse_content_value(
+    raw: &str,
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("none")
+        || raw.eq_ignore_ascii_case("normal")
+    {
+        return None;
+    }
+    let mut out = String::new();
+    let mut produced = false;
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        let c = bytes[i];
+        if c == b'"' || c == b'\'' {
+            let quote = c;
+            i += 1;
+            let mut closed = false;
+            while i < raw.len() {
+                let b = bytes[i];
+                if b == b'\\' && i + 1 < raw.len() {
+                    // CSS escape: 1-6 hex digits (optionally followed by one
+                    // whitespace terminator) name a code point; anything else
+                    // escapes the character itself (`\"`, `\\`).
+                    let hex_len = raw[i + 1..]
+                        .bytes()
+                        .take(6)
+                        .take_while(|b| b.is_ascii_hexdigit())
+                        .count();
+                    if hex_len > 0 {
+                        let code = u32::from_str_radix(&raw[i + 1..i + 1 + hex_len], 16).ok();
+                        if let Some(ch) = code.and_then(char::from_u32) {
+                            out.push(ch);
+                        }
+                        i += 1 + hex_len;
+                        // Consume the single whitespace that terminates the escape.
+                        if bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                if b == quote {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                // Multi-byte UTF-8: copy the whole char.
+                let ch = raw[i..].chars().next().expect("in-bounds char");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            if !closed {
+                return None; // unterminated string: invalid value
+            }
+            produced = true;
+        } else if c.is_ascii_whitespace() {
+            i += 1;
+        } else if raw[i..].len() >= 5 && raw[i..i + 5].eq_ignore_ascii_case("attr(") {
+            let close = raw[i..].find(')')? + i;
+            let name = raw[i + 5..close].trim();
+            if let Some(value) = dom.node(id).attr(name) {
+                out.push_str(value);
+            }
+            produced = true;
+            i = close + 1;
+        } else {
+            // Unsupported component (counter(), url(), open-quote, …): treat
+            // the whole value as unsupported rather than emit partial text.
+            return None;
+        }
+    }
+    produced.then_some(out)
+}
+
 impl SimpleSelector {
     /// Match the selector against element `id` by walking the tree right-to-left.
     /// The subject compound must match `id`; then each `(combinator, compound)`
@@ -3389,6 +3595,10 @@ impl SimpleSelector {
             spec.ids += part.ids;
             spec.classes += part.classes;
             spec.elements += part.elements;
+        }
+        // A pseudo-element counts like a type selector.
+        if self.pseudo_element.is_some() {
+            spec.elements += 1;
         }
         spec
     }
@@ -3725,6 +3935,7 @@ impl DeclarationLayer {
         // so they apply last and win when the environment is built/resolved.
         self.custom.append(&mut other.custom);
         self.deferred.append(&mut other.deferred);
+        self.content = other.content.or(self.content.take());
     }
 }
 
@@ -3764,17 +3975,24 @@ fn parse_stylesheet(css: &str) -> Stylesheet {
     while let Some(result) = rules.next() {
         let Ok(parsed) = result else { continue };
         for (selector, declarations) in parsed {
-            stylesheet.rules.push(StyleRule {
+            let rule = StyleRule {
                 specificity: selector.specificity(),
                 selector,
                 declarations,
                 order,
-            });
+            };
+            // Generated-content rules must not style the element itself.
+            if rule.selector.pseudo_element.is_some() {
+                stylesheet.pseudo_rules.push(rule);
+            } else {
+                stylesheet.rules.push(rule);
+            }
             order += 1;
         }
     }
 
     stylesheet.font_faces = std::mem::take(&mut rule_parser.font_faces);
+    stylesheet.has_pseudo = !stylesheet.pseudo_rules.is_empty();
     stylesheet.build_indexes();
     stylesheet
 }
@@ -4220,6 +4438,8 @@ fn parse_selector_list<'i>(input: &mut Parser<'i, '_>) -> Vec<SimpleSelector> {
         }
         if current.colon_count > 0
             && !matches!(token, Token::Ident(_) | Token::Function(_))
+            // `::` (a pseudo-element) arrives as two Colon tokens.
+            && !(current.colon_count == 1 && matches!(token, Token::Colon))
         {
             current.reject();
         }
@@ -4441,6 +4661,9 @@ struct CompoundBuilder {
     /// Completed left-hand compounds with the combinator linking each to the
     /// compound on its right. Built farthest-first; reversed at finish.
     context: Vec<(Combinator, Compound)>,
+    /// `::before`/`::after` seen on the compound being built. Valid only on
+    /// the subject (a following combinator rejects the selector).
+    pseudo_element: Option<PseudoElement>,
 }
 
 impl CompoundBuilder {
@@ -4457,6 +4680,10 @@ impl CompoundBuilder {
     /// belonged to a *context* compound. Stash it with its combinator and begin
     /// a fresh compound for what follows (the new rightmost).
     fn begin_compound(&mut self) {
+        // A pseudo-element is only valid on the subject (rightmost) compound.
+        if self.pending.is_some() && self.pseudo_element.is_some() {
+            self.reject();
+        }
         if let Some(combinator) = self.pending.take() {
             if !self.current.is_empty() {
                 self.context
@@ -4500,11 +4727,24 @@ impl CompoundBuilder {
         }
     }
 
-    /// A simple pseudo-class identifier following `:` (rejects `::` pseudo-
-    /// elements and unsupported/dynamic pseudo-classes).
+    /// A pseudo identifier following `:`/`::`. `before`/`after` become the
+    /// selector's pseudo-element (both colon forms, per CSS legacy); other
+    /// names are structural pseudo-classes (single colon only) or reject the
+    /// selector (dynamic pseudo-classes, unknown pseudo-elements).
     fn finish_pseudo_ident(&mut self, name: &str) {
         let single_colon = self.colon_count == 1;
         self.colon_count = 0;
+        match name.to_ascii_lowercase().as_str() {
+            "before" if self.pseudo_element.is_none() => {
+                self.pseudo_element = Some(PseudoElement::Before);
+                return;
+            }
+            "after" if self.pseudo_element.is_none() => {
+                self.pseudo_element = Some(PseudoElement::After);
+                return;
+            }
+            _ => {}
+        }
         match simple_pseudo(name) {
             Some(pseudo) if single_colon => self.current.pseudos.push(pseudo),
             _ => self.reject(),
@@ -4524,6 +4764,7 @@ impl CompoundBuilder {
         out.push(SimpleSelector {
             subject: self.current,
             context: self.context,
+            pseudo_element: self.pseudo_element,
         });
     }
 }
@@ -4895,6 +5136,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             };
         }
         "line-height" => target.cell.line_height = parse_line_height(value),
+        "content" => target.content = Some(value.to_string()),
         "text-transform" => {
             target.cell.text_transform = match value.trim().to_ascii_lowercase().as_str() {
                 "uppercase" => Some(TextTransform::Uppercase),
@@ -6612,6 +6854,63 @@ mod tests {
         assert_eq!(plain.padding_percent, crate::box_tree::EdgesPercent::default());
         assert_eq!(plain.min_width, None);
         assert!((plain.padding.left - 6.0).abs() < 0.01, "8px → 6pt");
+    }
+
+    #[test]
+    fn generates_before_and_after_content() {
+        use crate::color::Color;
+        let document = parse(
+            r#"
+            <style>
+              .req::after { content: " *"; color: #cc0000; }
+              .badge::before { content: "NEW "; }
+              a::after { content: " (" attr(href) ")"; }
+              h3:before { content: "\00A7 "; }
+              .none::before { content: none; }
+              .counterish::before { content: counter(x) ". "; }
+            </style>
+            <h3>section</h3>
+            <p class="badge">badge</p>
+            <p>a <span class="req">field</span> here</p>
+            <p><a href="https://x.test">link</a></p>
+            <p class="none">plain</p>
+            <p class="counterish">nocounter</p>
+            "#,
+        );
+        let flow = document.flow.expect("flow doc");
+        let blocks = flow_blocks(&flow);
+        let texts: Vec<String> = blocks.iter().map(|b| block_text(b)).collect();
+
+        // Legacy single-colon :before, with a CSS hex escape whose trailing
+        // space is the escape terminator (not part of the string).
+        assert!(texts.iter().any(|t| t == "§section"), "{texts:?}");
+        // ::before leads the block's content.
+        assert!(texts.iter().any(|t| t == "NEW badge"), "{texts:?}");
+        // ::after on an inline element, styled by the pseudo rule (red), and
+        // the rule must NOT color the element's own text.
+        let field = blocks
+            .iter()
+            .find(|b| block_text(b).contains("field"))
+            .expect("field para");
+        assert_eq!(block_text(field), "a field * here");
+        let runs: Vec<&InlineRun> = field
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                BoxChild::Line(runs) => Some(runs.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let star = runs.iter().find(|r| r.text.contains('*')).expect("star run");
+        assert_eq!(star.color, Color::from_rgb_u8(204, 0, 0));
+        let word = runs.iter().find(|r| r.text.contains("field")).expect("field run");
+        assert_eq!(word.color, Color::BLACK);
+        // attr() + string concatenation.
+        assert!(texts.iter().any(|t| t == "link (https://x.test)"), "{texts:?}");
+        // content: none and unsupported counter() generate nothing.
+        assert!(texts.iter().any(|t| t == "plain"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "nocounter"), "{texts:?}");
     }
 
     #[test]
