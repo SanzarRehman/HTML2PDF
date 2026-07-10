@@ -1,0 +1,17 @@
+{
+  "fixture": "paged-media",
+  "layer": "features",
+  "description": "CSS Paged Media margin boxes: running header/footer text plus counter(page) and counter(pages), resolved only after final pagination.",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "Tj"],
+    "must_contain_text": ["Acme quarterly report", "INTERNAL", "Page 1 of"],
+    "min_size_bytes": 1000,
+    "max_size_bytes": 2000000,
+    "min_pages": 2
+  },
+  "visual_assertions": [
+    "Every page has Acme quarterly report at the top-left and INTERNAL at the top-right.",
+    "Every page has a bottom-center Page N of M footer with the final total page count.",
+    "Body content remains within the @page margins and does not overlap the decorations."
+  ]
+}

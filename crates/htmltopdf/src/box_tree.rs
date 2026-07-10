@@ -14,7 +14,7 @@
 use crate::color::Color;
 use crate::html::{
     AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent,
-    PositionKind, TableCell, TextAlign,
+    LinearGradient, PositionKind, TableCell, TextAlign,
 };
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
@@ -97,8 +97,8 @@ pub struct BlockBox {
     pub margin: Edges,
     pub padding: Edges,
     pub align: TextAlign,
-    /// A non-white background color to paint behind the block's border box.
-    pub background: Option<Color>,
+    /// A solid color or linear gradient painted behind the block's border box.
+    pub background: Option<Background>,
     /// Resolved border sides (per-side width/style/color); `None` = no border.
     /// The side widths are already folded into `padding`, so the border box is
     /// `content + padding` and borders consume layout space.
@@ -187,6 +187,13 @@ pub struct BlockBox {
     /// The element's HTML `id`, kept as a destination for `#fragment` links.
     pub anchor: Option<String>,
     pub children: Vec<BoxChild>,
+}
+
+/// Block backgrounds supported by the paint layer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Background {
+    Color(Color),
+    LinearGradient(LinearGradient),
 }
 
 /// Flex container parameters resolved from the cascade.

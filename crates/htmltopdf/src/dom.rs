@@ -128,25 +128,46 @@ impl Dom {
     /// Replace a node's children with the parsed markup `html` (like DOM
     /// `innerHTML =`). Structural mutation: the fragment is parsed into a scratch
     /// DOM and its `<body>` children are grafted into this arena under `id`. Old
-    /// children are orphaned (harmless). Returns the number of nodes added, for
-    /// the script node budget. **Spike (live-DOM JS).**
-    pub fn set_inner_html(&mut self, id: NodeId, html: &str) -> usize {
+    /// children are orphaned (harmless). The fragment is counted before any
+    /// nodes are grafted, so callers can enforce a hard script node budget.
+    /// Returns the number of nodes added, or `None` when the fragment would
+    /// exceed `max_new_nodes`. **Spike (live-DOM JS).**
+    pub fn set_inner_html(
+        &mut self,
+        id: NodeId,
+        html: &str,
+        max_new_nodes: usize,
+    ) -> Option<usize> {
         let fragment = Dom::parse(html);
         let Some(body) = fragment
             .nodes
             .iter()
             .position(|node| node.tag() == Some("body"))
         else {
-            return 0;
+            return Some(0);
         };
-        let before = self.nodes.len();
         let src_children = fragment.nodes[body].children.clone();
-        let mut new_children = Vec::with_capacity(src_children.len());
+        let mut pending = Vec::new();
+        let mut count = 0usize;
         for src_child in src_children {
+            let mut stack = vec![src_child];
+            while let Some(node) = stack.pop() {
+                count = count.checked_add(1)?;
+                if count > max_new_nodes {
+                    return None;
+                }
+                stack.extend(fragment.nodes[node].children.iter().copied());
+            }
+            pending.push(src_child);
+        }
+
+        let before = self.nodes.len();
+        let mut new_children = Vec::with_capacity(pending.len());
+        for src_child in pending {
             new_children.push(self.graft(&fragment, src_child, id));
         }
         self.nodes[id].children = new_children;
-        self.nodes.len() - before
+        Some(self.nodes.len() - before)
     }
 
     /// Deep-copy `src_id` (and its subtree) from another DOM's arena into this

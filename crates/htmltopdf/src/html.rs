@@ -57,6 +57,23 @@ pub enum BlockKind {
     TableFooterRow,
 }
 
+/// A print-oriented CSS `linear-gradient()` background. Stops currently use
+/// solid colors; omitted stop positions are distributed between their nearest
+/// positioned neighbours, as CSS does for the common two- and three-stop case.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    /// CSS gradient angle in degrees: `0deg` points up and `90deg` points right.
+    pub angle_degrees: f32,
+    pub stops: Vec<GradientStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub color: Color,
+    /// Normalized `0.0..=1.0` position. `None` is resolved during painting.
+    pub position: Option<f32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableCell {
     pub text: String,
@@ -230,6 +247,10 @@ pub struct CellStyle {
     pub word_break: Option<WordBreak>,
     pub color: Option<Color>,
     pub background_color: Option<Color>,
+    /// CSS `background-image: linear-gradient(...)` / `background` gradient.
+    /// Background images other than gradients are intentionally not resolved in
+    /// this first print-focused background-image slice.
+    pub background_gradient: Option<LinearGradient>,
     /// `display: flex` — this element establishes a flex container.
     pub display_flex: bool,
     pub flex_direction: Option<FlexDirection>,
@@ -322,6 +343,7 @@ impl Default for CellStyle {
             word_break: None,
             color: None,
             background_color: None,
+            background_gradient: None,
             display_flex: false,
             flex_direction: None,
             justify_content: None,
@@ -608,13 +630,17 @@ pub enum AlignItems {
     FlexEnd,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PageStyle {
     pub orientation: PageOrientation,
     pub margin_top: Option<f32>,
     pub margin_right: Option<f32>,
     pub margin_bottom: Option<f32>,
     pub margin_left: Option<f32>,
+    /// CSS Paged Media margin boxes declared inside `@page` (`@top-center`,
+    /// `@bottom-right`, …). Their `content` is resolved only after pagination,
+    /// so `counter(page)` and `counter(pages)` have final values.
+    pub margin_boxes: Vec<PageMarginBox>,
 }
 
 impl Default for PageStyle {
@@ -625,8 +651,32 @@ impl Default for PageStyle {
             margin_right: None,
             margin_bottom: None,
             margin_left: None,
+            margin_boxes: Vec::new(),
         }
     }
+}
+
+/// A supported `@page` margin-box location. Corner boxes and the left/center/
+/// right triplets are intentionally deferred; this first paged-media pass
+/// covers the placements used by running headers and footers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageMarginBoxArea {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+/// Text painted in a supported CSS Paged Media margin box. `content` is the
+/// raw CSS value so counters can be resolved against the final page count.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageMarginBox {
+    pub area: PageMarginBoxArea,
+    pub content: String,
+    pub font_size: Option<f32>,
+    pub color: Option<Color>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1327,10 +1377,17 @@ fn build_block(
         bottom: own.padding_bottom.unwrap_or(0.0) + border_widths.bottom,
         left: own.padding_left.unwrap_or(0.0) + border_widths.left,
     };
-    // A white background matches the page, so it is treated as "no background".
+    // A gradient takes precedence over the fallback background color. A white
+    // color matches the page, so it is treated as "no background".
     let background = own
-        .background_color
-        .filter(|color| *color != Color::WHITE);
+        .background_gradient
+        .clone()
+        .map(crate::box_tree::Background::LinearGradient)
+        .or_else(|| {
+            own.background_color
+                .filter(|color| *color != Color::WHITE)
+                .map(crate::box_tree::Background::Color)
+        });
 
     // Font selection: an own `font-family` overrides the inherited one; `<pre>`
     // defaults to monospace (the only block-level UA family rule we apply);
@@ -1760,6 +1817,7 @@ fn parse_page_geometry(css: &str) -> (PageStyle, TableStyle, Vec<f32>) {
                 GeoItem::Page {
                     margins,
                     landscape,
+                    margin_boxes,
                 } => {
                     if landscape {
                         page.orientation = PageOrientation::Landscape;
@@ -1768,6 +1826,7 @@ fn parse_page_geometry(css: &str) -> (PageStyle, TableStyle, Vec<f32>) {
                     page.margin_right = page.margin_right.or(margins[1]);
                     page.margin_bottom = page.margin_bottom.or(margins[2]);
                     page.margin_left = page.margin_left.or(margins[3]);
+                    page.margin_boxes.extend(margin_boxes);
                 }
             }
         }
@@ -1782,8 +1841,13 @@ enum GeoItem {
     ColWidth(f32),
     /// A table row height (`table.sheet0 tr { height }`).
     RowHeight(f32),
-    /// `@page` margins `[top, right, bottom, left]` and `size: landscape`.
-    Page { margins: [Option<f32>; 4], landscape: bool },
+    /// `@page` margins `[top, right, bottom, left]`, orientation, and
+    /// supported running-header/footer margin boxes.
+    Page {
+        margins: [Option<f32>; 4],
+        landscape: bool,
+        margin_boxes: Vec<PageMarginBox>,
+    },
 }
 
 /// A `cssparser` rule parser that extracts only geometry (see [`GeoItem`]).
@@ -1870,7 +1934,16 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
             }
             AtRuleKind::Media(false) => Ok(Vec::new()),
             AtRuleKind::Page => {
-                let decls = parse_geo_declarations(input);
+                // `@page` can contain nested margin-box at-rules. Keep a raw
+                // copy for that small paged-media subset, then feed the same
+                // body through the existing declaration parser for page size
+                // and margins.
+                let body_start = input.position();
+                consume_remaining(input);
+                let body = input.slice_from(body_start);
+                let mut body_input = ParserInput::new(body);
+                let mut body_parser = Parser::new(&mut body_input);
+                let decls = parse_geo_declarations(&mut body_parser);
                 Ok(vec![GeoItem::Page {
                     margins: [
                         decls.margin_top,
@@ -1879,6 +1952,7 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
                         decls.margin_left,
                     ],
                     landscape: decls.landscape,
+                    margin_boxes: parse_page_margin_boxes(body),
                 }])
             }
             // `@font-face` carries no page/table geometry.
@@ -1977,6 +2051,202 @@ impl<'i> RuleBodyItemParser<'i, (), ()> for GeoDeclParser<'_> {
     fn parse_qualified(&self) -> bool {
         false
     }
+}
+
+/// Extract the first-pass CSS Paged Media margin boxes from an `@page` rule.
+/// The general stylesheet parser deliberately treats these nested at-rules as
+/// out of scope; here we retain a constrained, deterministic subset that is
+/// sufficient for running headers/footers and page counters.
+fn parse_page_margin_boxes(body: &str) -> Vec<PageMarginBox> {
+    let mut boxes = Vec::new();
+    let mut cursor = 0;
+    while let Some(offset) = body[cursor..].find('@') {
+        let start = cursor + offset;
+        let mut name_end = start + 1;
+        while body
+            .as_bytes()
+            .get(name_end)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        {
+            name_end += 1;
+        }
+        let Some(area) = page_margin_box_area(&body[start + 1..name_end]) else {
+            cursor = name_end;
+            continue;
+        };
+        let open = body[name_end..]
+            .find('{')
+            .map(|offset| name_end + offset);
+        let Some(open) = open else {
+            break;
+        };
+        let Some(close) = matching_css_brace(body, open) else {
+            break;
+        };
+        if let Some(mut margin_box) = parse_page_margin_box_declarations(&body[open + 1..close]) {
+            margin_box.area = area;
+            boxes.push(margin_box);
+        }
+        cursor = close + 1;
+    }
+    boxes
+}
+
+fn page_margin_box_area(name: &str) -> Option<PageMarginBoxArea> {
+    match name.to_ascii_lowercase().as_str() {
+        "top-left" => Some(PageMarginBoxArea::TopLeft),
+        "top-center" => Some(PageMarginBoxArea::TopCenter),
+        "top-right" => Some(PageMarginBoxArea::TopRight),
+        "bottom-left" => Some(PageMarginBoxArea::BottomLeft),
+        "bottom-center" => Some(PageMarginBoxArea::BottomCenter),
+        "bottom-right" => Some(PageMarginBoxArea::BottomRight),
+        _ => None,
+    }
+}
+
+fn matching_css_brace(input: &str, open: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, &byte) in bytes.iter().enumerate().skip(open) {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_page_margin_box_declarations(raw: &str) -> Option<PageMarginBox> {
+    let mut content = None;
+    let mut font_size = None;
+    let mut color = None;
+    for declaration in split_page_declarations(raw) {
+        let Some((name, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let (value, _) = normalize_declaration_value(value);
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content" => content = margin_content_is_valid(&value).then_some(value),
+            "font-size" => font_size = parse_css_length(&value),
+            "color" => color = parse_css_color(&value),
+            _ => {}
+        }
+    }
+    content.map(|content| PageMarginBox {
+        // Filled by `parse_page_margin_boxes` after parsing the at-rule name.
+        area: PageMarginBoxArea::TopCenter,
+        content,
+        font_size,
+        color,
+    })
+}
+
+/// Split declarations while respecting quoted strings and `counter(...)`.
+fn split_page_declarations(raw: &str) -> Vec<&str> {
+    let mut declarations = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in raw.bytes().enumerate() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'\'' | b'"' => quote = Some(byte),
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => {
+                declarations.push(&raw[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    declarations.push(&raw[start..]);
+    declarations
+}
+
+/// Reject unsupported margin-box content at parse time instead of rendering a
+/// partial header/footer. Supported components are strings and page counters.
+fn margin_content_is_valid(raw: &str) -> bool {
+    resolve_margin_content(raw, 1, 1).is_some()
+}
+
+/// Resolve a CSS margin-box `content` value using final one-based page numbers.
+pub(crate) fn resolve_margin_content(raw: &str, page: usize, pages: usize) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("none") || raw.eq_ignore_ascii_case("normal") {
+        return None;
+    }
+    let mut output = String::new();
+    let bytes = raw.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        match bytes[index] {
+            b'\'' | b'"' => {
+                let quote = bytes[index];
+                index += 1;
+                let start = index;
+                let mut escaped = false;
+                while index < raw.len() {
+                    let byte = bytes[index];
+                    if !escaped && byte == quote {
+                        break;
+                    }
+                    escaped = !escaped && byte == b'\\';
+                    if byte != b'\\' {
+                        escaped = false;
+                    }
+                    index += 1;
+                }
+                if index == raw.len() {
+                    return None;
+                }
+                // Reuse the established CSS string-escape implementation.
+                output.push_str(&parse_content_value(&raw[start - 1..=index], &crate::dom::Dom::parse(""), 0)?);
+                index += 1;
+            }
+            byte if byte.is_ascii_whitespace() => index += 1,
+            _ if raw[index..].len() >= 8 && raw[index..].starts_with("counter(") => {
+                let close = raw[index..].find(')')? + index;
+                match raw[index + 8..close].trim().to_ascii_lowercase().as_str() {
+                    "page" => output.push_str(&page.to_string()),
+                    "pages" => output.push_str(&pages.to_string()),
+                    _ => return None,
+                }
+                index = close + 1;
+            }
+            _ => return None,
+        }
+    }
+    Some(output)
 }
 
 /// Extract table rows and cells from the real DOM.
@@ -2474,6 +2744,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         margin_top: own.margin_top,
         margin_bottom: own.margin_bottom,
         background_color: own.background_color,
+        background_gradient: own.background_gradient.clone(),
         // Flex/grid properties are not inherited.
         display_flex: own.display_flex,
         flex_direction: own.flex_direction,
@@ -5200,7 +5471,11 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "height" => target.cell.height = parse_css_length(value),
         "color" => target.cell.color = parse_css_color(value),
         "background-color" => target.cell.background_color = parse_css_color(value),
-        "background" => target.cell.background_color = parse_css_background_color(value),
+        "background-image" => target.cell.background_gradient = parse_css_linear_gradient(value),
+        "background" => {
+            target.cell.background_color = parse_css_background_color(value);
+            target.cell.background_gradient = parse_css_linear_gradient(value);
+        }
         "padding-top" => {
             let (pt, pct) = parse_len_or_pct(value);
             target.cell.padding_top = pt;
@@ -5505,6 +5780,89 @@ fn parse_css_background_color(value: &str) -> Option<Color> {
     value.split_whitespace().find_map(parse_css_color)
 }
 
+/// Parse the useful print subset of CSS `linear-gradient()`: a direction or
+/// angle followed by two or more solid-color stops, optionally positioned with
+/// percentages. Other `background-image` functions remain unsupported rather
+/// than being silently treated as a color.
+fn parse_css_linear_gradient(value: &str) -> Option<LinearGradient> {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    let prefix = "linear-gradient(";
+    if !lower.starts_with(prefix) || !value.ends_with(')') {
+        return None;
+    }
+    let inner = &value[prefix.len()..value.len() - 1];
+    let parts = split_css_commas(inner);
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let (angle_degrees, stop_start) = parse_gradient_direction(parts[0])
+        .map(|angle| (angle, 1))
+        .unwrap_or((180.0, 0)); // CSS default: top to bottom.
+    if parts.len() - stop_start < 2 {
+        return None;
+    }
+    let mut stops = Vec::with_capacity(parts.len() - stop_start);
+    for stop in &parts[stop_start..] {
+        let (color_source, position) = split_gradient_stop(stop);
+        let color = parse_css_color(color_source.trim())?;
+        stops.push(GradientStop { color, position });
+    }
+    Some(LinearGradient { angle_degrees, stops })
+}
+
+fn split_css_commas(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(value[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(value[start..].trim());
+    parts
+}
+
+fn parse_gradient_direction(value: &str) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(degrees) = value.strip_suffix("deg") {
+        return degrees.trim().parse::<f32>().ok().map(|angle| angle.rem_euclid(360.0));
+    }
+    match value.as_str() {
+        "to top" => Some(0.0),
+        "to top right" | "to right top" => Some(45.0),
+        "to right" => Some(90.0),
+        "to bottom right" | "to right bottom" => Some(135.0),
+        "to bottom" => Some(180.0),
+        "to bottom left" | "to left bottom" => Some(225.0),
+        "to left" => Some(270.0),
+        "to top left" | "to left top" => Some(315.0),
+        _ => None,
+    }
+}
+
+fn split_gradient_stop(value: &str) -> (&str, Option<f32>) {
+    let value = value.trim();
+    let Some((color, last)) = value.rsplit_once(char::is_whitespace) else {
+        return (value, None);
+    };
+    let Some(percent) = last.trim().strip_suffix('%') else {
+        return (value, None);
+    };
+    let Some(position) = percent.trim().parse::<f32>().ok() else {
+        return (value, None);
+    };
+    (color, Some((position / 100.0).clamp(0.0, 1.0)))
+}
+
 fn parse_css_color(value: &str) -> Option<Color> {
     let value = value.trim().trim_matches('"').trim_matches('\'').trim();
 
@@ -5731,6 +6089,7 @@ impl CellStyle {
         self.word_break = other.word_break.or(self.word_break);
         self.color = other.color.or(self.color);
         self.background_color = other.background_color.or(self.background_color);
+        self.background_gradient = other.background_gradient.or(self.background_gradient.take());
         self.display_flex |= other.display_flex;
         self.flex_direction = other.flex_direction.or(self.flex_direction);
         self.justify_content = other.justify_content.or(self.justify_content);
@@ -6395,6 +6754,32 @@ mod tests {
         assert_eq!(
             document.blocks[0].cells[0].style.color,
             Some(crate::color::Color::from_rgb_u8(0, 0, 255))
+        );
+    }
+
+    #[test]
+    fn parses_page_margin_boxes_and_page_counters() {
+        let document = parse(
+            r#"<style>
+                @page {
+                  margin: 0.75in;
+                  @top-left { content: "Acme report"; color: #336699; font-size: 8pt; }
+                  @bottom-center { content: "Page " counter(page) " of " counter(pages); }
+                }
+               </style><p>body</p>"#,
+        );
+
+        assert_eq!(document.page_style.margin_top, Some(54.0));
+        assert_eq!(document.page_style.margin_boxes.len(), 2);
+        let header = &document.page_style.margin_boxes[0];
+        assert_eq!(header.area, super::PageMarginBoxArea::TopLeft);
+        assert_eq!(header.content, "\"Acme report\"");
+        assert_eq!(header.font_size, Some(8.0));
+        assert_eq!(header.color, Some(crate::color::Color::from_rgb_u8(51, 102, 153)));
+        assert_eq!(super::resolve_margin_content(&header.content, 2, 7), Some("Acme report".into()));
+        assert_eq!(
+            super::resolve_margin_content(&document.page_style.margin_boxes[1].content, 2, 7),
+            Some("Page 2 of 7".into())
         );
     }
 
@@ -7297,6 +7682,39 @@ mod tests {
             style.background_color,
             Some(crate::color::Color::from_rgb_u8(0xff, 0xee, 0xdd))
         );
+    }
+
+    #[test]
+    fn parses_linear_gradient_backgrounds_for_blocks_and_cells() {
+        let document = parse(
+            r#"
+            <style>
+              .hero { background: linear-gradient(to right, #123456 10%, rgb(240, 128, 64) 90%); }
+              td { background-image: linear-gradient(180deg, red, blue); }
+            </style>
+            <div class="hero" style="width:200pt;height:40pt">Report</div>
+            "#,
+        );
+        let flow = document.flow.as_ref().expect("flow tree");
+        let blocks = flow_blocks(flow);
+        let crate::box_tree::Background::LinearGradient(hero) = blocks[0]
+            .background
+            .as_ref()
+            .expect("hero background")
+        else {
+            panic!("expected a linear gradient");
+        };
+        assert_eq!(hero.angle_degrees, 90.0);
+        assert_eq!(hero.stops.len(), 2);
+        assert_eq!(hero.stops[0].position, Some(0.1));
+        assert_eq!(hero.stops[1].position, Some(0.9));
+
+        let cell_document = parse(
+            "<style>td { background-image: linear-gradient(180deg, red, blue); }</style>\
+             <table><tr><td>Cell</td></tr></table>",
+        );
+        let cell = &cell_document.blocks[0].cells[0];
+        assert_eq!(cell.style.background_gradient.as_ref().unwrap().angle_degrees, 180.0);
     }
 
     #[test]

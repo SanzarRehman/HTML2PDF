@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>htmltopdf Conversion Smoke Test</title>
+  <style>
+    @page { margin: 42pt; }
+    body { font-family: Georgia, serif; color: #243142; font-size: 11pt; line-height: 1.5; }
+    h1 { font-family: Arial, Helvetica, sans-serif; font-size: 24pt; color: #4a2d75; margin: 0 0 4pt; }
+    h2 { font-family: Arial, Helvetica, sans-serif; font-size: 13pt; color: #4a2d75; margin: 14pt 0 6pt; }
+    p { margin: 0 0 7pt; }
+    .rule { border-bottom: 2pt solid #8e68c6; margin: 10pt 0 14pt; }
+    .profile { display: flex; gap: 12pt; background: #f6f0fc; border: 1pt solid #d8c9ec; border-radius: 7pt; padding: 12pt; }
+    .inline-test-image { width: 24pt; height: 24pt; border-radius: 4pt; }
+    .profile-copy { flex-grow: 1; }
+    .name { font-family: Arial, Helvetica, sans-serif; font-weight: bold; font-size: 13pt; color: #4a2d75; }
+    .quote { background: #fcfaf7; border-left: 4pt solid #e2a449; padding: 10pt 12pt; color: #6b5130; }
+    .checks { display: grid; grid-template-columns: 1fr 1fr; gap: 8pt; }
+    .check { border: 1pt solid #e2e8f0; padding: 8pt; background: #ffffff; }
+    .check strong { color: #23745e; }
+    .note { color: #6f7f91; font-size: 9pt; }
+  </style>
+</head>
+<body>
+  <h1>Conversion smoke test</h1>
+  <p class="note">Test case 02 - a compact page for repeatable API and CLI checks.</p>
+  <div class="rule"></div>
+  <div class="profile">
+    <div class="profile-copy"><p class="name">Basic document components</p><p>Data-image loading, real font-family resolution, flex layout, borders, color, and inline text are all covered in a single page. <img class="inline-test-image" alt="Geometric raster test image" src="assets/render-test-shapes.png"></p></div>
+  </div>
+  <h2>Checks</h2>
+  <div class="checks">
+    <div class="check"><strong>Typography</strong><br>Georgia body text with Arial headings.</div>
+    <div class="check"><strong>Box model</strong><br>Padding, margin, border, and rounded corners.</div>
+    <div class="check"><strong>Image</strong><br>Embedded PNG positioned inline with text.</div>
+    <div class="check"><strong>Flow</strong><br>Text remains selectable and wraps naturally.</div>
+  </div>
+  <h2>Result</h2>
+  <div class="quote">A reliable smoke test should be small enough to run on every build and broad enough to reveal broken rendering primitives.</div>
+</body>
+</html>

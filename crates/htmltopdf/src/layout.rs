@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::html::{
-    BlockKind, Document, Overflow, OverflowWrap, PageOrientation, TableCell, TextAlign,
-    VerticalAlign, WhiteSpace, WordBreak,
+    BlockKind, Document, LinearGradient, Overflow, OverflowWrap, PageMarginBoxArea,
+    PageOrientation, PageStyle, TableCell, TextAlign, VerticalAlign, WhiteSpace, WordBreak,
 };
 use crate::paint::{
     DashPattern, ImageCommand, LineCommand, PaintCommand, RectCommand, RoundedRectCommand,
@@ -373,10 +373,16 @@ pub struct Rect {
 }
 
 pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page> {
-    if let Some(flow) = &document.flow {
-        return layout_flow(flow, options);
-    }
+    let mut pages = if let Some(flow) = &document.flow {
+        layout_flow(flow, options)
+    } else {
+        layout_table_document(document, options)
+    };
+    paint_page_margin_boxes(&mut pages, &document.page_style, options);
+    pages
+}
 
+fn layout_table_document(document: &Document, options: &RenderOptions) -> Vec<Page> {
     let mut pages = vec![Page::new()];
     let mut y = options.page_size.height - options.margin_top;
     let content_width = options.page_size.width - options.margin_left - options.margin_right;
@@ -402,8 +408,65 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
             header,
         );
     }
-
     pages
+}
+
+/// Paint CSS Paged Media margin boxes after pagination, when both the current
+/// page number and `counter(pages)` are known. They live in the already-reserved
+/// page margins and paint above the document body, like browser running headers
+/// and footers.
+fn paint_page_margin_boxes(pages: &mut [Page], style: &PageStyle, options: &RenderOptions) {
+    if style.margin_boxes.is_empty() {
+        return;
+    }
+    let total = pages.len();
+    for (index, page) in pages.iter_mut().enumerate() {
+        for margin_box in &style.margin_boxes {
+            let Some(text) = crate::html::resolve_margin_content(&margin_box.content, index + 1, total) else {
+                continue;
+            };
+            let font_size = margin_box.font_size.unwrap_or(9.0);
+            let width = options.font.text_width(&text, font_size);
+            let (x, y) = page_margin_box_position(margin_box.area, width, options);
+            page.commands.push(PaintCommand::SetFillColor(
+                margin_box.color.unwrap_or(Color::BLACK),
+            ));
+            page.commands.push(PaintCommand::Text(TextCommand {
+                text,
+                x,
+                y,
+                font_size,
+                font: 0,
+                bold: false,
+                letter_spacing: 0.0,
+            }));
+        }
+    }
+}
+
+fn page_margin_box_position(
+    area: PageMarginBoxArea,
+    text_width: f32,
+    options: &RenderOptions,
+) -> (f32, f32) {
+    let x = match area {
+        PageMarginBoxArea::TopLeft | PageMarginBoxArea::BottomLeft => options.margin_left,
+        PageMarginBoxArea::TopCenter | PageMarginBoxArea::BottomCenter => {
+            (options.page_size.width - text_width) / 2.0
+        }
+        PageMarginBoxArea::TopRight | PageMarginBoxArea::BottomRight => {
+            options.page_size.width - options.margin_right - text_width
+        }
+    };
+    let y = match area {
+        PageMarginBoxArea::TopLeft | PageMarginBoxArea::TopCenter | PageMarginBoxArea::TopRight => {
+            options.page_size.height - options.margin_top / 2.0
+        }
+        PageMarginBoxArea::BottomLeft
+        | PageMarginBoxArea::BottomCenter
+        | PageMarginBoxArea::BottomRight => options.margin_bottom / 2.0,
+    };
+    (x, y)
 }
 
 /// A positioned (absolute/fixed) box captured out of flow. Its paint commands
@@ -1894,23 +1957,43 @@ fn paint_decorations(
 
         let mut commands = Vec::new();
         let radius = block.border_radius.min(width / 2.0).min(height / 2.0).max(0.0);
-        if let Some(color) = block.background {
-            commands.push(PaintCommand::SetFillColor(color));
-            if radius > 0.0 {
-                commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
-                    x,
-                    y: bottom,
-                    width,
-                    height,
-                    radius,
-                }));
-            } else {
-                commands.push(PaintCommand::FillRect(RectCommand {
-                    x,
-                    y: bottom,
-                    width,
-                    height,
-                }));
+        if let Some(background) = &block.background {
+            match background {
+                crate::box_tree::Background::Color(color) => {
+                    commands.push(PaintCommand::SetFillColor(*color));
+                    if radius > 0.0 {
+                        commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
+                            x,
+                            y: bottom,
+                            width,
+                            height,
+                            radius,
+                        }));
+                    } else {
+                        commands.push(PaintCommand::FillRect(RectCommand {
+                            x,
+                            y: bottom,
+                            width,
+                            height,
+                        }));
+                    }
+                }
+                crate::box_tree::Background::LinearGradient(gradient) if radius <= 0.0 => {
+                    commands.extend(linear_gradient_commands(gradient, x, bottom, width, height));
+                }
+                // The compact painter has no rounded clipping path yet. Keep
+                // rounded boxes visually safe with a representative solid fill
+                // instead of letting gradient strips escape their corners.
+                crate::box_tree::Background::LinearGradient(gradient) => {
+                    commands.push(PaintCommand::SetFillColor(gradient_color(gradient, 0.5)));
+                    commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
+                        x,
+                        y: bottom,
+                        width,
+                        height,
+                        radius,
+                    }));
+                }
             }
         }
         if let Some(edges) = &block.border {
@@ -1930,6 +2013,118 @@ fn paint_decorations(
         let at = if page_index == start_page { start_index } else { 0 };
         pages[page_index].commands.splice(at..at, commands);
     }
+}
+
+/// Approximate a CSS linear gradient with opaque color bands. Axis-aligned
+/// gradients use 32 bands; diagonal gradients use a modest 24×24 raster so
+/// they stay smooth without turning a report page into thousands of commands.
+fn linear_gradient_commands(
+    gradient: &LinearGradient,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Vec<PaintCommand> {
+    const AXIS_STEPS: usize = 32;
+    const DIAGONAL_STEPS: usize = 24;
+    let radians = gradient.angle_degrees.to_radians();
+    // CSS angles point up at 0deg and right at 90deg; PDF's y axis also points up.
+    let (dx, dy) = (radians.sin(), radians.cos());
+    let diagonal = dx.abs() > 0.05 && dy.abs() > 0.05;
+    let columns = if diagonal { DIAGONAL_STEPS } else if dx.abs() > dy.abs() { AXIS_STEPS } else { 1 };
+    let rows = if diagonal { DIAGONAL_STEPS } else if dy.abs() >= dx.abs() { AXIS_STEPS } else { 1 };
+    let cell_width = width / columns as f32;
+    let cell_height = height / rows as f32;
+    let corners = [
+        (0.0, 0.0),
+        (width, 0.0),
+        (0.0, height),
+        (width, height),
+    ];
+    let (mut min_projection, mut max_projection) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (cx, cy) in corners {
+        let projection = cx * dx + cy * dy;
+        min_projection = min_projection.min(projection);
+        max_projection = max_projection.max(projection);
+    }
+    let range = (max_projection - min_projection).max(f32::EPSILON);
+    let mut commands = Vec::with_capacity(columns * rows * 2);
+    for row in 0..rows {
+        for column in 0..columns {
+            let cx = (column as f32 + 0.5) * cell_width;
+            let cy = (row as f32 + 0.5) * cell_height;
+            let progress = ((cx * dx + cy * dy - min_projection) / range).clamp(0.0, 1.0);
+            commands.push(PaintCommand::SetFillColor(gradient_color(gradient, progress)));
+            commands.push(PaintCommand::FillRect(RectCommand {
+                x: x + column as f32 * cell_width,
+                y: y + row as f32 * cell_height,
+                width: cell_width + 0.02,
+                height: cell_height + 0.02,
+            }));
+        }
+    }
+    commands
+}
+
+fn gradient_color(gradient: &LinearGradient, progress: f32) -> Color {
+    let count = gradient.stops.len();
+    if count == 0 {
+        return Color::WHITE;
+    }
+    if count == 1 {
+        return gradient.stops[0].color;
+    }
+    let positions = resolved_gradient_positions(gradient);
+    let progress = progress.clamp(0.0, 1.0);
+    if progress <= positions[0] {
+        return gradient.stops[0].color;
+    }
+    for index in 1..count {
+        if progress <= positions[index] {
+            let start = positions[index - 1];
+            let end = positions[index].max(start + f32::EPSILON);
+            let t = ((progress - start) / (end - start)).clamp(0.0, 1.0);
+            let a = gradient.stops[index - 1].color;
+            let b = gradient.stops[index].color;
+            return Color {
+                r: a.r + (b.r - a.r) * t,
+                g: a.g + (b.g - a.g) * t,
+                b: a.b + (b.b - a.b) * t,
+            };
+        }
+    }
+    gradient.stops[count - 1].color
+}
+
+/// Resolve omitted gradient-stop positions between their nearest explicit
+/// neighbours. CSS also prevents later stops moving backward, so explicit
+/// positions are clamped monotonically for this compact painter.
+fn resolved_gradient_positions(gradient: &LinearGradient) -> Vec<f32> {
+    let count = gradient.stops.len();
+    let mut positions: Vec<Option<f32>> = gradient.stops.iter().map(|stop| stop.position).collect();
+    if count == 0 {
+        return Vec::new();
+    }
+    if positions[0].is_none() {
+        positions[0] = Some(0.0);
+    }
+    if positions[count - 1].is_none() {
+        positions[count - 1] = Some(1.0);
+    }
+    let mut resolved = vec![0.0; count];
+    let mut previous = 0usize;
+    resolved[0] = positions[0].unwrap_or(0.0);
+    for index in 1..count {
+        let Some(next) = positions[index] else { continue };
+        let start = resolved[previous];
+        let end = next.max(start);
+        let gap = index - previous;
+        for offset in 1..=gap {
+            resolved[previous + offset] = start + (end - start) * offset as f32 / gap as f32;
+        }
+        previous = index;
+    }
+    resolved
 }
 
 /// Stroke a block's border along its border-box rectangle. A uniform border
@@ -2733,7 +2928,15 @@ fn render_planned_table_row(
     for planned in planned_cells {
         let vertical_offset = vertical_text_offset(planned, row_height);
 
-        if let Some(background_color) = planned.source.style.background_color {
+        if let Some(gradient) = &planned.source.style.background_gradient {
+            page.commands.extend(linear_gradient_commands(
+                gradient,
+                x,
+                *y - row_height,
+                planned.width,
+                row_height,
+            ));
+        } else if let Some(background_color) = planned.source.style.background_color {
             if background_color != Color::WHITE {
                 page.push_colored_fill_rect(
                     Rect {
@@ -4943,7 +5146,7 @@ mod tests {
                         left: 6.0,
                     },
                     align: crate::html::TextAlign::Left,
-                    background: Some(Color::from_rgb_u8(255, 0, 0)),
+                    background: Some(crate::box_tree::Background::Color(Color::from_rgb_u8(255, 0, 0))),
                     border: Some(crate::html::BorderEdges {
                         top: Some(TEST_BORDER_SIDE),
                         right: Some(TEST_BORDER_SIDE),
@@ -5022,6 +5225,41 @@ mod tests {
         // ...and both are painted before the text (i.e. behind it).
         assert!(fill < text, "background must paint behind text");
         assert!(stroke < text, "border must paint before text");
+    }
+
+    #[test]
+    fn paints_linear_gradient_background_before_text() {
+        let document = crate::html::parse(
+            "<div style=\"width: 240pt; height: 40pt; background: linear-gradient(to right, #f00, #00f)\">gradient</div>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let commands = &pages[0].commands;
+        let fills: Vec<usize> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(index, command)| matches!(command, PaintCommand::FillRect(_)).then_some(index))
+            .collect();
+        let text = commands
+            .iter()
+            .position(|command| matches!(command, PaintCommand::Text(_)))
+            .expect("text command");
+
+        assert!(fills.len() >= 32, "axis-aligned gradients use 32 color bands");
+        assert!(fills.iter().all(|&index| index < text), "gradient paints behind text");
+    }
+
+    #[test]
+    fn distributes_omitted_gradient_stops_between_explicit_neighbours() {
+        let gradient = crate::html::LinearGradient {
+            angle_degrees: 90.0,
+            stops: vec![
+                crate::html::GradientStop { color: Color::BLACK, position: None },
+                crate::html::GradientStop { color: Color::BLACK, position: Some(0.8) },
+                crate::html::GradientStop { color: Color::BLACK, position: None },
+                crate::html::GradientStop { color: Color::BLACK, position: None },
+            ],
+        };
+        assert_eq!(super::resolved_gradient_positions(&gradient), vec![0.0, 0.8, 0.9, 1.0]);
     }
 
     #[test]
@@ -5669,5 +5907,38 @@ mod tests {
             .iter()
             .skip(1)
             .all(|page| page.lines.iter().any(|line| line.text == "Name")));
+    }
+
+    #[test]
+    fn paints_page_margin_boxes_with_final_page_counters() {
+        let body = (0..90)
+            .map(|index| format!("<p>Paragraph {index}: repeated flowing content for pagination.</p>"))
+            .collect::<String>();
+        let document = crate::html::parse(&format!(
+            r#"<style>
+                @page {{
+                  margin: 42pt;
+                  @top-left {{ content: "Acme report"; color: #336699; }}
+                  @bottom-center {{ content: "Page " counter(page) " of " counter(pages); }}
+                }}
+               </style>{body}"#
+        ));
+        let options = RenderOptions::default().with_document_hints(&document);
+        let pages = layout_document(&document, &options);
+        assert!(pages.len() > 1, "fixture must span multiple pages");
+
+        let total = pages.len();
+        for (index, page) in pages.iter().enumerate() {
+            let texts: Vec<&str> = page
+                .commands
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(texts.contains(&"Acme report"));
+            assert!(texts.contains(&format!("Page {} of {total}", index + 1).as_str()));
+        }
     }
 }

@@ -19,6 +19,9 @@ use tiny_http::{Header, Request, Response, Server};
 /// Maximum accepted request body (HTML) size.
 const MAX_BODY: usize = 32 * 1024 * 1024;
 const CT_TEXT: &str = "text/plain; charset=utf-8";
+/// Keep a positive content box on the smallest supported paper dimension (A4
+/// width). This also rejects `NaN` and infinities before they reach PDF output.
+const MAX_MARGIN: f32 = PageSize::A4.width / 2.0;
 
 const USAGE: &str = "\
 htmltopdf-server
@@ -215,13 +218,23 @@ fn options_from_query(url: &str) -> Result<(RenderOptions, bool), (u16, String)>
                 options.page_size = PageSize::A4_LANDSCAPE;
             }
             "margin" => {
-                if let Ok(margin) = value.parse::<f32>() {
-                    options.margin = margin;
-                    options.margin_top = margin;
-                    options.margin_right = margin;
-                    options.margin_bottom = margin;
-                    options.margin_left = margin;
-                }
+                let margin = value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|margin| margin.is_finite() && *margin >= 0.0 && *margin < MAX_MARGIN)
+                    .ok_or_else(|| {
+                        (
+                            400,
+                            format!(
+                                "margin must be a finite value from 0 (inclusive) to {MAX_MARGIN} (exclusive)"
+                            ),
+                        )
+                    })?;
+                options.margin = margin;
+                options.margin_top = margin;
+                options.margin_right = margin;
+                options.margin_bottom = margin;
+                options.margin_left = margin;
             }
             "font" if !value.is_empty() => {
                 let source = if std::path::Path::new(&value).is_file() {
@@ -292,5 +305,26 @@ fn hex_digit(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::options_from_query;
+
+    #[test]
+    fn rejects_non_finite_and_overlarge_margins() {
+        for value in ["NaN", "inf", "-1", "298"] {
+            let error = options_from_query(&format!("/render?margin={value}"))
+                .expect_err("invalid margin must be rejected");
+            assert_eq!(error.0, 400, "{value}");
+        }
+    }
+
+    #[test]
+    fn accepts_a_finite_margin_with_room_for_content() {
+        let (options, _) = options_from_query("/render?margin=36").expect("valid margin");
+        assert_eq!(options.margin_top, 36.0);
+        assert_eq!(options.margin_left, 36.0);
     }
 }

@@ -44,7 +44,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `:link`/`:visited` | ❌ | |
 | Specificity + source-order cascade, `!important` | ✅ | |
 | `@media print` / `screen` | ✅ | Screen-only rules excluded. |
-| `@page` margins + orientation | ✅ | `size: landscape`, `margin`. |
+| `@page` margins, orientation, margin boxes | 🟡 | `size: landscape`, `margin`, plus `@top-left/center/right` and `@bottom-left/center/right` running text. Margin-box `content` supports quoted strings and `counter(page)` / `counter(pages)` with final values. No named pages, page selectors, corner boxes, `string-set`, images, or full block layout in margin boxes. |
 | `@font-face` | 🟡 | Author families shadow system lookup. `src:` fallback chain honored: `url()` loads TrueType/OpenType/**WOFF1** from `data:` URIs and local files (remote `http(s)` behind the same opt-in `RemoteImagePolicy` as images); `local()` matches family, PostScript, and "Family Bold/Italic" full names; unsupported `format()` hints (WOFF2/EOT/SVG) skipped without fetching. Per-family `font-weight`/`font-style` descriptors select real bold/italic variants; missing variants synthesize bold. No WOFF2 (needs Brotli), `unicode-range`, `font-display`, or variable-font selection; fonts load per render (no cache). |
 | `@supports`, `@keyframes`, `@import` | ❌ | |
 
@@ -53,7 +53,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Property | Status | Notes |
 |---|---|---|
 | `color` | ✅ | hex, `rgb()/rgba()`, `hsl()/hsla()`, named, `transparent` (alpha ignored). |
-| `background-color` / `background` | 🟡 | Solid color only (no images/gradients). |
+| `background-color` / `background` / `background-image` | 🟡 | Solid color plus opaque `linear-gradient()` on blocks and table cells: named/hex/rgb/hsl stops, `to …` directions or `deg` angles, and optional `%` stop positions. Gradients are approximated with color bands beneath content. No `url()`, radial/repeating gradients, multiple layers, alpha, background sizing/position/repeat, or true rounded-corner clipping (rounded gradient blocks use a representative solid fill). |
 | `font-size` | ✅ | px/pt/in/cm/mm. |
 | `font-weight` | 🟡 | Numeric ≥600 = bold. Real bold face when the family is known; faux-bold (fill+stroke) otherwise (e.g. the default font with no `font-family`). |
 | `text-align` | ✅ | left/center/right/justify (justified lines stretch inter-word spaces; the paragraph's last line stays ragged; cells treat justify as left). |
@@ -139,4 +139,5 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | Configurable page size (A4/Letter, portrait/landscape), margins | ✅ | `--paper`, `@page`. |
 | Link annotations (`/Annots`) | 🟡 | URI actions + in-document `/Dest` (`#fragment` → `id` anchor); one merged rect per link per line, including inside table cells. No `PageMode /UseOutlines`, no `<a name>` anchors. |
 | Document outline (`/Outlines`) | ✅ | Built from `h1`–`h6` in document order; deeper levels nest under the closest shallower heading; non-ASCII titles as UTF-16BE. |
-| Headers/footers, tagged PDF, encryption | ❌ | |
+| Running headers/footers + page numbers | 🟡 | Standards-style `@page` margin boxes with final `counter(page)` / `counter(pages)` values; static `position: fixed` headers/footers also repeat on every page. No visible generated TOC yet. |
+| Tagged PDF, encryption | ❌ | |

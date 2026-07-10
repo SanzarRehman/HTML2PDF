@@ -53,6 +53,35 @@ per-page row counts line up closely (33 pages vs Chromium's 32).
 > process — so throughput per GB of RAM is dramatically higher on a server.
 > Development measurements on one fixture/machine, not a guarantee.
 
+### 20-way concurrent conversion baseline
+
+Twenty identical conversions were launched at once, using the release CLI for
+htmltopdf and 20 fresh headless Chrome profiles. The reported endpoint is when
+the last PDF is written. Both runs produced all 20 PDFs per engine on Apple
+Silicon macOS (July 2026).
+
+| Fixture | htmltopdf: wall / throughput / peak RSS | Chrome: wall / throughput / peak RSS | Result |
+| --- | --- | --- | --- |
+| [Simple one-page HTML](examples/concurrency-simple.html) (770 B) | **0.077 s** / **261.37 PDF/s** / **57.2 MiB** | 6.582 s / 3.04 PDF/s / 11.49 GiB | **86×** throughput, **206×** lower peak RSS |
+| `reg-2-9-1.html` (1.8 MB, ~22k table cells) | **1.568 s** / **12.75 PDF/s** / **1.25 GiB** | 17.002 s / 1.18 PDF/s / 9.35 GiB | **10.8×** throughput, **7.5×** lower peak RSS |
+
+htmltopdf's RSS is its one multi-worker process, measured by
+`/usr/bin/time -l`. Chrome RSS is the peak sum of every browser, renderer, and
+helper process belonging to the 20 isolated profiles, sampled every 100 ms. For context, CPU
+usage was 0.14 / 15.96 htmltopdf CPU-seconds and approximately 9.91 / 28.99
+Chrome process-tree CPU-seconds (simple / complex); Chrome's sampled CPU peaks
+were 765% and 603%. Chrome may retain idle helpers after writing a PDF, so the
+benchmark ends at PDF readiness and terminates only processes carrying its
+unique run tag.
+
+Reproduce with
+[`scripts/benchmark-concurrency.sh`](scripts/benchmark-concurrency.sh):
+
+```bash
+bash scripts/benchmark-concurrency.sh examples/concurrency-simple.html 20
+bash scripts/benchmark-concurrency.sh reg-2-9-1.html 20
+```
+
 ## Why htmltopdf?
 
 - **Fast by design**: independent render jobs scale across CPU cores.
@@ -95,7 +124,7 @@ Works today:
 - CSS colors, font sizes, bold text (rendered as faux-bold fill+stroke), text
   alignment (including `text-align: justify`), text decoration
   (underline/line-through), margins, padding (with vertical margin collapse),
-  `line-height`, and block backgrounds.
+  `line-height`, and solid or `linear-gradient()` block/table backgrounds.
 - **Percentage lengths and min/max sizing**: `%` widths, padding, margins, and
   positioned-box offsets resolve against the containing block;
   `min-width`/`max-width` (points or `%`) and `min-height`/`max-height` (points)
@@ -161,6 +190,10 @@ Works today:
   jumps to `id` anchors — styled with browser UA defaults (blue, underlined;
   `text-decoration: none` and author colors respected). Headings build the
   PDF bookmark sidebar (`h2` nests under `h1`, and so on).
+- **Paged-media running headers, footers, and page numbers**: CSS `@page`
+  margin boxes (`@top-left/center/right`, `@bottom-left/center/right`) paint
+  static text plus final `counter(page)` / `counter(pages)` values after the
+  document has been paginated.
 - `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded in-house,
   alpha as a soft mask), from file paths and `data:` URIs, with
   `width`/`height` sizing and aspect-ratio preservation. An image sharing a
@@ -422,12 +455,14 @@ The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 surface is deferred. The front of the queue, in order (see
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
 
-1. Backgrounds beyond solid color: `background-image` and `linear-gradient()`.
+1. Background layers beyond the shipped solid-color / `linear-gradient()`
+   slice: `url()` images, radial/repeating gradients, sizing/positioning, and
+   multiple layers.
 2. `display: inline-block` and table `rowspan`.
 3. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
 4. `min()`/`max()`/`clamp()` math functions; `%` heights (needs a definite
-   containing height) and multi-page overflow clipping; `counter()` in
-   generated content.
+   containing height) and multi-page overflow clipping; general `counter()` in
+   generated content (page counters are available in `@page` margin boxes).
 
 Then, further out: WOFF2 web fonts, SVG, the broader scriptable DOM surface
 (`querySelector`, traversal) on demand, and HTTP server hardening for

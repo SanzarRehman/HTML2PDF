@@ -16,6 +16,12 @@ use std::path::Path;
 
 use flate2::read::ZlibDecoder;
 
+/// Hard resource limits for a single decoded PNG. These bound both hostile
+/// `data:` URIs and remote images after decompression; a compressed PNG can
+/// otherwise expand to gigabytes of pixel data.
+const MAX_PNG_COMPRESSED_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PNG_DECODED_BYTES: usize = 32 * 1024 * 1024;
+
 /// A decoded image ready to embed as a PDF image XObject.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedImage {
@@ -207,45 +213,47 @@ fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// Whether a URL's host is allowed to be fetched. When `block_private` is set,
-/// the host is resolved and rejected if *any* resolved address is non-public
-/// (conservative: a mixed result is treated as unsafe). A resolution failure or
-/// unparseable authority is also rejected.
+/// Resolve a remote URL to public socket addresses. A mixed result is rejected
+/// conservatively. The returned addresses must be used for the connection as
+/// well as the check; resolving once here and then letting an HTTP client do a
+/// second lookup would leave a DNS-rebinding SSRF gap.
 #[cfg_attr(not(feature = "remote-images"), allow(dead_code))]
-fn remote_host_allowed(url: &str, block_private: bool) -> bool {
-    if !block_private {
-        return true;
-    }
-    let Some((host, port)) = url_host_port(url) else {
-        return false;
-    };
+fn resolve_public_host(url: &str) -> Option<Vec<std::net::SocketAddr>> {
+    let (host, port) = url_host_port(url)?;
     use std::net::ToSocketAddrs;
     match (host.as_str(), port).to_socket_addrs() {
         Ok(addrs) => {
             let addrs: Vec<_> = addrs.collect();
-            !addrs.is_empty() && addrs.iter().all(|addr| !is_blocked_ip(addr.ip()))
+            (!addrs.is_empty() && addrs.iter().all(|addr| !is_blocked_ip(addr.ip())))
+                .then_some(addrs)
         }
-        Err(_) => false,
+        Err(_) => None,
     }
 }
 
 #[cfg(feature = "remote-images")]
 fn fetch_remote_impl(url: &str, remote: &RemoteImagePolicy) -> Option<Vec<u8>> {
-    // Block non-public hosts up front. Redirects are disabled below, so this
-    // check governs the address actually connected to (modulo DNS rebinding,
-    // which pinning the resolved IP would close — a documented follow-up).
-    if remote.block_private_hosts && !remote_host_allowed(url, true) {
-        return None;
-    }
+    // Pin the connection to the public addresses we vetted. Redirects are
+    // disabled below, so this resolver governs the only connection made.
+    let pinned_addrs = if remote.block_private_hosts {
+        Some(resolve_public_host(url)?)
+    } else {
+        None
+    };
 
-    let agent = ureq::AgentBuilder::new()
+    let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(remote.timeout)
         .timeout_read(remote.timeout)
         .timeout_write(remote.timeout)
         // No redirect following: a redirect could otherwise bounce past the
         // host check to an internal address.
-        .redirects(0)
-        .build();
+        .redirects(0);
+    if let Some(addrs) = pinned_addrs {
+        builder = builder.resolver(move |_: &str| -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(addrs.clone())
+        });
+    }
+    let agent = builder.build();
 
     let response = agent.get(url).call().ok()?;
     if response.status() != 200 {
@@ -416,7 +424,13 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
                 palette = chunk.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             }
             b"tRNS" => trns = chunk.to_vec(),
-            b"IDAT" => idat.extend_from_slice(chunk),
+            b"IDAT" => {
+                let total = idat.len().checked_add(chunk.len())?;
+                if total > MAX_PNG_COMPRESSED_BYTES {
+                    return None;
+                }
+                idat.extend_from_slice(chunk);
+            }
             b"IEND" => break,
             _ => {}
         }
@@ -445,23 +459,54 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
     let width = header.width as usize;
     let height = header.height as usize;
     let stride = width.checked_mul(bpp)?;
+    let inflated_len = height.checked_mul(stride.checked_add(1)?)?;
+    if inflated_len > MAX_PNG_DECODED_BYTES {
+        return None;
+    }
+
+    // The filtered input can be palette-indexed (one byte per pixel), while
+    // the PDF representation expands it to RGB. Bound the final allocation as
+    // well, including an optional alpha soft mask.
+    let output_bpp = match header.color_type {
+        0 => 1,
+        2 | 3 => 3 + usize::from(header.color_type == 3 && !trns.is_empty()),
+        4 => 2,
+        6 => 4,
+        _ => return None,
+    };
+    let output_len = width.checked_mul(height)?.checked_mul(output_bpp)?;
+    if output_len > MAX_PNG_DECODED_BYTES {
+        return None;
+    }
 
     // Inflate the concatenated IDAT stream.
-    let mut inflated = Vec::new();
+    let mut inflated = Vec::with_capacity(inflated_len);
     ZlibDecoder::new(&idat[..])
+        .take(inflated_len.checked_add(1)? as u64)
         .read_to_end(&mut inflated)
         .ok()?;
-    if inflated.len() < height.checked_mul(stride + 1)? {
+    if inflated.len() != inflated_len {
         return None;
     }
 
     let raw = png_unfilter(&inflated, height, stride, bpp)?;
+    drop(inflated);
 
     // Expand into PDF color/data + optional 8-bit alpha soft mask. For 16-bit
     // samples we keep only the high byte (8-bit output).
     let sample = |pixel: &[u8], channel: usize| -> u8 { pixel[channel * sample_bytes] };
-    let mut data: Vec<u8> = Vec::with_capacity(width * height * 3);
-    let mut alpha: Vec<u8> = Vec::new();
+    let color_len = width.checked_mul(height)?.checked_mul(match header.color_type {
+        0 | 4 => 1,
+        2 | 3 | 6 => 3,
+        _ => return None,
+    })?;
+    let alpha_len = width.checked_mul(height)?;
+    let mut data: Vec<u8> = Vec::with_capacity(color_len);
+    let mut alpha: Vec<u8> = match header.color_type {
+        3 if !trns.is_empty() => Vec::with_capacity(alpha_len),
+        4 | 6 => Vec::with_capacity(alpha_len),
+        _ => Vec::new(),
+    };
     let color_space;
 
     match header.color_type {
@@ -714,6 +759,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_pngs_that_expand_past_the_decoded_byte_cap() {
+        // The header alone declares 48 MiB of RGB output. Reject before zlib
+        // inflation/allocation, even though the supplied PNG is tiny.
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&4096u32.to_be_bytes());
+        ihdr.extend_from_slice(&4096u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        push_chunk(&mut png, b"IHDR", &ihdr);
+        push_chunk(&mut png, b"IEND", &[]);
+
+        assert!(decode(&png).is_none());
+    }
+
+    #[test]
     fn png_up_filter_is_reconstructed() {
         // 1x2 grayscale with an Up filter on the second row exercises unfiltering.
         use flate2::{write::ZlibEncoder, Compression};
@@ -796,6 +856,13 @@ mod tests {
                 "{ip} should be allowed"
             );
         }
+    }
+
+    #[test]
+    fn resolves_only_public_addresses_for_pinned_fetches() {
+        assert!(resolve_public_host("http://127.0.0.1:8080/image.png").is_none());
+        let addrs = resolve_public_host("http://8.8.8.8:80/image.png").expect("public IP");
+        assert!(addrs.iter().all(|addr| !is_blocked_ip(addr.ip())));
     }
 
     fn base64_encode(data: &[u8]) -> String {

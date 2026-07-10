@@ -15,9 +15,11 @@
 
 use crate::dom::{Dom, NodeData, NodeId};
 
-/// Hard resource caps for a single document's script execution. Every limit is
-/// enforced; the first one hit stops execution and the partial DOM is kept (a
-/// timed-out render still produces output rather than failing).
+/// Resource caps for a single document's script execution. The DOM-node and
+/// loop-iteration limits are enforced in-process; wall-clock and heap limits
+/// are checked at script boundaries and before DOM strings enter the arena.
+/// The first limit hit stops execution and the partial DOM is kept (a timed-out
+/// render still produces output rather than failing).
 #[derive(Debug, Clone)]
 pub struct ScriptLimits {
     /// Maximum wall-clock time for the whole script stage.
@@ -28,7 +30,9 @@ pub struct ScriptLimits {
     /// Maximum DOM nodes scripts may create (caps `innerHTML`/`createElement`
     /// blow-ups).
     pub max_new_nodes: usize,
-    /// Maximum script heap in bytes.
+    /// Maximum total inline-script source bytes. Boa does not expose a hard heap
+    /// limiter, so this bounds the attacker-controlled source retained by the
+    /// engine and the DOM bridge instead.
     pub max_heap_bytes: usize,
     /// Allow network APIs (`fetch`/`XMLHttpRequest`). Default `false`: they are
     /// absent or fail closed, so a render never makes a network call implicitly.
@@ -121,6 +125,7 @@ mod boa {
         dom: Dom,
         report: ScriptReport,
         max_new_nodes: usize,
+        max_heap_bytes: usize,
     }
 
     /// GC-visible handle to [`Inner`]. The `Rc<RefCell<…>>` holds only plain Rust
@@ -141,6 +146,15 @@ mod boa {
                 return ScriptReport::default();
             }
 
+            if scripts.iter().try_fold(0usize, |total, script| {
+                total.checked_add(script.len())
+            }).is_none_or(|total| total > limits.max_heap_bytes) {
+                return ScriptReport {
+                    limit_hit: Some(super::ScriptLimit::Heap),
+                    ..ScriptReport::default()
+                };
+            }
+
             // Keep the owning `Rc` separate from any `Host` handle, so we never
             // move a field out of `Host` (which implements `Drop` via its GC
             // derives). All `Host` clones live inside the context's closures.
@@ -148,6 +162,7 @@ mod boa {
                 dom: std::mem::take(dom),
                 report: ScriptReport::default(),
                 max_new_nodes: limits.max_new_nodes,
+                max_heap_bytes: limits.max_heap_bytes,
             }));
 
             let mut context = Context::default();
@@ -156,14 +171,24 @@ mod boa {
                 .set_loop_iteration_limit(limits.max_ticks);
             install_globals(&mut context, Host(shared.clone()));
 
+            let started = std::time::Instant::now();
+            let deadline = std::time::Duration::from_millis(limits.max_wall_millis);
             let mut executed = 0;
             for source in &scripts {
+                if started.elapsed() >= deadline {
+                    shared.borrow_mut().report.limit_hit = Some(super::ScriptLimit::WallTime);
+                    break;
+                }
                 match context.eval(Source::from_bytes(source.as_bytes())) {
                     Ok(_) => executed += 1,
                     Err(error) => {
                         shared.borrow_mut().report.error = Some(error.to_string());
                         break;
                     }
+                }
+                if started.elapsed() >= deadline {
+                    shared.borrow_mut().report.limit_hit = Some(super::ScriptLimit::WallTime);
+                    break;
                 }
             }
 
@@ -287,6 +312,10 @@ mod boa {
                     inner.report.limit_hit = Some(super::ScriptLimit::Nodes);
                     return Ok(JsValue::undefined());
                 }
+                if text.len() > inner.max_heap_bytes {
+                    inner.report.limit_hit = Some(super::ScriptLimit::Heap);
+                    return Ok(JsValue::undefined());
+                }
                 let added = inner.dom.set_text_content(node, &text);
                 inner.report.nodes_added += added;
                 Ok(JsValue::undefined())
@@ -344,11 +373,15 @@ mod boa {
                     .to_string(ctx)?
                     .to_std_string_escaped();
                 let mut inner = host.0.borrow_mut();
-                if inner.report.nodes_added >= inner.max_new_nodes {
-                    inner.report.limit_hit = Some(super::ScriptLimit::Nodes);
+                if html.len() > inner.max_heap_bytes {
+                    inner.report.limit_hit = Some(super::ScriptLimit::Heap);
                     return Ok(JsValue::undefined());
                 }
-                let added = inner.dom.set_inner_html(node, &html);
+                let remaining = inner.max_new_nodes.saturating_sub(inner.report.nodes_added);
+                let Some(added) = inner.dom.set_inner_html(node, &html, remaining) else {
+                    inner.report.limit_hit = Some(super::ScriptLimit::Nodes);
+                    return Ok(JsValue::undefined());
+                };
                 inner.report.nodes_added += added;
                 Ok(JsValue::undefined())
             },
@@ -722,6 +755,58 @@ mod tests {
             let limits = ScriptLimits { max_new_nodes: 0, ..ScriptLimits::default() };
             let report = BoaScriptEngine.run(&mut dom, &limits);
             assert_eq!(report.limit_hit, Some(crate::script::ScriptLimit::Nodes));
+        }
+
+        #[test]
+        fn inner_html_cannot_overshoot_a_partially_used_node_budget() {
+            let mut dom = Dom::parse(
+                "<div id=\"h\">unchanged</div>\
+                 <script>document.getElementById('h').innerHTML = '<b>a</b><b>b</b>';</script>",
+            );
+            let limits = ScriptLimits {
+                max_new_nodes: 2,
+                ..ScriptLimits::default()
+            };
+
+            let report = BoaScriptEngine.run(&mut dom, &limits);
+
+            assert_eq!(report.limit_hit, Some(crate::script::ScriptLimit::Nodes));
+            assert_eq!(report.nodes_added, 0);
+            let host = dom.element_by_id("h").unwrap();
+            assert_eq!(dom.text_content(host), "unchanged");
+        }
+
+        #[test]
+        fn rejects_scripts_larger_than_the_heap_source_budget() {
+            let mut dom = Dom::parse("<script>document.body.textContent = 'hello'</script>");
+            let limits = ScriptLimits {
+                max_heap_bytes: 8,
+                ..ScriptLimits::default()
+            };
+
+            let report = BoaScriptEngine.run(&mut dom, &limits);
+
+            assert_eq!(report.limit_hit, Some(crate::script::ScriptLimit::Heap));
+            assert_eq!(report.scripts_executed, 0);
+        }
+
+        #[test]
+        fn stops_before_evaluation_when_the_wall_budget_is_exhausted() {
+            let mut dom = Dom::parse(
+                "<p id=\"x\">unchanged</p>\
+                 <script>document.getElementById('x').textContent = 'changed'</script>",
+            );
+            let limits = ScriptLimits {
+                max_wall_millis: 0,
+                ..ScriptLimits::default()
+            };
+
+            let report = BoaScriptEngine.run(&mut dom, &limits);
+
+            assert_eq!(report.limit_hit, Some(crate::script::ScriptLimit::WallTime));
+            assert_eq!(report.scripts_executed, 0);
+            let target = dom.element_by_id("x").unwrap();
+            assert_eq!(dom.text_content(target), "unchanged");
         }
     }
 }

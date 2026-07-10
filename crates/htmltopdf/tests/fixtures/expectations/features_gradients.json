@@ -1,0 +1,17 @@
+{
+  "fixture": "gradients",
+  "layer": "features",
+  "description": "CSS linear-gradient backgrounds on blocks and table cells, painted beneath text.",
+  "pdf_assertions": {
+    "must_contain_operators": ["re", "f", "BT", "ET", "Tj"],
+    "must_contain_text": ["Gradient", "Diagonal", "cell"],
+    "min_size_bytes": 3000,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The hero has a teal-to-blue horizontal gradient behind white text.",
+    "The second block has a yellow/pink/purple diagonal gradient behind its text.",
+    "The first table cell has a purple-to-blue vertical gradient and remains readable."
+  ]
+}

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>htmltopdf Render Showcase</title>
+  <style>
+    @page { margin: 36pt; }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; color: #172033; font-size: 10.5pt; line-height: 1.45; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 26pt; color: #173b68; letter-spacing: -0.4pt; }
+    h2 { font-size: 14pt; color: #173b68; margin-bottom: 7pt; }
+    .eyebrow { color: #0b7a75; font-size: 8.5pt; font-weight: bold; text-transform: uppercase; letter-spacing: 1pt; }
+    .hero { background: #e9f3fb; border: 1pt solid #b7d3e8; border-radius: 10pt; padding: 18pt; margin-bottom: 14pt; }
+    .hero-row { display: flex; gap: 16pt; align-items: center; }
+    .hero-copy { flex-grow: 1; }
+    .hero p { color: #42536b; margin-top: 6pt; }
+    .image-frame { background: #ffffff; border: 1pt solid #b7d3e8; border-radius: 8pt; padding: 5pt; }
+    .image-frame img { width: 54pt; height: 54pt; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10pt; margin-bottom: 14pt; }
+    .card { background: #ffffff; border: 1pt solid #d9e2ec; border-radius: 8pt; padding: 12pt; }
+    .metric { color: #0b7a75; font-size: 22pt; font-weight: bold; }
+    .caption { color: #63758b; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.7pt; }
+    .section { border: 1pt solid #d9e2ec; border-radius: 8pt; padding: 13pt; margin-bottom: 14pt; }
+    .two-col { display: flex; gap: 16pt; }
+    .two-col > div { flex-grow: 1; }
+    ul { margin: 6pt 0 0 15pt; padding: 0; }
+    li { margin-bottom: 3pt; }
+    .callout { background: #f0fbf8; border-left: 4pt solid #0b7a75; padding: 9pt 11pt; color: #275f5a; }
+    table { width: 100%; border-collapse: collapse; margin-top: 5pt; }
+    th { background: #173b68; color: #ffffff; font-size: 8.5pt; text-align: left; padding: 7pt; }
+    td { border-bottom: 1pt solid #d9e2ec; padding: 7pt; }
+    tr:nth-child(even) td { background: #f7fafc; }
+    .tag { background: #dff5ee; color: #08736c; border-radius: 9pt; padding: 3pt 7pt; font-size: 8pt; font-weight: bold; }
+    code { font-family: Courier, monospace; color: #b14c1d; font-size: 9pt; }
+    a { color: #1265b0; }
+    .footer { color: #708197; font-size: 8pt; text-align: center; margin-top: 8pt; }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <div class="hero-row">
+      <div class="hero-copy">
+        <p class="eyebrow">Conversion test case 01</p>
+        <h1>Rendering showcase</h1>
+        <p>One self-contained page exercising type, color, spacing, borders, grid, flex, tables, links, and a PNG data URI.</p>
+      </div>
+      <div class="image-frame">
+        <img alt="Geometric raster test image" src="assets/render-test-shapes.png">
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><p class="metric">10.5 pt</p><p class="caption">Base font</p></div>
+    <div class="card"><p class="metric">3</p><p class="caption">Grid cards</p></div>
+    <div class="card"><p class="metric">PNG</p><p class="caption">Embedded image</p></div>
+  </div>
+
+  <div class="section">
+    <h2>Typography and layout</h2>
+    <div class="two-col">
+      <div>
+        <p>Arial provides the main UI voice; <strong>bold text</strong>, <em>italic styling</em>, and <code>monospace code</code> verify font selection and inline runs.</p>
+        <ul><li>Balanced line-height and padding</li><li>Rounded, solid-color cards</li><li>Flexible two-column content</li></ul>
+      </div>
+      <div class="callout"><strong>Supported CSS first.</strong><br>Every rule in this sample is chosen to exercise a feature already supported by htmltopdf.</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Styled table</h2>
+    <table>
+      <thead><tr><th>Component</th><th>Style exercised</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>Heading block</td><td>Font size, color, spacing</td><td><span class="tag">Ready</span></td></tr>
+        <tr><td>Metric cards</td><td>Grid, borders, radius</td><td><span class="tag">Ready</span></td></tr>
+        <tr><td>Inline content</td><td>Font family, code, link</td><td><a href="https://example.com">Open reference</a></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="footer">htmltopdf visual regression sample - static HTML to PDF</p>
+</body>
+</html>
