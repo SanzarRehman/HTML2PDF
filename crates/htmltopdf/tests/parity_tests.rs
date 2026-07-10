@@ -35,6 +35,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "borders"),
     ("features", "lists"),
     ("features", "tables"),
+    ("features", "rowspan"),
     ("features", "images"),
     ("features", "flexbox"),
     ("features", "grid"),

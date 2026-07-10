@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 28.8pt; }
+  body { font-size: 10pt; }
+  table { border-collapse: collapse; }
+  th, td { border: 1px solid #999; padding: 4pt 6pt; }
+  thead th { background-color: #333; color: #ffffff; }
+  td.cat { background-color: #dfeaf7; vertical-align: middle; font-weight: bold; }
+  td.num { text-align: right; }
+</style>
+</head>
+<body>
+  <h1>Rowspan</h1>
+  <table>
+    <thead>
+      <tr><th>Category</th><th>Item</th><th>Qty</th><th>Note</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="cat" rowspan="3">Produce</td>
+        <td>Apples</td><td class="num">40</td>
+        <td class="cat" rowspan="2">fresh daily</td>
+      </tr>
+      <tr>
+        <td>Bananas</td><td class="num">25</td>
+      </tr>
+      <tr>
+        <td>Cherries</td><td class="num">12</td><td>seasonal</td>
+      </tr>
+      <tr>
+        <td class="cat" rowspan="2">Dairy</td>
+        <td>Milk</td><td class="num">18</td><td>2% fat</td>
+      </tr>
+      <tr>
+        <td>Cheese</td><td class="num">9</td><td>aged</td>
+      </tr>
+      <tr>
+        <td colspan="2">Grand total</td><td class="num">104</td><td>units</td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>

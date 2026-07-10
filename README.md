@@ -117,7 +117,9 @@ Works today:
   order, inheritance, and `!important`.
 - Basic flow documents: headings, paragraphs, lists, inline runs, blockquotes —
   and tables rendered inline with the surrounding flow content.
-- Tables: rows, cells, colspans, headers/footers, borders, backgrounds,
+- Tables: rows, cells, colspans, **rowspans** (spanning cells paint once across
+  their rows, later rows shift into the freed columns, and a span crossing a
+  page break is split per page), headers/footers, borders, backgrounds,
   alignment, wrapping, clipping, and repeated table headers — with **rich cell
   content**: mixed bold/color/size segments, clickable links, and RTL text
   inside cells (plain cells keep the fast single-style path).
@@ -233,15 +235,13 @@ Out of scope by design (static print target):
 
 Not complete yet (queued, CSS-first):
 
-- Backgrounds beyond a solid color — the next item up.
+- Remaining background layers: `background-image: url()` and
+  `background-size`/`position`/`repeat` — the next item up (solid color and
+  `linear-gradient()` already paint on blocks and cells).
 - `%` **heights** (`%` widths/padding/margins/offsets and `min-width`/
   `min-height`/`max-height` already work; height percentages need a definite
   containing height, which is indefinite in normal flow).
-- `::before`/`::after` generated `content`, `letter-spacing`, `word-spacing`,
-  `text-transform`, `text-indent`.
-- Backgrounds beyond a solid color: `background-image`, `linear-gradient()`,
-  `background-size`/`position`/`repeat`.
-- `display: inline-block`; table `rowspan`.
+- `display: inline-block` — the atomic inline-level block box.
 - Flex/grid leftovers: `flex-shrink`/`order`/`align-self`/`align-content`/
   `wrap-reverse`; grid `grid-template-rows`, named lines/areas; and border
   polish (real `double`/`groove`, per-corner radius, `border-collapse`).
@@ -458,7 +458,8 @@ surface is deferred. The front of the queue, in order (see
 1. Background layers beyond the shipped solid-color / `linear-gradient()`
    slice: `url()` images, radial/repeating gradients, sizing/positioning, and
    multiple layers.
-2. `display: inline-block` and table `rowspan`.
+2. `display: inline-block` — the atomic inline-level block box. (Table `rowspan`
+   shipped 2026-07-10.)
 3. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
 4. `min()`/`max()`/`clamp()` math functions; `%` heights (needs a definite
    containing height) and multi-page overflow clipping; general `counter()` in

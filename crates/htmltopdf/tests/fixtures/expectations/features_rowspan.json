@@ -1,0 +1,33 @@
+{
+  "fixture": "rowspan",
+  "layer": "features",
+  "description": "rowspan cells (2- and 3-row) with vertical-align:middle, later rows shifting into freed columns, mixed with a colspan footer.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "f",
+      "re",
+      "S",
+      "w"
+    ],
+    "must_contain_text": [
+      "Rowspan",
+      "Produce",
+      "Dairy",
+      "fresh",
+      "seasonal",
+      "Grand"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "'Produce' spans three body rows as one tall cell, vertically centered, with a single blue background box and border.",
+    "'fresh daily' spans the first two body rows; 'seasonal' appears in the Note column of the third row once that span ends.",
+    "'Dairy' spans two rows, vertically centered; 'Cheese' and 'aged' sit beside it in the freed columns.",
+    "The final row's 'Grand total' spans two columns (colspan) alongside the rowspan cells above."
+  ]
+}

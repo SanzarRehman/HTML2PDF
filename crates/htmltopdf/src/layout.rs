@@ -387,8 +387,26 @@ fn layout_table_document(document: &Document, options: &RenderOptions) -> Vec<Pa
     let mut y = options.page_size.height - options.margin_top;
     let content_width = options.page_size.width - options.margin_left - options.margin_right;
     let table_geometry = table_geometry(document, content_width, &options.font);
-    let mut repeated_table_header: Option<Vec<TableCell>> = None;
 
+    let all_rows: Vec<&[TableCell]> = document
+        .blocks
+        .iter()
+        .map(|block| block.cells.as_slice())
+        .collect();
+    if table_has_rowspan(&all_rows) {
+        let row_refs: Vec<RowRef> = document
+            .blocks
+            .iter()
+            .map(|block| RowRef {
+                cells: &block.cells,
+                kind: block.kind,
+            })
+            .collect();
+        layout_table_with_rowspans(&row_refs, &table_geometry, &mut pages, &mut y, options);
+        return pages;
+    }
+
+    let mut repeated_table_header: Option<Vec<TableCell>> = None;
     for block in &document.blocks {
         if repeated_table_header.is_none() && block.kind == BlockKind::TableHeaderRow {
             repeated_table_header = Some(block.cells.clone());
@@ -986,17 +1004,29 @@ fn layout_table_box(
     let mut opts = options.clone();
     opts.table_row_height = table.row_height.unwrap_or(0.0);
 
-    let mut repeated_header: Option<Vec<TableCell>> = None;
-    for row in &table.rows {
-        if repeated_header.is_none() && row.kind == BlockKind::TableHeaderRow {
-            repeated_header = Some(row.cells.clone());
+    if table_has_rowspan(&rows) {
+        let row_refs: Vec<RowRef> = table
+            .rows
+            .iter()
+            .map(|row| RowRef {
+                cells: &row.cells,
+                kind: row.kind,
+            })
+            .collect();
+        layout_table_with_rowspans(&row_refs, &geometry, pages, y, &opts);
+    } else {
+        let mut repeated_header: Option<Vec<TableCell>> = None;
+        for row in &table.rows {
+            if repeated_header.is_none() && row.kind == BlockKind::TableHeaderRow {
+                repeated_header = Some(row.cells.clone());
+            }
+            let header = if row.kind == BlockKind::TableHeaderRow {
+                None
+            } else {
+                repeated_header.as_deref()
+            };
+            layout_table_row(&row.cells, &geometry, pages, y, &opts, header);
         }
-        let header = if row.kind == BlockKind::TableHeaderRow {
-            None
-        } else {
-            repeated_header.as_deref()
-        };
-        layout_table_row(&row.cells, &geometry, pages, y, &opts, header);
     }
 
     *carried = TABLE_FLOW_MARGIN;
@@ -2924,195 +2954,405 @@ fn render_planned_table_row(
 ) {
     let page = pages.last_mut().expect("at least one page exists");
     let mut x = options.margin_left;
-
     for planned in planned_cells {
-        let vertical_offset = vertical_text_offset(planned, row_height);
-
-        if let Some(gradient) = &planned.source.style.background_gradient {
-            page.commands.extend(linear_gradient_commands(
-                gradient,
-                x,
-                *y - row_height,
-                planned.width,
-                row_height,
-            ));
-        } else if let Some(background_color) = planned.source.style.background_color {
-            if background_color != Color::WHITE {
-                page.push_colored_fill_rect(
-                    Rect {
-                        x,
-                        y: *y - row_height,
-                        width: planned.width,
-                        height: row_height,
-                        stroke: false,
-                    },
-                    background_color,
-                );
-            }
-        }
-
-        if planned.source.style.border == Some(true) {
-            let rect = Rect {
-                x,
-                y: *y - row_height,
-                width: planned.width,
-                height: row_height,
-                stroke: true,
-            };
-            match crate::html::resolved_borders(&planned.source.style) {
-                Some(edges) => {
-                    paint_cell_border(page, &edges, planned.paint_scale, rect);
-                }
-                // Summary on but no resolvable sides (legacy inputs that only
-                // flipped the flag): the historic uniform 1px black rect.
-                None => {
-                    page.commands.push(PaintCommand::SetLineWidth(
-                        DEFAULT_BORDER_WIDTH * planned.paint_scale,
-                    ));
-                    page.push_rect(rect);
-                }
-            }
-        }
-
-        if planned.clip_content {
-            page.push_clip_rect(Rect {
-                x: x + planned.padding_left,
-                y: *y - row_height + planned.padding_bottom,
-                width: (planned.width - planned.padding_left - planned.padding_right).max(0.0),
-                height: (row_height - planned.padding_top - planned.padding_bottom).max(0.0),
-                stroke: false,
-            });
-        }
-
-        // A cell's default alignment follows its base direction (rtl → right),
-        // like flow blocks; an explicit `text-align` wins.
-        let default_align = if planned.source.style.direction == Some(true) {
-            TextAlign::Right
-        } else {
-            TextAlign::Left
-        };
-
-        // Rich cells: paint per piece — each with its own face, size, color,
-        // decoration, faux-bold decision, and clickable link rect.
-        for (line_index, pieces) in planned.piece_lines.iter().enumerate() {
-            let line_width: f32 = pieces.iter().map(|piece| piece.advance(options)).sum();
-            let start_x = match planned.source.style.align.unwrap_or(default_align) {
-                TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
-                TextAlign::Center => {
-                    x + ((planned.width - line_width) / 2.0).max(planned.padding_left)
-                }
-                TextAlign::Right => {
-                    x + (planned.width - line_width - planned.padding_right)
-                        .max(planned.padding_left)
-                }
-            };
-            let text_y = *y
-                - planned.padding_top
-                - vertical_offset
-                - planned.font_size
-                - (line_index as f32 * planned.leading);
-
-            let mut px = start_x;
-            for piece in pieces {
-                let piece_width = piece.advance(options);
-                if !piece.text.is_empty() {
-                    page.push_colored_line(
-                        Line {
-                            text: piece.text.clone(),
-                            x: px,
-                            y: text_y,
-                            font_size: piece.font_size,
-                            font: piece.font,
-                            leading: planned.leading,
-                        },
-                        piece.color,
-                        options.run_faux_bold(piece.font, piece.bold),
-                        piece.letter_spacing,
-                    );
-                    page.push_text_decoration(
-                        px,
-                        text_y,
-                        piece_width,
-                        piece.font_size,
-                        piece.color,
-                        piece.underline,
-                        piece.line_through,
-                    );
-                }
-                if piece.link != 0 && piece_width > 0.0 {
-                    let area = LinkArea {
-                        x: px,
-                        y: text_y - piece.font_size * 0.25,
-                        width: piece_width,
-                        height: piece.font_size * 1.1,
-                        link: piece.link,
-                    };
-                    match page.link_areas.last_mut() {
-                        Some(last)
-                            if last.link == area.link
-                                && last.y == area.y
-                                && (last.x + last.width - area.x).abs() < 0.05 =>
-                        {
-                            last.width += area.width;
-                        }
-                        _ => page.link_areas.push(area),
-                    }
-                }
-                px += piece_width;
-            }
-        }
-
-        for (line_index, line) in planned.lines.iter().enumerate() {
-            let text_width =
-                estimate_text_width(line, planned.font_size, options.run_font(planned.source.font));
-            let text_x = match planned.source.style.align.unwrap_or(default_align) {
-                // Table cells don't justify; treat it as left.
-                TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
-                TextAlign::Center => {
-                    x + ((planned.width - text_width) / 2.0).max(planned.padding_left)
-                }
-                TextAlign::Right => {
-                    x + (planned.width - text_width - planned.padding_right)
-                        .max(planned.padding_left)
-                }
-            };
-            let text_y = *y
-                - planned.padding_top
-                - vertical_offset
-                - planned.font_size
-                - (line_index as f32 * planned.leading);
-            let text_color = planned.source.style.color.unwrap_or(Color::BLACK);
-
-            page.push_colored_line(
-                Line {
-                    text: line.clone(),
-                    x: text_x,
-                    y: text_y,
-                    font_size: planned.font_size,
-                    font: planned.source.font,
-                    leading: planned.leading,
-                },
-                text_color,
-                options.run_faux_bold(planned.source.font, planned.source.style.bold),
-                0.0,
-            );
-            page.push_text_decoration(
-                text_x,
-                text_y,
-                text_width,
-                planned.font_size,
-                text_color,
-                planned.source.style.underline,
-                planned.source.style.line_through,
-            );
-        }
-
-        if planned.clip_content {
-            page.pop_clip();
-        }
-
+        render_one_cell(page, planned, x, *y, row_height, options, true);
         x += planned.width;
     }
+}
+
+/// Paint a single planned cell whose top edge is at `y_top`, spanning
+/// `cell_height` downward and `planned.width` to the right of `x`. Split out
+/// of [`render_planned_table_row`] so a rowspan cell can paint once across the
+/// combined height of the rows it covers.
+fn render_one_cell(
+    page: &mut Page,
+    planned: &PlannedCell<'_>,
+    x: f32,
+    y_top: f32,
+    cell_height: f32,
+    options: &RenderOptions,
+    paint_content: bool,
+) {
+    let vertical_offset = vertical_text_offset(planned, cell_height);
+
+    if let Some(gradient) = &planned.source.style.background_gradient {
+        page.commands.extend(linear_gradient_commands(
+            gradient,
+            x,
+            y_top - cell_height,
+            planned.width,
+            cell_height,
+        ));
+    } else if let Some(background_color) = planned.source.style.background_color {
+        if background_color != Color::WHITE {
+            page.push_colored_fill_rect(
+                Rect {
+                    x,
+                    y: y_top - cell_height,
+                    width: planned.width,
+                    height: cell_height,
+                    stroke: false,
+                },
+                background_color,
+            );
+        }
+    }
+
+    if planned.source.style.border == Some(true) {
+        let rect = Rect {
+            x,
+            y: y_top - cell_height,
+            width: planned.width,
+            height: cell_height,
+            stroke: true,
+        };
+        match crate::html::resolved_borders(&planned.source.style) {
+            Some(edges) => {
+                paint_cell_border(page, &edges, planned.paint_scale, rect);
+            }
+            // Summary on but no resolvable sides (legacy inputs that only
+            // flipped the flag): the historic uniform 1px black rect.
+            None => {
+                page.commands.push(PaintCommand::SetLineWidth(
+                    DEFAULT_BORDER_WIDTH * planned.paint_scale,
+                ));
+                page.push_rect(rect);
+            }
+        }
+    }
+
+    // Continuation segments of a page-split rowspan cell paint only their
+    // background and border; the text was drawn on the first segment above.
+    if !paint_content {
+        return;
+    }
+
+    if planned.clip_content {
+        page.push_clip_rect(Rect {
+            x: x + planned.padding_left,
+            y: y_top - cell_height + planned.padding_bottom,
+            width: (planned.width - planned.padding_left - planned.padding_right).max(0.0),
+            height: (cell_height - planned.padding_top - planned.padding_bottom).max(0.0),
+            stroke: false,
+        });
+    }
+
+    // A cell's default alignment follows its base direction (rtl → right),
+    // like flow blocks; an explicit `text-align` wins.
+    let default_align = if planned.source.style.direction == Some(true) {
+        TextAlign::Right
+    } else {
+        TextAlign::Left
+    };
+
+    // Rich cells: paint per piece — each with its own face, size, color,
+    // decoration, faux-bold decision, and clickable link rect.
+    for (line_index, pieces) in planned.piece_lines.iter().enumerate() {
+        let line_width: f32 = pieces.iter().map(|piece| piece.advance(options)).sum();
+        let start_x = match planned.source.style.align.unwrap_or(default_align) {
+            TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
+            TextAlign::Center => {
+                x + ((planned.width - line_width) / 2.0).max(planned.padding_left)
+            }
+            TextAlign::Right => {
+                x + (planned.width - line_width - planned.padding_right)
+                    .max(planned.padding_left)
+            }
+        };
+        let text_y = y_top
+            - planned.padding_top
+            - vertical_offset
+            - planned.font_size
+            - (line_index as f32 * planned.leading);
+
+        let mut px = start_x;
+        for piece in pieces {
+            let piece_width = piece.advance(options);
+            if !piece.text.is_empty() {
+                page.push_colored_line(
+                    Line {
+                        text: piece.text.clone(),
+                        x: px,
+                        y: text_y,
+                        font_size: piece.font_size,
+                        font: piece.font,
+                        leading: planned.leading,
+                    },
+                    piece.color,
+                    options.run_faux_bold(piece.font, piece.bold),
+                    piece.letter_spacing,
+                );
+                page.push_text_decoration(
+                    px,
+                    text_y,
+                    piece_width,
+                    piece.font_size,
+                    piece.color,
+                    piece.underline,
+                    piece.line_through,
+                );
+            }
+            if piece.link != 0 && piece_width > 0.0 {
+                let area = LinkArea {
+                    x: px,
+                    y: text_y - piece.font_size * 0.25,
+                    width: piece_width,
+                    height: piece.font_size * 1.1,
+                    link: piece.link,
+                };
+                match page.link_areas.last_mut() {
+                    Some(last)
+                        if last.link == area.link
+                            && last.y == area.y
+                            && (last.x + last.width - area.x).abs() < 0.05 =>
+                    {
+                        last.width += area.width;
+                    }
+                    _ => page.link_areas.push(area),
+                }
+            }
+            px += piece_width;
+        }
+    }
+
+    for (line_index, line) in planned.lines.iter().enumerate() {
+        let text_width =
+            estimate_text_width(line, planned.font_size, options.run_font(planned.source.font));
+        let text_x = match planned.source.style.align.unwrap_or(default_align) {
+            // Table cells don't justify; treat it as left.
+            TextAlign::Left | TextAlign::Justify => x + planned.padding_left,
+            TextAlign::Center => {
+                x + ((planned.width - text_width) / 2.0).max(planned.padding_left)
+            }
+            TextAlign::Right => {
+                x + (planned.width - text_width - planned.padding_right)
+                    .max(planned.padding_left)
+            }
+        };
+        let text_y = y_top
+            - planned.padding_top
+            - vertical_offset
+            - planned.font_size
+            - (line_index as f32 * planned.leading);
+        let text_color = planned.source.style.color.unwrap_or(Color::BLACK);
+
+        page.push_colored_line(
+            Line {
+                text: line.clone(),
+                x: text_x,
+                y: text_y,
+                font_size: planned.font_size,
+                font: planned.source.font,
+                leading: planned.leading,
+            },
+            text_color,
+            options.run_faux_bold(planned.source.font, planned.source.style.bold),
+            0.0,
+        );
+        page.push_text_decoration(
+            text_x,
+            text_y,
+            text_width,
+            planned.font_size,
+            text_color,
+            planned.source.style.underline,
+            planned.source.style.line_through,
+        );
+    }
+
+    if planned.clip_content {
+        page.pop_clip();
+    }
+}
+
+/// A source table row for the rowspan path: its cells plus its kind (so the
+/// leading header block can repeat after page breaks).
+struct RowRef<'a> {
+    cells: &'a [TableCell],
+    kind: BlockKind,
+}
+
+/// A `rowspan > 1` cell being painted, tracked as a per-page segment. A cell that
+/// fits on one page has a single segment; a page break splits it into several,
+/// with the text drawn on the first.
+struct OpenSpan {
+    planned_index: usize,
+    x: f32,
+    /// `y` of the current segment's top edge.
+    segment_top: f32,
+    first_segment: bool,
+    /// Last grid row (inclusive) this cell covers.
+    end_row: usize,
+}
+
+/// Lay out a table that contains at least one `rowspan > 1` cell. Unlike the
+/// per-row streaming path, this resolves the whole grid first so spanned-in
+/// columns are skipped and each spanning cell paints once across the rows it
+/// covers. A rowspan crossing a page break is split into per-page segments (text
+/// only on the first); the leading header repeats after breaks when it has no
+/// rowspan of its own.
+fn layout_table_with_rowspans(
+    rows: &[RowRef<'_>],
+    geometry: &TableGeometry,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    options: &RenderOptions,
+) {
+    let row_count = rows.len();
+    if row_count == 0 {
+        return;
+    }
+    let cell_rows: Vec<&[TableCell]> = rows.iter().map(|row| row.cells).collect();
+    let (placements, _columns) = build_table_grid(&cell_rows);
+
+    // Left edge of each grid column: column_x[c] = margin_left + Σ widths[..c].
+    let mut column_x = Vec::with_capacity(geometry.columns.len() + 1);
+    let mut edge = options.margin_left;
+    column_x.push(edge);
+    for width in &geometry.columns {
+        edge += width;
+        column_x.push(edge);
+    }
+    let x_of = |col: usize| column_x[col.min(geometry.columns.len())];
+
+    // Plan every placed cell at its resolved column origin.
+    let base_row_height = options.table_row_height;
+    let planned: Vec<PlannedCell> = placements
+        .iter()
+        .map(|placement| {
+            plan_cell_at(
+                &cell_rows[placement.row][placement.cell_index],
+                placement.col,
+                geometry,
+                base_row_height,
+                options,
+            )
+        })
+        .collect();
+
+    // Row heights: single-row cells set their row directly; a spanning cell whose
+    // content is taller than the rows it covers grows its last spanned row (the
+    // standard CSS table row-height distribution).
+    let scaled_base = base_row_height * geometry.paint_scale;
+    let mut row_height = vec![scaled_base; row_count];
+    for (index, placement) in placements.iter().enumerate() {
+        if placement.rowspan == 1 {
+            row_height[placement.row] = row_height[placement.row].max(planned[index].height);
+        }
+    }
+    for (index, placement) in placements.iter().enumerate() {
+        if placement.rowspan > 1 {
+            let last = (placement.row + placement.rowspan - 1).min(row_count - 1);
+            let have: f32 = row_height[placement.row..=last].iter().sum();
+            if planned[index].height > have {
+                row_height[last] += planned[index].height - have;
+            }
+        }
+    }
+
+    // The leading contiguous header rows repeat after each page break, but only
+    // when no header cell spans rows (the common case; documented otherwise).
+    let header_end = rows
+        .iter()
+        .take_while(|row| row.kind == BlockKind::TableHeaderRow)
+        .count();
+    let header_repeats = header_end > 0
+        && placements
+            .iter()
+            .filter(|placement| placement.row < header_end)
+            .all(|placement| placement.rowspan == 1);
+    let header_rows = if header_repeats { header_end } else { 0 };
+
+    let mut open: Vec<OpenSpan> = Vec::new();
+
+    for r in 0..row_count {
+        let rh = row_height[r];
+
+        if !has_space(*y, options, rh) {
+            // Finalize each open span's current segment on the page being left.
+            for span in &open {
+                finalize_span(pages, &planned, span, span.segment_top - *y, options);
+            }
+            push_page(pages, y, options);
+            // Repeat the header, but only once past the header block itself.
+            if header_rows > 0 && r >= header_rows {
+                for (hr, &hrh) in row_height.iter().enumerate().take(header_rows) {
+                    let page = pages.last_mut().expect("at least one page exists");
+                    for (index, placement) in placements.iter().enumerate() {
+                        if placement.row == hr {
+                            render_one_cell(page, &planned[index], x_of(placement.col), *y, hrh, options, true);
+                        }
+                    }
+                    *y -= hrh;
+                }
+            }
+            // Continuation segments start at the new page top.
+            for span in &mut open {
+                span.segment_top = *y;
+                span.first_segment = false;
+            }
+        }
+
+        // Paint single-row cells that live in this row.
+        {
+            let page = pages.last_mut().expect("at least one page exists");
+            for (index, placement) in placements.iter().enumerate() {
+                if placement.row == r && placement.rowspan == 1 {
+                    render_one_cell(page, &planned[index], x_of(placement.col), *y, rh, options, true);
+                }
+            }
+        }
+
+        // Open spans starting in this row; they paint when they close.
+        for (index, placement) in placements.iter().enumerate() {
+            if placement.row == r && placement.rowspan > 1 {
+                open.push(OpenSpan {
+                    planned_index: index,
+                    x: x_of(placement.col),
+                    segment_top: *y,
+                    first_segment: true,
+                    end_row: (placement.row + placement.rowspan - 1).min(row_count - 1),
+                });
+            }
+        }
+
+        *y -= rh;
+
+        // Close spans ending in this row.
+        let mut still_open = Vec::with_capacity(open.len());
+        for span in open.drain(..) {
+            if span.end_row == r {
+                finalize_span(pages, &planned, &span, span.segment_top - *y, options);
+            } else {
+                still_open.push(span);
+            }
+        }
+        open = still_open;
+    }
+}
+
+/// Paint one segment of an open rowspan cell: its background and border across
+/// `segment_height`, plus its text when this is the first segment.
+fn finalize_span(
+    pages: &mut [Page],
+    planned: &[PlannedCell<'_>],
+    span: &OpenSpan,
+    segment_height: f32,
+    options: &RenderOptions,
+) {
+    if segment_height <= 0.0 {
+        return;
+    }
+    let page = pages.last_mut().expect("at least one page exists");
+    render_one_cell(
+        page,
+        &planned[span.planned_index],
+        span.x,
+        span.segment_top,
+        segment_height,
+        options,
+        span.first_segment,
+    );
 }
 
 fn vertical_text_offset(planned: &PlannedCell<'_>, row_height: f32) -> f32 {
@@ -3148,89 +3388,108 @@ fn plan_table_cells<'a>(
 
     for cell in cells {
         let colspan = cell.colspan.max(1);
-        let width = cell_width(&table_geometry.columns, column_index, colspan);
-        // Font/padding scale down only in the last-resort branch of
-        // `table_geometry` (min-content still overflows); normally this is 1.0.
-        let paint_scale = table_geometry.paint_scale;
-        let font_size = cell_font_size(cell) * paint_scale;
-        // Cell leading honors CSS `line-height`; absolute lengths shrink with
-        // the table's paint scale, like the font itself.
-        let leading = match cell.style.line_height {
-            Some(crate::html::LineHeight::Length(points)) => points * paint_scale,
-            other => resolve_leading(other, font_size, CELL_LEADING_FACTOR),
-        };
-        let padding_left = cell.style.padding_left.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
-        let padding_right = cell.style.padding_right.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
-        let padding_top = cell.style.padding_top.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
-        let padding_bottom = cell.style.padding_bottom.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
-        let white_space = cell.style.white_space.unwrap_or(WhiteSpace::Normal);
-        let break_long_tokens = should_break_long_tokens(cell);
-        let max_lines = if white_space == WhiteSpace::NoWrap { 1 } else { 3 };
-        let content_width = width - padding_left - padding_right;
-
-        // Rich cells (inline markup) wrap their styled runs through the shared
-        // line breaker; plain cells keep the fast single-string path.
-        let (lines, piece_lines, leading) = if cell.runs.is_empty() {
-            let lines = wrap_cell_text(
-                &cell.text,
-                content_width,
-                font_size,
-                max_lines,
-                white_space,
-                break_long_tokens,
-                options.run_font(cell.font),
-            );
-            (lines, Vec::new(), leading)
-        } else {
-            let piece_lines = wrap_cell_runs(
-                &cell.runs,
-                content_width,
-                paint_scale,
-                max_lines,
-                cell.style.direction.unwrap_or(false),
-                options,
-            );
-            // Leading follows the tallest run in the cell (mixed sizes), still
-            // honoring an explicit CSS line-height.
-            let max_piece_font = piece_lines
-                .iter()
-                .flatten()
-                .map(|piece| piece.font_size)
-                .fold(font_size, f32::max);
-            let leading = match cell.style.line_height {
-                Some(crate::html::LineHeight::Length(points)) => points * paint_scale,
-                other => resolve_leading(other, max_piece_font, CELL_LEADING_FACTOR),
-            };
-            (Vec::new(), piece_lines, leading)
-        };
-        let line_count = lines.len().max(piece_lines.len()).max(1);
-        // A CSS-declared row height is a floor, but it shrinks with the table's
-        // shrink-to-fit scale (as a browser's print scaling does) so rows don't
-        // stay tall while the text is scaled down.
-        let height = ((line_count as f32 * leading) + padding_top + padding_bottom)
-            .max(base_row_height * table_geometry.paint_scale);
-        let clip_content = cell.style.overflow.unwrap_or(Overflow::Hidden) == Overflow::Hidden;
-
-        planned.push(PlannedCell {
-            source: cell,
-            width,
-            lines,
-            piece_lines,
-            font_size,
-            leading,
-            height,
-            padding_left,
-            padding_right,
-            padding_top,
-            padding_bottom,
-            clip_content,
-            paint_scale: table_geometry.paint_scale,
-        });
-
+        planned.push(plan_cell_at(
+            cell,
+            column_index,
+            table_geometry,
+            base_row_height,
+            options,
+        ));
         column_index += colspan;
     }
 
     planned
+}
+
+/// Plan one cell at a known column origin `col_start` (its `colspan` sets the
+/// width). Split out of [`plan_table_cells`] so the rowspan grid path can plan a
+/// cell placed at an arbitrary column, not just the next sequential one.
+fn plan_cell_at<'a>(
+    cell: &'a TableCell,
+    col_start: usize,
+    table_geometry: &TableGeometry,
+    base_row_height: f32,
+    options: &RenderOptions,
+) -> PlannedCell<'a> {
+    let colspan = cell.colspan.max(1);
+    let width = cell_width(&table_geometry.columns, col_start, colspan);
+    // Font/padding scale down only in the last-resort branch of
+    // `table_geometry` (min-content still overflows); normally this is 1.0.
+    let paint_scale = table_geometry.paint_scale;
+    let font_size = cell_font_size(cell) * paint_scale;
+    // Cell leading honors CSS `line-height`; absolute lengths shrink with
+    // the table's paint scale, like the font itself.
+    let leading = match cell.style.line_height {
+        Some(crate::html::LineHeight::Length(points)) => points * paint_scale,
+        other => resolve_leading(other, font_size, CELL_LEADING_FACTOR),
+    };
+    let padding_left = cell.style.padding_left.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+    let padding_right = cell.style.padding_right.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+    let padding_top = cell.style.padding_top.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+    let padding_bottom = cell.style.padding_bottom.unwrap_or(DEFAULT_CELL_PADDING) * paint_scale;
+    let white_space = cell.style.white_space.unwrap_or(WhiteSpace::Normal);
+    let break_long_tokens = should_break_long_tokens(cell);
+    let max_lines = if white_space == WhiteSpace::NoWrap { 1 } else { 3 };
+    let content_width = width - padding_left - padding_right;
+
+    // Rich cells (inline markup) wrap their styled runs through the shared
+    // line breaker; plain cells keep the fast single-string path.
+    let (lines, piece_lines, leading) = if cell.runs.is_empty() {
+        let lines = wrap_cell_text(
+            &cell.text,
+            content_width,
+            font_size,
+            max_lines,
+            white_space,
+            break_long_tokens,
+            options.run_font(cell.font),
+        );
+        (lines, Vec::new(), leading)
+    } else {
+        let piece_lines = wrap_cell_runs(
+            &cell.runs,
+            content_width,
+            paint_scale,
+            max_lines,
+            cell.style.direction.unwrap_or(false),
+            options,
+        );
+        // Leading follows the tallest run in the cell (mixed sizes), still
+        // honoring an explicit CSS line-height.
+        let max_piece_font = piece_lines
+            .iter()
+            .flatten()
+            .map(|piece| piece.font_size)
+            .fold(font_size, f32::max);
+        let leading = match cell.style.line_height {
+            Some(crate::html::LineHeight::Length(points)) => points * paint_scale,
+            other => resolve_leading(other, max_piece_font, CELL_LEADING_FACTOR),
+        };
+        (Vec::new(), piece_lines, leading)
+    };
+    let line_count = lines.len().max(piece_lines.len()).max(1);
+    // A CSS-declared row height is a floor, but it shrinks with the table's
+    // shrink-to-fit scale (as a browser's print scaling does) so rows don't
+    // stay tall while the text is scaled down.
+    let height = ((line_count as f32 * leading) + padding_top + padding_bottom)
+        .max(base_row_height * table_geometry.paint_scale);
+    let clip_content = cell.style.overflow.unwrap_or(Overflow::Hidden) == Overflow::Hidden;
+
+    PlannedCell {
+        source: cell,
+        width,
+        lines,
+        piece_lines,
+        font_size,
+        leading,
+        height,
+        padding_left,
+        padding_right,
+        padding_top,
+        padding_bottom,
+        clip_content,
+        paint_scale: table_geometry.paint_scale,
+    }
 }
 
 fn is_table_row_kind(kind: BlockKind) -> bool {
@@ -3410,6 +3669,62 @@ fn min_content_width(text: &str, font_size: f32, font: &crate::font::Font, break
     }
 }
 
+/// One cell placed on the CSS table grid, with its resolved column origin.
+/// `row`/`cell_index` locate it in the source rows; `col`/`colspan`/`rowspan`
+/// are its grid footprint.
+struct GridPlacement {
+    row: usize,
+    cell_index: usize,
+    col: usize,
+    colspan: usize,
+    rowspan: usize,
+}
+
+/// Whether any cell asks to span more than one row. When false, the table takes
+/// the historic per-row streaming path (byte-identical to before rowspan).
+fn table_has_rowspan(rows: &[&[TableCell]]) -> bool {
+    rows.iter()
+        .flat_map(|cells| cells.iter())
+        .any(|cell| cell.rowspan > 1)
+}
+
+/// Resolve the table grid: assign every cell a column origin, honoring `rowspan`
+/// occupancy from earlier rows (a column covered by a span from above is skipped
+/// by later rows). Returns placements in row-major order and the column count.
+fn build_table_grid(rows: &[&[TableCell]]) -> (Vec<GridPlacement>, usize) {
+    let mut placements = Vec::new();
+    // `occupied_until[c]` = the first row index at which column `c` is free again
+    // (0 = never occupied). A column is busy in `row` while `occupied_until[c] > row`.
+    let mut occupied_until: Vec<usize> = Vec::new();
+    let mut column_count = 0usize;
+    for (row, cells) in rows.iter().enumerate() {
+        let mut col = 0usize;
+        for (cell_index, cell) in cells.iter().enumerate() {
+            while occupied_until.get(col).is_some_and(|&free| free > row) {
+                col += 1;
+            }
+            let colspan = cell.colspan.max(1);
+            let rowspan = cell.rowspan.max(1);
+            if occupied_until.len() < col + colspan {
+                occupied_until.resize(col + colspan, 0);
+            }
+            for slot in occupied_until.iter_mut().skip(col).take(colspan) {
+                *slot = row + rowspan;
+            }
+            placements.push(GridPlacement {
+                row,
+                cell_index,
+                col,
+                colspan,
+                rowspan,
+            });
+            column_count = column_count.max(col + colspan);
+            col += colspan;
+        }
+    }
+    (placements, column_count.max(1))
+}
+
 /// Compute table column widths the way a browser's automatic table layout does,
 /// rather than force-fitting oversized declared widths by shrinking the font.
 ///
@@ -3441,25 +3756,33 @@ fn table_geometry_cells(
     content_width: f32,
     font: &crate::font::Font,
 ) -> TableGeometry {
-    let column_count = rows
-        .iter()
-        .map(|cells| cells.iter().map(|cell| cell.colspan.max(1)).sum::<usize>())
-        .max()
-        .unwrap_or(1)
-        .max(1);
+    // Rowspan tables resolve column origins through the grid so a cell in a row
+    // that skips spanned-in columns still measures the right column. Tables with
+    // no rowspan keep the historic sequential walk (byte-identical).
+    let grid = table_has_rowspan(rows).then(|| build_table_grid(rows));
+    let column_count = match &grid {
+        Some((_, count)) => *count,
+        None => rows
+            .iter()
+            .map(|cells| cells.iter().map(|cell| cell.colspan.max(1)).sum::<usize>())
+            .max()
+            .unwrap_or(1)
+            .max(1),
+    };
 
     let mut min_content = vec![0.0f32; column_count];
     let mut max_content = vec![0.0f32; column_count];
     // Cells spanning multiple columns constrain the spanned columns' totals.
     let mut spans: Vec<(usize, usize, f32, f32)> = Vec::new();
 
-    for cells in rows {
-        let mut col = 0;
-        for cell in cells.iter() {
+    // Attribute a cell's min/max-content width to its column origin `col` over
+    // `span` columns (clamped to the grid). Scoped so the closure's borrows of
+    // `min_content`/`max_content`/`spans` release before they are read below.
+    {
+        let mut attribute = |col: usize, span: usize, cell: &TableCell| {
             if col >= column_count {
-                break;
+                return;
             }
-            let span = cell.colspan.max(1);
             let end = (col + span).min(column_count);
             let font_size = cell_font_size(cell);
             let padding = cell_padding_x(cell);
@@ -3473,7 +3796,28 @@ fn table_geometry_cells(
             } else {
                 spans.push((col, end - col, min_w, max_w));
             }
-            col = end;
+        };
+
+        match &grid {
+            Some((placements, _)) => {
+                for placement in placements {
+                    let cell = &rows[placement.row][placement.cell_index];
+                    attribute(placement.col, placement.colspan, cell);
+                }
+            }
+            None => {
+                for cells in rows {
+                    let mut col = 0;
+                    for cell in cells.iter() {
+                        if col >= column_count {
+                            break;
+                        }
+                        let span = cell.colspan.max(1);
+                        attribute(col, span, cell);
+                        col = (col + span).min(column_count);
+                    }
+                }
+            }
         }
     }
 
@@ -5284,6 +5628,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "SL".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5296,6 +5641,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Name".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5336,6 +5682,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "Warning".to_string(),
                     colspan: 1,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5378,6 +5725,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Top".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5388,6 +5736,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Middle".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5398,6 +5747,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "Bottom".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5445,6 +5795,7 @@ mod tests {
                            the automatic table layout has to wrap it across several lines"
                         .to_string(),
                     colspan: 1,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5489,6 +5840,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "A".to_string(),
                     colspan: 1,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5531,6 +5883,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5592,6 +5945,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "1000055403@example.com".to_string(),
                     colspan: 1,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5662,6 +6016,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: long_word.clone(),
                     colspan: 1,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5725,6 +6080,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "A".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5735,6 +6091,7 @@ mod tests {
                     crate::html::TableCell {
                         text: "B".to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5769,6 +6126,7 @@ mod tests {
                 cells: vec![crate::html::TableCell {
                     text: "Report title".to_string(),
                     colspan: 2,
+                    rowspan: 1,
                     font: 0,
                     runs: Vec::new(),
                     style: crate::html::CellStyle {
@@ -5812,6 +6170,7 @@ mod tests {
             crate::html::TableCell {
                 text: "SL".to_string(),
                 colspan: 1,
+                rowspan: 1,
                 font: 0,
                 runs: Vec::new(),
                 style: crate::html::CellStyle {
@@ -5823,6 +6182,7 @@ mod tests {
             crate::html::TableCell {
                 text: "Name".to_string(),
                 colspan: 1,
+                rowspan: 1,
                 font: 0,
                 runs: Vec::new(),
                 style: crate::html::CellStyle {
@@ -5848,6 +6208,7 @@ mod tests {
                     crate::html::TableCell {
                         text: index.to_string(),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5858,6 +6219,7 @@ mod tests {
                     crate::html::TableCell {
                         text: format!("Student {index}"),
                         colspan: 1,
+                        rowspan: 1,
                         font: 0,
                         runs: Vec::new(),
                         style: crate::html::CellStyle {
@@ -5940,5 +6302,63 @@ mod tests {
             assert!(texts.contains(&"Acme report"));
             assert!(texts.contains(&format!("Page {} of {total}", index + 1).as_str()));
         }
+    }
+
+    #[test]
+    fn table_grid_skips_columns_occupied_by_rowspans() {
+        fn cell(colspan: usize, rowspan: usize) -> crate::html::TableCell {
+            crate::html::TableCell {
+                text: String::new(),
+                colspan,
+                rowspan,
+                style: crate::html::CellStyle::default(),
+                font: 0,
+                runs: Vec::new(),
+            }
+        }
+        // Row 0: [rowspan-2 @ col0][col1].  Row 1: a single cell, which must land
+        // in col1 because col0 is still covered by the span from row 0.
+        let r0 = vec![cell(1, 2), cell(1, 1)];
+        let r1 = vec![cell(1, 1)];
+        let rows: Vec<&[crate::html::TableCell]> = vec![&r0, &r1];
+        let (placements, columns) = super::build_table_grid(&rows);
+
+        assert_eq!(columns, 2);
+        assert_eq!((placements[0].row, placements[0].col), (0, 0));
+        assert_eq!((placements[1].row, placements[1].col), (0, 1));
+        assert_eq!((placements[2].row, placements[2].col), (1, 1));
+    }
+
+    #[test]
+    fn rowspan_cell_paints_once_and_shifts_the_next_row_into_free_columns() {
+        // A rowspan=2 cell in column 0 leaves the next row's only cell to fall
+        // into column 1 (under "B"), and the spanning cell paints a single time.
+        let document = crate::html::parse(
+            "<table>\
+               <tr><td rowspan=\"2\">AA</td><td>BB</td></tr>\
+               <tr><td>CC</td></tr>\
+             </table>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let texts: Vec<(&str, f32)> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::Text(text) => Some((text.text.as_str(), text.x)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            texts.iter().filter(|(text, _)| *text == "AA").count(),
+            1,
+            "the spanning cell must paint exactly once"
+        );
+        let bx = texts.iter().find(|(t, _)| *t == "BB").expect("BB").1;
+        let cx = texts.iter().find(|(t, _)| *t == "CC").expect("CC").1;
+        assert!(
+            (bx - cx).abs() < 0.5,
+            "CC should align under BB in column 1 (bx={bx}, cx={cx})"
+        );
     }
 }

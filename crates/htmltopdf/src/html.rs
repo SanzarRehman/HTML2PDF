@@ -78,6 +78,10 @@ pub struct GradientStop {
 pub struct TableCell {
     pub text: String,
     pub colspan: usize,
+    /// `rowspan` attribute (≥1). A cell with `rowspan > 1` occupies the same
+    /// columns in the following rows, which those rows skip. `rowspan="0"`
+    /// (span to end of row group) is treated as `1` for now.
+    pub rowspan: usize,
     pub style: CellStyle,
     /// Interned font-spec index into `Document::font_specs` (0 = default),
     /// assigned in a post-pass over the built document.
@@ -2425,6 +2429,13 @@ fn cells_from_row(
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(1)
             .max(1);
+        // `rowspan="0"` means "span to the end of the row group"; treat it as 1
+        // for this first pass (the common case is an explicit small span).
+        let rowspan = node
+            .attr("rowspan")
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
 
         // The cell's computed style already includes properties inherited from
         // its ancestors; layer the spreadsheet class alignment heuristic on top
@@ -2447,6 +2458,7 @@ fn cells_from_row(
         cells.push(TableCell {
             text,
             colspan,
+            rowspan,
             style,
             font: 0, // interned in the post-pass over the finished document
             runs,
@@ -6682,6 +6694,20 @@ mod tests {
         assert_eq!(document.blocks[0].cells.len(), 2);
         assert_eq!(document.blocks[0].cells[0].text, "Student ID");
         assert_eq!(document.blocks[0].cells[0].colspan, 2);
+    }
+
+    #[test]
+    fn parses_rowspan_attribute() {
+        let document = parse(
+            "<table>\
+               <tr><td rowspan=\"3\">A</td><td>B</td></tr>\
+               <tr><td>C</td></tr>\
+             </table>",
+        );
+        assert_eq!(document.blocks[0].cells[0].rowspan, 3);
+        // Absent / plain cells default to a single row, and `rowspan=\"0\"`
+        // (span-to-end, not yet modeled) clamps to 1.
+        assert_eq!(document.blocks[0].cells[1].rowspan, 1);
     }
 
     #[test]

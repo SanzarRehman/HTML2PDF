@@ -274,8 +274,10 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   (named families + generics resolve to system faces, several subset faces per
   document); `text-align` (left/center/right/justify/start/end), headings
   `h1`–`h6`.
-- Tables: rows, cells, colspans, `<thead>/<tbody>/<tfoot>`, repeated headers,
-  per-cell styles, borders, backgrounds, alignment, text wrapping/clipping, and
+- Tables: rows, cells, colspans, rowspans (occupancy grid; spanning cells paint
+  once across their rows and split at page breaks), `<thead>/<tbody>/<tfoot>`,
+  repeated headers, per-cell styles, borders, backgrounds, alignment, text
+  wrapping/clipping, and
   **browser-style automatic column layout** (min/max-content widths; declared
   widths honored when they fit; over-wide tables shrink-to-fit like print output
   instead of clipping). Cell text renders at its real CSS size, and row height is

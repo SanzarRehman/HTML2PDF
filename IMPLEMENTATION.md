@@ -862,10 +862,10 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **Backgrounds beyond solid color**: `background-image` (PNG/JPEG via
-      the existing decoder), `linear-gradient()`, `background-size` /
-      `background-position` / `background-repeat`.
-- [ ] **`display: inline-block`** and table `rowspan`.
+- [ ] **Backgrounds: remaining pieces** — `background-image: url()` (PNG/JPEG
+      via the existing decoder) and `background-size`/`-position`/`-repeat`.
+      (`linear-gradient()` shipped 2026-07-10; see below.)
+- [ ] **`display: inline-block`** — the atomic-inline-that-is-a-block primitive.
 - [ ] **Flex/grid leftovers**: `flex-shrink` / `order` / `align-self` /
       `align-content` / `wrap-reverse`; grid `grid-template-rows`, named
       areas/lines, cell alignment.
@@ -875,6 +875,31 @@ Details for each item are in the feature list below and in
 
 #### Recently shipped (2026-07)
 
+- [x] **Table `rowspan`** (2026-07-10): cells now span rows. A `build_table_grid`
+      pre-pass resolves column origins with an occupancy vector so later rows
+      skip columns still covered by a span from above (the classic case where a
+      row's Nth `<td>` is really in column N+k). Any table containing a
+      `rowspan > 1` cell takes a grid-based layout path
+      (`layout_table_with_rowspans`); rowspan-free tables keep the historic
+      per-row streaming path **verbatim**, so the 22k-cell doc stays
+      byte-identical (verified). Row heights are precomputed with span
+      distribution (a cell taller than the rows it covers grows its last spanned
+      row); the spanning cell paints once across the combined height with
+      `vertical-align` honored. A rowspan crossing a page break is split into
+      per-page segments (background/border on each page, text on the first). The
+      geometry pass (`table_geometry_cells`) is grid-aware too, so spanned
+      columns are measured at their true origin. Shared helpers `plan_cell_at`
+      and `render_one_cell` were extracted from the streaming path (pure
+      refactor, byte-identical) so both paths plan/paint a cell identically.
+      `features/rowspan` fixture; limits: `rowspan="0"` clamps to 1, and a
+      header row that itself spans rows is not repeated across pages.
+- [x] **CSS `linear-gradient()` backgrounds** (2026-07-10): `background-image` /
+      `background` gradients on blocks and table cells, approximated with opaque
+      color bands beneath content (32 axis-aligned / 24×24 diagonal); rounded
+      gradient blocks fall back to a representative solid fill. `features/gradients`.
+- [x] **CSS Paged Media margin boxes** (2026-07-10): `@top-*`/`@bottom-*` running
+      headers/footers resolved after pagination so `counter(page)`/`counter(pages)`
+      are final. `features/paged-media`.
 - [x] **`::before`/`::after` generated content** (2026-07-10): the selector
       parser accepts pseudo-elements instead of rejecting them — `::` arrives
       as two `Colon` tokens (the guard now permits the second), `before`/
