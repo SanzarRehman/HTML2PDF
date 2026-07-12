@@ -1469,12 +1469,15 @@ impl FlexItem<'_> {
 /// First-pass CSS grid: place the container's children into the column tracks
 /// of `grid-template-columns`, row-major (auto-placement), honoring
 /// `grid-column: span N`, `gap`, `fr` fractions, fixed lengths, and `auto`
-/// (content-sized) tracks. Rows are sized to their tallest item (via the same
-/// measure pass flex uses) and may break to a new page between rows.
+/// (content-sized) tracks. Rows follow `grid-template-rows` when given (fixed
+/// lengths, `auto`, `minmax()`, and `fr` shares of a definite container height),
+/// else each row is sized to its tallest item; either way a row may break to a
+/// new page as a unit. `align-items` / `align-self` place each item on the block
+/// (vertical) axis within its row.
 ///
-/// Not yet handled: line-based placement (`grid-column: 1 / 3`), named
-/// lines/areas, `minmax()`, dense packing, and `align`/`justify` of items
-/// within their cells (items are top-left in their cell).
+/// Not yet handled: line-based *row* placement (`grid-row: 1 / 3`) and row spans,
+/// named lines/areas, dense packing, and `justify-items` / `justify-self`
+/// (items fill their column width, so they are column-left).
 fn layout_grid_box(
     block: &crate::box_tree::BlockBox,
     grid: &crate::box_tree::GridContainer,
@@ -1487,6 +1490,7 @@ fn layout_grid_box(
     options: &RenderOptions,
 ) {
     use crate::box_tree::BoxChild;
+    use crate::html::AlignItems;
     use crate::html::GridTrack;
 
     use crate::html::{MaxTrack, MinTrack};
@@ -1687,23 +1691,37 @@ fn layout_grid_box(
             + grid.column_gap * (span as f32 - 1.0).max(0.0)
     };
 
-    // Lay rows out top-down; each row is as tall as its tallest item and may
-    // move to a fresh page as a unit (a single row is not split).
-    for row in 0..row_count {
+    // Per-row content height: the tallest item in that row at its cell width.
+    let row_content: Vec<f32> = (0..row_count)
+        .map(|row| {
+            placements
+                .iter()
+                .filter(|p| p.row == row)
+                .map(|p| items[p.item].0.measure_height(cell_width(p.col, p.span), options))
+                .fold(0.0f32, f32::max)
+        })
+        .collect();
+    // Resolve the final row heights from `grid-template-rows` (fixed / auto /
+    // minmax / fr against a definite container height). With no explicit rows
+    // this is exactly `row_content`, so the historical path is byte-identical.
+    let row_heights = resolve_grid_rows(grid, &row_content, block, row_count);
+
+    // Block-axis (vertical) alignment of an item within its row: the fraction of
+    // the leftover row height placed above it. `stretch`/`flex-start` keep the
+    // item at the row top, so an unset `align-items` is byte-identical.
+    let align_factor = |align: AlignItems| match align {
+        AlignItems::Stretch | AlignItems::FlexStart => 0.0,
+        AlignItems::Center => 0.5,
+        AlignItems::FlexEnd => 1.0,
+    };
+
+    // Lay rows out top-down; a row moves to a fresh page as a unit (not split).
+    for (row, &row_height) in row_heights.iter().enumerate() {
         let row_placements: Vec<&Placed> =
             placements.iter().filter(|p| p.row == row).collect();
         if row_placements.is_empty() {
             continue;
         }
-
-        let row_height = row_placements
-            .iter()
-            .map(|p| {
-                items[p.item]
-                    .0
-                    .measure_height(cell_width(p.col, p.span), options)
-            })
-            .fold(0.0f32, f32::max);
 
         if !has_space(*y, options, row_height) {
             push_page(pages, y, options);
@@ -1711,11 +1729,14 @@ fn layout_grid_box(
 
         let top = *y;
         for placed in row_placements {
-            let mut item_y = top;
+            let cell = cell_width(placed.col, placed.span);
+            let align = items[placed.item].0.align_self().unwrap_or(grid.align);
+            let item_height = items[placed.item].0.measure_height(cell, options);
+            let mut item_y = top - (row_height - item_height).max(0.0) * align_factor(align);
             let mut carried = 0.0;
             items[placed.item].0.layout(
                 lefts[placed.col],
-                cell_width(placed.col, placed.span),
+                cell,
                 pages,
                 &mut item_y,
                 &mut carried,
@@ -1729,6 +1750,80 @@ fn layout_grid_box(
             *y -= grid.row_gap;
         }
     }
+}
+
+/// Resolve grid row heights from `grid-template-rows`. Without an explicit row
+/// list every row is content-sized (the historical behavior, returned verbatim).
+/// With one: fixed lengths and `minmax()` bounds apply per row, and `fr` rows
+/// share the container's definite height (`height`/`min-height`) left over after
+/// the fixed rows and row gaps — falling back to content when the height is
+/// indefinite. Implicit rows past the track list stay content-sized.
+fn resolve_grid_rows(
+    grid: &crate::box_tree::GridContainer,
+    content: &[f32],
+    block: &crate::box_tree::BlockBox,
+    row_count: usize,
+) -> Vec<f32> {
+    use crate::html::{GridTrack, MaxTrack, MinTrack};
+    if grid.rows.is_empty() {
+        return content.to_vec();
+    }
+
+    let mut heights: Vec<f32> = (0..row_count)
+        .map(|row| match grid.rows.get(row) {
+            Some(GridTrack::Pt(h)) => *h,
+            Some(GridTrack::MinMax(min, max)) => {
+                let lo = match min {
+                    MinTrack::Pt(p) => *p,
+                    MinTrack::Auto => content[row],
+                };
+                let hi = match max {
+                    MaxTrack::Pt(p) => *p,
+                    MaxTrack::Auto | MaxTrack::Fr(_) => content[row],
+                };
+                content[row].max(lo).min(hi.max(lo))
+            }
+            // `fr` is provisional (content) until the free-space pass below.
+            Some(GridTrack::Fr(_)) | Some(GridTrack::Auto) | None => content[row],
+        })
+        .collect();
+
+    // `fr` rows need a definite container height to have anything to share.
+    let definite = [block.css_height, block.min_height]
+        .into_iter()
+        .flatten()
+        .fold(None, |acc: Option<f32>, h| Some(acc.map_or(h, |a| a.max(h))));
+    if let Some(height) = definite {
+        let container = if block.border_box {
+            (height - block.padding.top - block.padding.bottom).max(0.0)
+        } else {
+            height
+        };
+        let fr_rows: Vec<usize> = (0..row_count)
+            .filter(|&row| matches!(grid.rows.get(row), Some(GridTrack::Fr(_))))
+            .collect();
+        let total_weight: f32 = fr_rows
+            .iter()
+            .filter_map(|&row| match grid.rows.get(row) {
+                Some(GridTrack::Fr(w)) => Some(*w),
+                _ => None,
+            })
+            .sum();
+        if total_weight > 0.0 {
+            let total_gap = grid.row_gap * (row_count as f32 - 1.0).max(0.0);
+            let non_fr: f32 = (0..row_count)
+                .filter(|row| !fr_rows.contains(row))
+                .map(|row| heights[row])
+                .sum();
+            let free = (container - non_fr - total_gap).max(0.0);
+            for &row in &fr_rows {
+                if let Some(GridTrack::Fr(w)) = grid.rows.get(row) {
+                    heights[row] = free * w / total_weight;
+                }
+            }
+        }
+    }
+    heights
 }
 
 /// Return `(leading offset, gap between items)` for a `justify-content` value,

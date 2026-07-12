@@ -41,6 +41,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "flexbox"),
     ("features", "flex-item"),
     ("features", "grid"),
+    ("features", "grid-rows"),
     ("features", "floats"),
     ("features", "positioning"),
     ("features", "line-height"),

@@ -862,12 +862,12 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **Grid leftovers**: `grid-template-rows`, named areas/lines, `minmax()`
-      row sizing, dense packing, and item alignment within a cell
-      (`justify-items` / `align-items` / `justify-self` / `align-self`). (The
-      flex item leftovers — `order`, `flex-shrink`, `align-self`,
-      `align-content`, `wrap-reverse` — shipped 2026-07-12; `order` already
-      re-sequences grid items too.)
+- [ ] **Grid leftovers**: line-based *row* placement (`grid-row: A / B`) and row
+      spans, named areas/lines, dense packing, and horizontal item alignment
+      (`justify-items` / `justify-self`, which need shrink-to-fit items). (Row
+      *sizing* via `grid-template-rows` — fixed/auto/minmax/fr — and block-axis
+      `align-items` / `align-self` shipped 2026-07-12; `order` re-sequences grid
+      items too.)
 - [ ] **Remaining background & inline-block pieces**: `background-image: url()`
       on table cells; multi-line / wrapping inline-block content, nested block
       children, and `vertical-align` on inline-blocks.
@@ -877,6 +877,22 @@ Details for each item are in the feature list below and in
 
 #### Recently shipped (2026-07)
 
+- [x] **Grid row axis: `grid-template-rows` + block-axis alignment** (2026-07-12):
+      grid rows now follow an explicit track list — fixed lengths, `auto`
+      (content), `minmax()` bounds, and `fr` shares of a *definite* container
+      height (`height`/`min-height`, split after the fixed rows and row gaps;
+      falls back to content when the height is indefinite). Implicit rows past
+      the track list stay content-sized. `resolve_grid_rows` returns the measured
+      content heights verbatim when there is no `grid-template-rows`, so the grid
+      fixture and the 22k-cell doc are **byte-identical**. Items are placed on the
+      block (vertical) axis by `align-items` with a per-item `align-self` override
+      (center/end via the row's leftover height; `stretch`≈`flex-start`, so an
+      unset value keeps items at the row top — also byte-identical). The
+      `align-self` / `AlignItems` plumbing is shared with the flex work.
+      `features/grid-rows` fixture. Not yet: line-based *row* placement
+      (`grid-row`) and row spans, named lines/areas, and `justify-items` /
+      `justify-self` (items still fill their column width, so they are
+      column-left).
 - [x] **Flex item leftovers** (2026-07-12): `order`, `flex-shrink`,
       `align-self`, `align-content`, and `flex-wrap: wrap-reverse`. Items now
       re-sequence by `order` (stable sort, applied to grid items too) before

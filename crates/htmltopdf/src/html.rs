@@ -369,6 +369,8 @@ pub struct CellStyle {
     pub display_grid: bool,
     /// `grid-template-columns` track list (`None` = single auto column).
     pub grid_template: Option<Vec<GridTrack>>,
+    /// `grid-template-rows` track list (`None` = all rows auto/content-sized).
+    pub grid_template_rows: Option<Vec<GridTrack>>,
     /// `row-gap` (or the first value of a two-value `gap`), points.
     pub row_gap: Option<f32>,
     /// `grid-column: span N` on a grid item.
@@ -462,6 +464,7 @@ impl Default for CellStyle {
             align_content: None,
             display_grid: false,
             grid_template: None,
+            grid_template_rows: None,
             row_gap: None,
             grid_span: None,
             grid_col_start: None,
@@ -1679,8 +1682,10 @@ fn build_block(
     });
     let grid = own.display_grid.then(|| crate::box_tree::GridContainer {
         columns: own.grid_template.clone().unwrap_or_default(),
+        rows: own.grid_template_rows.clone().unwrap_or_default(),
         column_gap: own.gap.unwrap_or(0.0),
         row_gap: own.row_gap.unwrap_or(0.0),
+        align: own.align_items.unwrap_or(AlignItems::Stretch),
     });
     // Boxed sizing extras (`min-width`, `min/max-height`, `%` padding/margin/
     // offsets). Almost always `None`, so the mapping is cheap.
@@ -2965,6 +2970,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         align_content: own.align_content,
         display_grid: own.display_grid,
         grid_template: own.grid_template.clone(),
+        grid_template_rows: own.grid_template_rows.clone(),
         row_gap: own.row_gap,
         grid_span: own.grid_span,
         grid_col_start: own.grid_col_start,
@@ -5521,6 +5527,12 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 target.cell.grid_template = Some(tracks);
             }
         }
+        "grid-template-rows" => {
+            let tracks = parse_grid_tracks(value);
+            if !tracks.is_empty() {
+                target.cell.grid_template_rows = Some(tracks);
+            }
+        }
         "position" => {
             target.cell.position = match value.trim().to_ascii_lowercase().as_str() {
                 "relative" => Some(PositionKind::Relative),
@@ -6494,6 +6506,7 @@ impl CellStyle {
         self.align_content = other.align_content.or(self.align_content);
         self.display_grid |= other.display_grid;
         self.grid_template = other.grid_template.or(self.grid_template.take());
+        self.grid_template_rows = other.grid_template_rows.or(self.grid_template_rows.take());
         self.row_gap = other.row_gap.or(self.row_gap);
         self.grid_span = other.grid_span.or(self.grid_span);
         self.grid_col_start = other.grid_col_start.or(self.grid_col_start);
@@ -6955,6 +6968,24 @@ mod tests {
             })
             .collect();
         assert_eq!(spans, vec![2, 1, 1]);
+    }
+
+    #[test]
+    fn grid_template_rows_and_align_reach_the_box_tree() {
+        use super::{AlignItems, GridTrack};
+        let document = parse(
+            "<style>.g { display:grid; grid-template-columns: 1fr 1fr;\
+                    grid-template-rows: 80pt 1fr; align-items: center; }</style>\
+             <div class=\"g\"><div>a</div><div>b</div></div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let grid_block = flow_blocks(&flow)
+            .into_iter()
+            .find(|b| b.grid.is_some())
+            .expect("a grid container");
+        let grid = grid_block.grid.as_ref().unwrap();
+        assert_eq!(grid.rows, vec![GridTrack::Pt(80.0), GridTrack::Fr(1.0)]);
+        assert_eq!(grid.align, AlignItems::Center);
     }
 
     #[test]

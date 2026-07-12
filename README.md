@@ -167,8 +167,9 @@ Works today:
 - Modern layout, first pass each: **flexbox** (`display: flex` — grow/basis/
   `flex-shrink`, `order`, `flex-wrap`/`wrap-reverse`, `justify-content`,
   `align-items`/`align-self`/`align-content`, gaps, row and column), **grid**
-  (`display: grid` — fixed/`fr`/`auto`/`repeat()`/`minmax()` tracks, `span N`
-  and line-based `grid-column: A / B` placement, gaps),
+  (`display: grid` — fixed/`fr`/`auto`/`repeat()`/`minmax()` column *and*
+  `grid-template-rows` tracks, `span N` and line-based `grid-column: A / B`
+  placement, `align-items`/`align-self`, gaps),
   **floats** with real text wrap (`float: left/right`, `clear`, stacked floats),
   and **positioning** (`position: relative/absolute/fixed` with box offsets;
   `z-index` ordering with negative z painting *below* the flow — the
@@ -250,11 +251,11 @@ Not complete yet (queued, CSS-first):
   `min-height`/`max-height` already work; height percentages need a definite
   containing height, which is indefinite in normal flow).
 - `display: inline-block` — the atomic inline-level block box.
-- Grid leftovers: `grid-template-rows`, named lines/areas, `minmax()` rows,
-  dense packing, and per-cell alignment; plus border polish (real
-  `double`/`groove`, per-corner radius, `border-collapse`). (Flex item
-  leftovers — `flex-shrink`/`order`/`align-self`/`align-content`/`wrap-reverse`
-  — shipped.)
+- Grid leftovers: line-based `grid-row` placement and row spans, named
+  lines/areas, dense packing, and `justify-items`/`justify-self`; plus border
+  polish (real `double`/`groove`, per-corner radius, `border-collapse`). (Flex
+  item leftovers and the grid row axis — `grid-template-rows`,
+  `align-items`/`align-self` — shipped.)
 - Isolated stacking contexts (`z-index` compares globally today; negative z
   already paints below the flow, but `opacity`/`transform` don't create
   contexts).
@@ -464,13 +465,15 @@ The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 (`:hover`, transitions, animations) is out of scope by design, and the JS DOM
 surface is deferred. Recently shipped: table `rowspan` (2026-07-10),
 `background-image: url()` on flow blocks with size/position/repeat,
-`display: inline-block`, and the flex item leftovers — `order`, `flex-shrink`,
-`align-self`, `align-content`, `wrap-reverse` (2026-07-12). The front of the
-queue, in order (see [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full
+`display: inline-block`, the flex item leftovers (`order`, `flex-shrink`,
+`align-self`, `align-content`, `wrap-reverse`), and the grid row axis —
+`grid-template-rows` and `align-items`/`align-self` (2026-07-12). The front of
+the queue, in order (see [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full
 checklist):
 
-1. Grid leftovers (`grid-template-rows`, named areas/lines, per-cell alignment)
-   and border polish; isolated `z-index` stacking contexts.
+1. Grid leftovers (line-based `grid-row` placement + row spans, named
+   areas/lines, `justify-items`/`justify-self`) and border polish; isolated
+   `z-index` stacking contexts.
 2. Remaining background & inline-block pieces: `url()` on table cells,
    radial/repeating gradients, multiple layers; multi-line / nested-block
    inline-block content and non-baseline `vertical-align`.

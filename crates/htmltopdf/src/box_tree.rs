@@ -228,8 +228,15 @@ pub struct FlexContainer {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GridContainer {
     pub columns: Vec<GridTrack>,
+    /// `grid-template-rows` track list; empty = every row is auto (content)
+    /// sized, the historical behavior.
+    pub rows: Vec<GridTrack>,
     pub column_gap: f32,
     pub row_gap: f32,
+    /// `align-items`: block-axis (vertical) placement of each item within its
+    /// row. `stretch` (the default) is treated as `flex-start` — items are not
+    /// inflated — so an unset value keeps items at the row top.
+    pub align: AlignItems,
 }
 
 /// The four CSS box edges, in points.

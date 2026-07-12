@@ -1,0 +1,35 @@
+<html><head><style>
+  body { font-size: 12pt; }
+  h3 { font-size: 13pt; margin: 10pt 0 4pt; }
+  .g { display: grid; grid-template-columns: 90pt 90pt; column-gap: 10pt; row-gap: 6pt;
+       border: 1pt solid #999; }
+  .c { background: #e8eef7; border: 1pt solid #66c; padding: 2pt 4pt; }
+
+  /* grid-template-rows: fixed track heights (80pt then 40pt). */
+  .fixed { grid-template-rows: 80pt 40pt; }
+
+  /* align-items on the container, per-item align-self overrides, in a tall row. */
+  .aligned { grid-template-rows: 90pt; align-items: center; }
+  .aligned .bottom { align-self: flex-end; }
+  .aligned .topper { align-self: flex-start; }
+
+  /* fr rows share a definite container height: 1fr = 60pt, 2fr = 120pt of 180pt. */
+  .frac { grid-template-rows: 1fr 2fr; height: 180pt; }
+</style></head><body>
+<h3>Fixed rows</h3>
+<div class="g fixed">
+  <div class="c">Rone-a</div><div class="c">Rone-b</div>
+  <div class="c">Rtwo-a</div><div class="c">Rtwo-b</div>
+</div>
+
+<h3>Row alignment</h3>
+<div class="g aligned">
+  <div class="c topper">Topper</div><div class="c bottom">Bottom</div>
+</div>
+
+<h3>Fractional rows</h3>
+<div class="g frac">
+  <div class="c">Fone-a</div><div class="c">Fone-b</div>
+  <div class="c">Ftwo-a</div><div class="c">Ftwo-b</div>
+</div>
+</body></html>

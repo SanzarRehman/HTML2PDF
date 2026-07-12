@@ -1,0 +1,17 @@
+{
+  "fixture": "grid-rows",
+  "layer": "features",
+  "description": "grid-template-rows track sizing (fixed lengths, and fr shares of a definite container height) plus grid item block-axis alignment (align-items on the container, per-item align-self overrides).",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "re", "f", "S"],
+    "must_contain_text": ["Rone-a", "Rtwo-b", "Topper", "Bottom", "Fone-a", "Ftwo-b"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The fixed grid has an 80pt first row and a 40pt second row, so Rtwo starts 80pt below Rone.",
+    "In the 90pt-tall aligned row, Topper is top-aligned and Bottom is bottom-aligned (align-self overrides the container's align-items: center).",
+    "The fractional grid splits its 180pt height as 1fr (60pt) over 2fr (120pt), so Ftwo starts 60pt below Fone."
+  ]
+}
