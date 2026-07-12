@@ -129,6 +129,11 @@ Works today:
   `line-height`, and backgrounds: solid color, `linear-gradient()` (blocks and
   table cells), and `background-image: url()` raster images on flow blocks
   (`background-size`/`-position`/`-repeat`, tiled and clipped to the box).
+- **`display: inline-block`**: an element that is a block box (padding, border,
+  background, `border-radius`, CSS width/height) but flows on the surrounding
+  line as an atomic item aligned to the text baseline — badges, buttons, tags,
+  chips, color swatches — with the surrounding text flowing around it and
+  wrapping. (First slice: single-line inner content.)
 - **Percentage lengths and min/max sizing**: `%` widths, padding, margins, and
   positioned-box offsets resolve against the containing block;
   `min-width`/`max-width` (points or `%`) and `min-height`/`max-height` (points)
@@ -454,16 +459,16 @@ speed and memory stay visible as fidelity improves.
 
 The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 (`:hover`, transitions, animations) is out of scope by design, and the JS DOM
-surface is deferred. The front of the queue, in order (see
+surface is deferred. Recently shipped: table `rowspan` (2026-07-10),
+`background-image: url()` on flow blocks with size/position/repeat, and
+`display: inline-block` (2026-07-12). The front of the queue, in order (see
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
 
-1. `display: inline-block` — the atomic inline-level block box. (Table
-   `rowspan` shipped 2026-07-10; `background-image: url()` on flow blocks with
-   size/position/repeat shipped 2026-07-12.)
-2. Remaining background layers: `url()` on table cells, radial/repeating
-   gradients, and multiple layers.
-3. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
-4. `min()`/`max()`/`clamp()` math functions; `%` heights (needs a definite
+1. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
+2. Remaining background & inline-block pieces: `url()` on table cells,
+   radial/repeating gradients, multiple layers; multi-line / nested-block
+   inline-block content and non-baseline `vertical-align`.
+3. `min()`/`max()`/`clamp()` math functions; `%` heights (needs a definite
    containing height) and multi-page overflow clipping; general `counter()` in
    generated content (page counters are available in `@page` margin boxes).
 

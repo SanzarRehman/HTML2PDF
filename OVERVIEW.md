@@ -295,7 +295,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   fixed-height box.
 - **Modern layout, first pass each**: flexbox (`display: flex` — grow/basis,
   justify/align, gaps, row+column), grid (`display: grid` — `fr`/`auto`/
-  `repeat()` tracks, spans, gaps), **floats** with real text wrap and `clear`,
+  `repeat()` tracks, spans, gaps), **`display: inline-block`** (a block box that
+  flows inline on the baseline — badges/buttons/tags), **floats** with real text
+  wrap and `clear`,
   and **positioning** — `relative`, `absolute` (positioned-ancestor containing
   blocks), `fixed` **repeated on every page** (headers/watermarks), and
   `z-index` ordering (positioned content paints above the flow).

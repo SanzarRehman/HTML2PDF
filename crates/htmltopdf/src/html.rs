@@ -339,6 +339,9 @@ pub struct CellStyle {
     /// repeat controls. Boxed (rarely set) to keep the per-cell struct small; a
     /// spec with an empty `src` carries only sizing longhands and paints nothing.
     pub background_image: Option<Box<BackgroundImageSpec>>,
+    /// `display: inline-block` — the element is a block box that flows inline,
+    /// placed on the surrounding line as an atomic item.
+    pub display_inline_block: bool,
     /// `display: flex` — this element establishes a flex container.
     pub display_flex: bool,
     pub flex_direction: Option<FlexDirection>,
@@ -433,6 +436,7 @@ impl Default for CellStyle {
             background_color: None,
             background_gradient: None,
             background_image: None,
+            display_inline_block: false,
             display_flex: false,
             flex_direction: None,
             justify_content: None,
@@ -1192,6 +1196,7 @@ impl ChildAcc {
         };
         if let Some(last) = self.pending.last_mut() {
             if last.image.is_none()
+                && last.inline_block.is_none()
                 && last.font_size == ctx.font_size
                 && last.bold == ctx.bold
                 && last.font == ctx.font
@@ -1218,6 +1223,27 @@ impl ChildAcc {
             word_spacing: ctx.word_spacing,
             color: ctx.color,
             image: None,
+            inline_block: None,
+        });
+    }
+
+    /// Append a `display: inline-block` element, flowing with the surrounding
+    /// text as an atomic item (laid out into a fragment at layout time).
+    fn push_inline_block(&mut self, block: crate::box_tree::BlockBox, ctx: &FlowCtx) {
+        self.word_boundary = true;
+        self.pending.push(crate::box_tree::InlineRun {
+            text: String::new(),
+            font_size: ctx.font_size,
+            bold: false,
+            font: ctx.font,
+            link: ctx.link,
+            underline: false,
+            line_through: false,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            color: ctx.color,
+            image: None,
+            inline_block: Some(Box::new(block)),
         });
     }
 
@@ -1237,6 +1263,7 @@ impl ChildAcc {
             word_spacing: 0.0,
             color: ctx.color,
             image: Some(Box::new(image)),
+            inline_block: None,
         });
     }
 
@@ -1319,6 +1346,16 @@ fn build_node(
             let tag = name.as_str();
             // Non-rendered subtrees and `display: none` contribute nothing.
             if matches!(tag, "head" | "script" | "style" | "title") || computed.hidden[id] {
+                return;
+            }
+
+            // `display: inline-block`: build the element as a block box, but
+            // attach it to the current line as an atomic inline item rather than
+            // a block sibling (it flows with text and does not break the line).
+            if computed.style[id].display_inline_block {
+                if let Some(block) = build_block(dom, id, env, ctx, tag) {
+                    acc.push_inline_block(block, &ctx);
+                }
                 return;
             }
 
@@ -2877,6 +2914,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         background_gradient: own.background_gradient.clone(),
         background_image: own.background_image.clone(),
         // Flex/grid properties are not inherited.
+        display_inline_block: own.display_inline_block,
         display_flex: own.display_flex,
         flex_direction: own.flex_direction,
         justify_content: own.justify_content,
@@ -5324,6 +5362,9 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "display" if value.eq_ignore_ascii_case("table-footer-group") => {
             target.display = Some(CssDisplay::TableFooterGroup);
         }
+        "display" if value.eq_ignore_ascii_case("inline-block") => {
+            target.cell.display_inline_block = true;
+        }
         "display" if value.eq_ignore_ascii_case("flex") || value.eq_ignore_ascii_case("inline-flex") => {
             target.cell.display_flex = true;
         }
@@ -6355,6 +6396,7 @@ impl CellStyle {
         // own size/position/repeat) replaces a lower one. Splitting those
         // sub-properties across rules is uncommon and not merged field-by-field.
         self.background_image = other.background_image.or(self.background_image.take());
+        self.display_inline_block |= other.display_inline_block;
         self.display_flex |= other.display_flex;
         self.flex_direction = other.flex_direction.or(self.flex_direction);
         self.justify_content = other.justify_content.or(self.justify_content);
@@ -8028,6 +8070,38 @@ mod tests {
         assert_eq!(spec.position.y, super::PosAxis::Percent(0.0));
         // The non-white background-color rides along as the backdrop.
         assert_eq!(spec.backdrop, Some(crate::color::Color::from_rgb_u8(0xee, 0xee, 0xff)));
+    }
+
+    #[test]
+    fn inline_block_flows_as_an_atomic_run_keeping_surrounding_text() {
+        let document = parse(
+            "<p>A <span style=\"display:inline-block;padding:2pt 4pt;border:1px solid #333\">X</span> BB</p>",
+        );
+        let flow = document.flow.as_ref().expect("flow");
+        let blocks = flow_blocks(flow);
+        let line = blocks
+            .iter()
+            .find_map(|block| {
+                block.children.iter().find_map(|child| match child {
+                    BoxChild::Line(runs) => Some(runs),
+                    _ => None,
+                })
+            })
+            .expect("a line box");
+
+        // The inline-block is an atomic run carrying a block box, not text.
+        let index = line
+            .iter()
+            .position(|run| run.inline_block.is_some())
+            .expect("an inline-block run");
+        assert!(index > 0, "the 'A' text precedes the inline-block");
+        assert_eq!(line[index].text, "");
+        // Text after the inline-block is NOT merged into its (empty) run.
+        let joined: String = line.iter().map(|run| run.text.as_str()).collect();
+        assert!(joined.contains('A') && joined.contains("BB"), "kept: {joined:?}");
+        // The inline-block's own content lives inside its block box.
+        let block = line[index].inline_block.as_deref().expect("block");
+        assert!(block.border.is_some(), "the inline-block keeps its border");
     }
 
     #[test]

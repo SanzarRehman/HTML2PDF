@@ -2447,7 +2447,7 @@ fn layout_line_box(
     floats: &mut Vec<FloatBand>,
     options: &RenderOptions,
 ) {
-    let mut breaker = LineBreaker::new(runs);
+    let mut breaker = LineBreaker::new(runs, options);
     let mut indent = first_indent;
     while !breaker.is_done() {
         let (band_x, band_width) = float_band_at(floats, *y, x, width);
@@ -2495,9 +2495,27 @@ fn layout_line_box(
             .iter()
             .filter_map(|piece| piece.image.map(|(_, _, height)| height))
             .fold(0.0_f32, f32::max);
+        // An inline-block rises `baseline` above the line baseline and descends
+        // `height - baseline` below it (0 for lines with no inline-block, so the
+        // math below reduces to the text/image case).
+        let ib_ascent = visual
+            .iter()
+            .filter_map(|piece| piece.inline_block.as_ref().map(|f| f.baseline))
+            .fold(0.0_f32, f32::max);
+        let ib_descent = visual
+            .iter()
+            .filter_map(|piece| piece.inline_block.as_ref().map(|f| f.height - f.baseline))
+            .fold(0.0_f32, f32::max);
         let text_ascent = max_font * 0.8;
-        let image_rise = (max_image - text_ascent).max(0.0);
-        let leading = resolve_leading(line_height, max_font, FLOW_LEADING_FACTOR) + image_rise;
+        // The tallest atomic item's rise above the baseline (an image's height or
+        // an inline-block's baseline distance); equals `max_image` with no inline-block.
+        let atomic_top = max_image.max(ib_ascent);
+        let image_rise = (atomic_top - text_ascent).max(0.0);
+        let mut leading = resolve_leading(line_height, max_font, FLOW_LEADING_FACTOR) + image_rise;
+        // Grow the line box so an inline-block's descent below the baseline fits.
+        if ib_descent > 0.0 {
+            leading = leading.max(text_ascent.max(atomic_top) + ib_descent);
+        }
         // When line-height exceeds the default line box, distribute the extra as
         // half-leading (glyphs sit mid-line, as browsers do). When it's smaller
         // (or unset) the baseline stays where the default box puts it.
@@ -2533,10 +2551,33 @@ fn layout_line_box(
         // ascent (~0.8 em) — or by the tallest inline image, whichever rises
         // higher — so ascenders stay inside the line box instead of
         // overlapping the border/padding of the box above.
-        let baseline = *y - half_leading - text_ascent.max(max_image);
+        let baseline = *y - half_leading - text_ascent.max(atomic_top);
 
         let page = pages.last_mut().expect("at least one page exists");
         for piece in &visual {
+            // An inline-block fragment is placed so its content baseline lands on
+            // the line baseline; its pre-built commands are translated into place.
+            if let Some(fragment) = &piece.inline_block {
+                let dx = px + fragment.margin_left;
+                let dy = baseline + fragment.baseline;
+                for command in &fragment.commands {
+                    page.commands.push(translate_command(command, dx, dy));
+                }
+                for link in &fragment.links {
+                    page.link_areas.push(translate_link(link, dx, dy));
+                }
+                if piece.link != 0 && fragment.width > 0.0 {
+                    page.link_areas.push(LinkArea {
+                        x: dx,
+                        y: dy - fragment.height,
+                        width: fragment.width,
+                        height: fragment.height,
+                        link: piece.link,
+                    });
+                }
+                px += piece.advance(options);
+                continue;
+            }
             // An inline image paints with its bottom on the baseline and
             // advances by its width; a linked image is clickable over its box.
             if let Some((image_index, image_w, image_h)) = piece.image {
@@ -2616,6 +2657,24 @@ fn layout_line_box(
     }
 }
 
+/// A laid-out `display: inline-block`: its paint commands positioned relative to
+/// the box's top-left at local origin `(0, 0)` (the box occupies `y ∈ [-height,
+/// 0]`), plus the metrics the line box needs to place and align it. `baseline`
+/// is the distance from the box top down to the content baseline the surrounding
+/// line aligns to. Horizontal margins are folded into `advance` (not `width`).
+#[derive(Debug, Clone, PartialEq)]
+struct InlineBlockFragment {
+    width: f32,
+    height: f32,
+    baseline: f32,
+    advance: f32,
+    /// Left margin offset from the advance origin to the box's left edge.
+    margin_left: f32,
+    commands: Vec<PaintCommand>,
+    /// Clickable link areas inside the fragment, in the same local coordinates.
+    links: Vec<LinkArea>,
+}
+
 /// A piece of a wrapped visual line: text in one style, positioned left-to-right.
 struct LinePiece {
     text: String,
@@ -2631,6 +2690,9 @@ struct LinePiece {
     /// An inline image: `(image_index, width, height)` in points. The piece
     /// occupies `width` on the line and sits with its bottom on the baseline.
     image: Option<(usize, f32, f32)>,
+    /// A `display: inline-block` fragment: a pre-laid-out block placed on the
+    /// line as an atomic item and aligned by its baseline.
+    inline_block: Option<InlineBlockFragment>,
     /// CSS `letter-spacing`: extra advance per character (may be negative).
     letter_spacing: f32,
     /// CSS `word-spacing`: extra advance on inter-word space pieces.
@@ -2643,6 +2705,9 @@ impl LinePiece {
     /// `Tc` semantics, which also pads after the final glyph) and word-spacing
     /// on inter-word spaces.
     fn advance(&self, options: &RenderOptions) -> f32 {
+        if let Some(fragment) = &self.inline_block {
+            return fragment.advance;
+        }
         match self.image {
             Some((_, width, _)) => width,
             None => {
@@ -2727,9 +2792,9 @@ struct LineBreaker {
 }
 
 impl LineBreaker {
-    fn new(runs: &[crate::box_tree::InlineRun]) -> Self {
+    fn new(runs: &[crate::box_tree::InlineRun], options: &RenderOptions) -> Self {
         Self {
-            tokens: tokenize_runs(runs).into(),
+            tokens: tokenize_runs(runs, options).into(),
         }
     }
 
@@ -2769,6 +2834,12 @@ impl LineBreaker {
                     let scale = (max_width / width).min(1.0).max(0.0);
                     piece.image = Some((piece.image.expect("is image").0, width * scale, height * scale));
                     current.push(piece);
+                    break;
+                }
+                // An over-wide inline-block is atomic and doesn't scale: place it
+                // on its own line (it may overflow the content width).
+                if token.pieces.first().is_some_and(|piece| piece.inline_block.is_some()) {
+                    current.extend(token.pieces);
                     break;
                 }
                 let leftover =
@@ -2828,6 +2899,7 @@ impl LineBreaker {
                     line_through,
                     link,
                     image: None,
+                    inline_block: None,
                     letter_spacing: lead.map(|p| p.letter_spacing).unwrap_or(0.0),
                     word_spacing: lead.map(|p| p.word_spacing).unwrap_or(0.0),
                 });
@@ -2882,6 +2954,7 @@ fn fill_from_long_token(
             line_through: piece.line_through,
             link: piece.link,
             image: None,
+            inline_block: None,
             letter_spacing: piece.letter_spacing,
             word_spacing: piece.word_spacing,
         });
@@ -2919,7 +2992,7 @@ struct Token {
 
 /// Split styled runs into whitespace-delimited tokens, collapsing runs of
 /// whitespace to single separators and dropping leading/trailing whitespace.
-fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
+fn tokenize_runs(runs: &[crate::box_tree::InlineRun], options: &RenderOptions) -> Vec<Token> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut word: Vec<LinePiece> = Vec::new();
     // Font size of the most recent whitespace seen since the last token started.
@@ -2939,6 +3012,31 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
     };
 
     for run in runs {
+        // An inline-block is an atomic word of its own (like an image): it can
+        // wrap to the next line but never merges with or splits across text.
+        if let Some(block) = run.inline_block.as_deref() {
+            finish_word(&mut word, &mut tokens, &mut pending_space);
+            let fragment = layout_inline_block(block, options);
+            tokens.push(Token {
+                pieces: vec![LinePiece {
+                    text: String::new(),
+                    font_size: run.font_size,
+                    font: run.font,
+                    color: run.color,
+                    bold: false,
+                    underline: false,
+                    line_through: false,
+                    link: run.link,
+                    image: None,
+                    inline_block: Some(fragment),
+                    letter_spacing: 0.0,
+                    word_spacing: 0.0,
+                }],
+                space_font_size: pending_space.take().unwrap_or(0.0),
+            });
+            seen_token = true;
+            continue;
+        }
         // An inline image is a word of its own: it can wrap to the next line
         // but never merges with or splits across text pieces. Unresolved
         // images (failed load) contribute nothing.
@@ -2957,6 +3055,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                             line_through: false,
                             link: run.link,
                             image: Some((index, image.width, image.height)),
+                            inline_block: None,
                             letter_spacing: 0.0,
                             word_spacing: 0.0,
                         }],
@@ -3005,6 +3104,7 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
                 line_through: run.line_through,
                 link: run.link,
                 image: None,
+                inline_block: None,
                 letter_spacing: run.letter_spacing,
                 word_spacing: run.word_spacing,
             });
@@ -3013,6 +3113,289 @@ fn tokenize_runs(runs: &[crate::box_tree::InlineRun]) -> Vec<Token> {
     finish_word(&mut word, &mut tokens, &mut pending_space);
 
     tokens
+}
+
+/// Lay out a `display: inline-block` element into an atomic fragment. The paint
+/// commands are relative to the box's top-left at local origin `(0, 0)` (the box
+/// occupies `y ∈ [-height, 0]`); the caller translates them to the placement.
+///
+/// First slice: single-line inline content (nested block children are not laid
+/// out). Width is the CSS width, else shrink-to-fit; height is one line box (or
+/// the CSS/min height, whichever is larger). The fragment's `baseline` is the
+/// content baseline the surrounding line aligns to.
+fn layout_inline_block(
+    block: &crate::box_tree::BlockBox,
+    options: &RenderOptions,
+) -> InlineBlockFragment {
+    use crate::box_tree::{Background, BoxChild};
+
+    // Inline content only (Line children); nested blocks are skipped for now.
+    let runs: Vec<crate::box_tree::InlineRun> = block
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            BoxChild::Line(runs) => Some(runs.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    // Padding already folds in the border widths (see `build_block`).
+    let pad = &block.padding;
+    let content_width = match block.css_width {
+        Some(w) => {
+            if block.border_box {
+                (w - pad.left - pad.right).max(0.0)
+            } else {
+                w
+            }
+        }
+        None => measure_max_content(&block.children, options),
+    };
+
+    // A single line of content (no internal wrapping in this slice).
+    let mut pieces = LineBreaker::new(&runs, options).next_line(f32::MAX, options);
+    pieces = reorder_pieces_bidi(pieces, block.rtl);
+    let text_width: f32 = pieces.iter().map(|piece| piece.advance(options)).sum();
+
+    let max_font = pieces
+        .iter()
+        .map(|piece| piece.font_size)
+        .fold(0.0_f32, f32::max);
+    let max_image = pieces
+        .iter()
+        .filter_map(|piece| piece.image.map(|(_, _, height)| height))
+        .fold(0.0_f32, f32::max);
+    let leading = if pieces.is_empty() {
+        0.0
+    } else {
+        resolve_leading(block.line_height, max_font, FLOW_LEADING_FACTOR)
+    };
+    let text_ascent = max_font * 0.8;
+    let ascent = text_ascent.max(max_image);
+    let half_leading = ((leading - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
+
+    // Box dimensions (border box = content + padding, padding incl. border).
+    let mut content_height = leading;
+    if let Some(h) = block.css_height {
+        let target = if block.border_box {
+            (h - pad.top - pad.bottom).max(0.0)
+        } else {
+            h
+        };
+        content_height = content_height.max(target);
+    }
+    if let Some(h) = block.min_height {
+        content_height = content_height.max(h);
+    }
+    let box_width = (content_width + pad.left + pad.right).max(0.0);
+    let box_height = (content_height + pad.top + pad.bottom).max(0.0);
+    let bottom = -box_height;
+
+    // The baseline of an inline-block is its last line's baseline; with no
+    // in-flow line box it is the bottom margin edge.
+    let baseline = if pieces.is_empty() {
+        box_height
+    } else {
+        pad.top + half_leading + ascent
+    };
+
+    let mut commands: Vec<PaintCommand> = Vec::new();
+    let mut links: Vec<LinkArea> = Vec::new();
+    let radius = block
+        .border_radius
+        .min(box_width / 2.0)
+        .min(box_height / 2.0)
+        .max(0.0);
+
+    // Background, mirroring `paint_decorations` (rounded gradient/image fall back
+    // to a solid fill / no rounded clip, as elsewhere).
+    if let Some(bg) = &block.background {
+        match bg {
+            Background::Color(color) => {
+                commands.push(PaintCommand::SetFillColor(*color));
+                if radius > 0.0 {
+                    commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
+                        x: 0.0,
+                        y: bottom,
+                        width: box_width,
+                        height: box_height,
+                        radius,
+                    }));
+                } else {
+                    commands.push(PaintCommand::FillRect(RectCommand {
+                        x: 0.0,
+                        y: bottom,
+                        width: box_width,
+                        height: box_height,
+                    }));
+                }
+            }
+            Background::LinearGradient(gradient) if radius <= 0.0 => {
+                commands.extend(linear_gradient_commands(gradient, 0.0, bottom, box_width, box_height));
+            }
+            Background::LinearGradient(gradient) => {
+                commands.push(PaintCommand::SetFillColor(gradient_color(gradient, 0.5)));
+                commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
+                    x: 0.0,
+                    y: bottom,
+                    width: box_width,
+                    height: box_height,
+                    radius,
+                }));
+            }
+            Background::Image(spec) => {
+                if let Some(color) = spec.backdrop {
+                    commands.push(PaintCommand::SetFillColor(color));
+                    commands.push(PaintCommand::FillRect(RectCommand {
+                        x: 0.0,
+                        y: bottom,
+                        width: box_width,
+                        height: box_height,
+                    }));
+                }
+                commands.extend(background_image_commands(spec, 0.0, bottom, box_width, box_height));
+            }
+        }
+    }
+    if let Some(edges) = &block.border {
+        paint_border(&mut commands, edges, radius, 0.0, bottom, box_width, box_height, true, true);
+    }
+
+    // Content: place the single line of pieces at the baseline, honoring the
+    // block's text alignment within the content box.
+    if !pieces.is_empty() {
+        let baseline_y = -baseline;
+        let extra = (content_width - text_width).max(0.0);
+        let mut px = pad.left
+            + match block.align {
+                TextAlign::Left | TextAlign::Justify => 0.0,
+                TextAlign::Center => extra / 2.0,
+                TextAlign::Right => extra,
+            };
+        for piece in &pieces {
+            let advance = piece.advance(options);
+            if let Some(fragment) = &piece.inline_block {
+                let dx = px + fragment.margin_left;
+                let dy = baseline_y + fragment.baseline;
+                commands.extend(fragment.commands.iter().map(|c| translate_command(c, dx, dy)));
+                links.extend(fragment.links.iter().map(|l| translate_link(l, dx, dy)));
+                px += advance;
+                continue;
+            }
+            if let Some((image_index, image_w, image_h)) = piece.image {
+                commands.push(PaintCommand::Image(ImageCommand {
+                    image_index,
+                    x: px,
+                    y: baseline_y,
+                    width: image_w,
+                    height: image_h,
+                }));
+                px += advance;
+                continue;
+            }
+            if !piece.text.is_empty() {
+                commands.push(PaintCommand::SetFillColor(piece.color));
+                commands.push(PaintCommand::Text(TextCommand {
+                    text: piece.text.clone(),
+                    x: px,
+                    y: baseline_y,
+                    font_size: piece.font_size,
+                    font: piece.font,
+                    bold: options.run_faux_bold(piece.font, piece.bold),
+                    letter_spacing: piece.letter_spacing,
+                }));
+                decoration_commands(
+                    &mut commands,
+                    px,
+                    baseline_y,
+                    advance,
+                    piece.font_size,
+                    piece.color,
+                    piece.underline,
+                    piece.line_through,
+                );
+                if piece.link != 0 && advance > 0.0 {
+                    links.push(LinkArea {
+                        x: px,
+                        y: baseline_y - piece.font_size * 0.25,
+                        width: advance,
+                        height: piece.font_size * 1.1,
+                        link: piece.link,
+                    });
+                }
+            }
+            px += advance;
+        }
+    }
+
+    let margin_left = block.margin.left.max(0.0);
+    let advance = margin_left + box_width + block.margin.right.max(0.0);
+    InlineBlockFragment {
+        width: box_width,
+        height: box_height,
+        baseline,
+        advance,
+        margin_left,
+        commands,
+        links,
+    }
+}
+
+/// Append `text-decoration` stroke commands for a run drawn with its baseline at
+/// `(x, y)`. Free-function form of `Page::push_text_decoration` for the
+/// inline-block fragment builder.
+#[allow(clippy::too_many_arguments)]
+fn decoration_commands(
+    commands: &mut Vec<PaintCommand>,
+    x: f32,
+    y: f32,
+    width: f32,
+    font_size: f32,
+    color: Color,
+    underline: bool,
+    line_through: bool,
+) {
+    if (!underline && !line_through) || width <= 0.0 {
+        return;
+    }
+    commands.push(PaintCommand::SetStrokeColor(color));
+    commands.push(PaintCommand::SetLineWidth((font_size * 0.06).max(0.4)));
+    if underline {
+        let uy = y - font_size * 0.12;
+        commands.push(PaintCommand::StrokeLine(LineCommand { x1: x, y1: uy, x2: x + width, y2: uy }));
+    }
+    if line_through {
+        let ly = y + font_size * 0.28;
+        commands.push(PaintCommand::StrokeLine(LineCommand { x1: x, y1: ly, x2: x + width, y2: ly }));
+    }
+}
+
+/// Shift a paint command by `(dx, dy)` — used to place an inline-block fragment
+/// (laid out at a local origin) at its position on the line.
+fn translate_command(command: &PaintCommand, dx: f32, dy: f32) -> PaintCommand {
+    use PaintCommand::*;
+    match command {
+        Text(t) => Text(TextCommand { x: t.x + dx, y: t.y + dy, ..t.clone() }),
+        FillRect(r) => FillRect(RectCommand { x: r.x + dx, y: r.y + dy, ..*r }),
+        StrokeRect(r) => StrokeRect(RectCommand { x: r.x + dx, y: r.y + dy, ..*r }),
+        FillRoundedRect(r) => FillRoundedRect(RoundedRectCommand { x: r.x + dx, y: r.y + dy, ..*r }),
+        StrokeRoundedRect(r) => StrokeRoundedRect(RoundedRectCommand { x: r.x + dx, y: r.y + dy, ..*r }),
+        StrokeLine(l) => StrokeLine(LineCommand {
+            x1: l.x1 + dx,
+            y1: l.y1 + dy,
+            x2: l.x2 + dx,
+            y2: l.y2 + dy,
+        }),
+        PushClipRect(r) => PushClipRect(RectCommand { x: r.x + dx, y: r.y + dy, ..*r }),
+        Image(i) => Image(ImageCommand { x: i.x + dx, y: i.y + dy, ..*i }),
+        // Colour/line-width/dash/pop-clip carry no coordinates.
+        other => other.clone(),
+    }
+}
+
+fn translate_link(link: &LinkArea, dx: f32, dy: f32) -> LinkArea {
+    LinkArea { x: link.x + dx, y: link.y + dy, ..link.clone() }
 }
 
 fn ensure_space(pages: &mut Vec<Page>, y: &mut f32, options: &RenderOptions, needed: f32) -> bool {
@@ -4169,7 +4552,7 @@ fn wrap_cell_runs(
         &scaled
     };
 
-    let mut breaker = LineBreaker::new(runs);
+    let mut breaker = LineBreaker::new(runs, options);
     let mut lines = Vec::new();
     while !breaker.is_done() && lines.len() < max_lines {
         // `white-space: nowrap` (max_lines == 1) never wraps: give the single
@@ -4625,6 +5008,7 @@ mod tests {
             line_through: false,
             color: Color::BLACK,
             image: None,
+            inline_block: None,
         };
         let image_run = |w: f32, h: f32| InlineRun {
             letter_spacing: 0.0,
@@ -4723,6 +5107,7 @@ mod tests {
                 height: 300.0,
                 float_dir: None,
             })),
+            inline_block: None,
         };
         let document = Document {
             page_style: crate::html::PageStyle::default(),
@@ -4992,6 +5377,7 @@ mod tests {
             line_through: false,
             link: 0,
             image: None,
+            inline_block: None,
         };
         // Logical: abc · אבג · space · דהו · xyz. The two Hebrew words and the
         // space between them form one RTL run, so they swap; Latin stays put.
@@ -5293,6 +5679,7 @@ mod tests {
                         line_through: false,
                         color: Color::BLACK,
                         image: None,
+                        inline_block: None,
                     }])],
                 })
             })
@@ -5384,6 +5771,7 @@ mod tests {
                         line_through: false,
                         color: Color::BLACK,
                         image: None,
+                        inline_block: None,
                     }])],
                 })],
             }),
@@ -5473,6 +5861,7 @@ mod tests {
                     line_through: false,
                     color: Color::BLACK,
                     image: None,
+                    inline_block: None,
                 }])],
             })
         };
@@ -5523,6 +5912,7 @@ mod tests {
                     line_through: false,
                     color: Color::BLACK,
                     image: None,
+                    inline_block: None,
                 }])
             };
             let document = Document {
@@ -5678,6 +6068,7 @@ mod tests {
                         line_through: false,
                         color: Color::BLACK,
                         image: None,
+                        inline_block: None,
                     }])],
                 })],
             }),
@@ -6437,6 +6828,34 @@ mod tests {
             assert!(texts.contains(&"Acme report"));
             assert!(texts.contains(&format!("Page {} of {total}", index + 1).as_str()));
         }
+    }
+
+    #[test]
+    fn inline_block_renders_a_fragment_and_keeps_following_text() {
+        let document = crate::html::parse(
+            "<p>A <span style=\"display:inline-block;padding:2pt 4pt;background:#eee\">X</span> BB</p>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        let joined: String = pages[0]
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(joined.contains('A'), "leading text renders");
+        assert!(joined.contains('X'), "inline-block content renders");
+        assert!(joined.contains("BB"), "text after the inline-block is not dropped");
+        // The inline-block's background fill is emitted as part of the line.
+        assert!(
+            pages[0].commands.iter().any(|command| matches!(
+                command,
+                PaintCommand::FillRect(_) | PaintCommand::FillRoundedRect(_)
+            )),
+            "the inline-block paints its background"
+        );
     }
 
     #[test]

@@ -862,16 +862,37 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **`display: inline-block`** — the atomic-inline-that-is-a-block primitive.
 - [ ] **Flex/grid leftovers**: `flex-shrink` / `order` / `align-self` /
       `align-content` / `wrap-reverse`; grid `grid-template-rows`, named
       areas/lines, cell alignment.
+- [ ] **Remaining background & inline-block pieces**: `background-image: url()`
+      on table cells; multi-line / wrapping inline-block content, nested block
+      children, and `vertical-align` on inline-blocks.
 - [ ] **Broader JS DOM surface** (deferred per 2026-07-08 decision):
       `insertBefore`, `cloneNode`, `querySelector(All)`, JS-side
       `parentNode`/`children` traversal.
 
 #### Recently shipped (2026-07)
 
+- [x] **`display: inline-block`** (2026-07-12): the atomic-inline-that-is-a-block
+      primitive — the step that breaks the engine's block-vs-inline dichotomy. A
+      `CellStyle::display_inline_block` flag routes the element in `build_node`
+      through `build_block` (so it keeps padding/border/background/radius/width/
+      height and its content) but attaches it to the current line as an
+      `InlineRun::inline_block` rather than a block sibling. At layout,
+      `layout_inline_block` lays the element into an `InlineBlockFragment` (paint
+      commands at a local origin + width/height/baseline/advance); `tokenize_runs`
+      makes it an atomic token (like an inline image), the line box grows by its
+      ascent/descent, and it is placed by translating its commands so the
+      fragment's content baseline lands on the line baseline. Bug found and fixed:
+      `ChildAcc::push_text` merged trailing text into the (empty-text)
+      inline-block run because it only checked `image.is_none()` — now also
+      `inline_block.is_none()`, so text after an inline-block survives. The
+      line-box metric changes reduce to the exact prior formula when no
+      inline-block is on the line, so the 22k-cell doc is **byte-identical**.
+      `features/inline-block` fixture. First slice: single-line inline content
+      (badges/buttons/tags/chips/swatches); multi-line/nested-block content and
+      non-baseline `vertical-align` are follow-ups.
 - [x] **`background-image: url()` on flow blocks** (2026-07-12): raster
       backgrounds through the existing image decoder (`data:`, local, or
       policy-gated remote). A boxed `CellStyle::background_image`

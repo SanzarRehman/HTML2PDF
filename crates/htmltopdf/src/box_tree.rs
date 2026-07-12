@@ -256,6 +256,10 @@ pub struct InlineRun {
     /// it occupies its resolved width on the line and sits on the baseline.
     /// `None` for ordinary text runs.
     pub image: Option<Box<ImageBox>>,
+    /// An `display: inline-block` element flowing with the text (empty `text`):
+    /// the whole element is a block box laid out into an atomic inline fragment,
+    /// placed on the line and aligned by its baseline. `None` for text/images.
+    pub inline_block: Option<Box<BlockBox>>,
     /// `text-decoration: underline` (also `<u>`/`<ins>`), stroked below the baseline.
     pub underline: bool,
     /// `text-decoration: line-through` (also `<s>`/`<strike>`/`<del>`).
