@@ -287,8 +287,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   `color`/`font-size`/bold within a paragraph, all wrapped and aligned.
 - **CSS box model on blocks**: `margin`/`padding` (shorthands + longhands, in
   points or **percentages** of the containing width), vertical margin collapse,
-  block `background-color` + real per-side `border` painted behind content (per
-  page fragment), `border-radius`, `box-sizing`, `line-height`,
+  block backgrounds (solid color, `linear-gradient()`, and `background-image:
+  url()` with size/position/repeat) + real per-side `border` painted behind
+  content (per page fragment), `border-radius`, `box-sizing`, `line-height`,
   `width`/`min-width`/`max-width` (points or `%`), `min-height`/`max-height`
   (points), **`margin: auto` centering**, and `overflow: hidden` clipping of a
   fixed-height box.

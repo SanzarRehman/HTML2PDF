@@ -899,6 +899,25 @@ mod tests {
     }
 
     #[test]
+    fn renders_css_background_image_url() {
+        // A 2x1 opaque image used as a block background should embed as an
+        // image XObject, painted behind the block's content.
+        let png = build_png(2, 1, 2, &[10, 20, 30, 40, 50, 60]);
+        let uri = format!("data:image/png;base64,{}", base64_encode(&png));
+        let html = format!(
+            "<div style=\"width:120pt;height:60pt;background-image:url({uri});background-repeat:no-repeat\">x</div>"
+        );
+
+        let pdf = crate::Engine::new()
+            .render_html(&html, crate::RenderOptions::default())
+            .expect("render should succeed");
+        let text = String::from_utf8_lossy(&pdf);
+
+        assert!(text.contains("/Subtype /Image"), "background image not embedded");
+        assert!(text.contains("/Width 2"));
+    }
+
+    #[test]
     fn renders_png_data_uri_as_a_pdf_image() {
         // 2x1 RGBA (opaque red, half-transparent green) through the whole engine.
         let png = build_png(2, 1, 6, &[255, 0, 0, 255, 0, 255, 0, 128]);

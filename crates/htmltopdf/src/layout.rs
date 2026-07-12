@@ -2024,6 +2024,30 @@ fn paint_decorations(
                         radius,
                     }));
                 }
+                crate::box_tree::Background::Image(spec) => {
+                    // Backdrop color (if any) paints behind the image, showing
+                    // through transparency and un-repeated gaps.
+                    if let Some(color) = spec.backdrop {
+                        commands.push(PaintCommand::SetFillColor(color));
+                        if radius > 0.0 {
+                            commands.push(PaintCommand::FillRoundedRect(RoundedRectCommand {
+                                x,
+                                y: bottom,
+                                width,
+                                height,
+                                radius,
+                            }));
+                        } else {
+                            commands.push(PaintCommand::FillRect(RectCommand {
+                                x,
+                                y: bottom,
+                                width,
+                                height,
+                            }));
+                        }
+                    }
+                    commands.extend(background_image_commands(spec, x, bottom, width, height));
+                }
             }
         }
         if let Some(edges) = &block.border {
@@ -2155,6 +2179,117 @@ fn resolved_gradient_positions(gradient: &LinearGradient) -> Vec<f32> {
         previous = index;
     }
     resolved
+}
+
+/// CSS pixels → PDF points at the reference 96 dpi (1px = 0.75pt), for a
+/// background image's intrinsic size.
+const BG_PX_TO_PT: f32 = 72.0 / 96.0;
+
+/// Emit the paint commands for a raster `background-image`: resolve the tile size
+/// (`background-size`), anchor it (`background-position`), tile per
+/// `background-repeat`, and clip everything to the box. An unresolved source or a
+/// degenerate size paints nothing. `(x, y)` is the box's lower-left corner.
+fn background_image_commands(
+    spec: &crate::html::BackgroundImageSpec,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> Vec<PaintCommand> {
+    use crate::html::{BackgroundRepeat, BackgroundSize, PosAxis, SizeAxis};
+
+    let (Some(image_index), Some((iw, ih))) = (spec.image_index, spec.intrinsic) else {
+        return Vec::new();
+    };
+    if width <= 0.0 || height <= 0.0 || iw == 0 || ih == 0 {
+        return Vec::new();
+    }
+    let intrinsic_w = iw as f32 * BG_PX_TO_PT;
+    let intrinsic_h = ih as f32 * BG_PX_TO_PT;
+    let aspect = intrinsic_w / intrinsic_h;
+
+    // Rendered tile size.
+    let (tile_w, tile_h) = match spec.size {
+        BackgroundSize::Auto => (intrinsic_w, intrinsic_h),
+        BackgroundSize::Cover => {
+            let scale = (width / intrinsic_w).max(height / intrinsic_h);
+            (intrinsic_w * scale, intrinsic_h * scale)
+        }
+        BackgroundSize::Contain => {
+            let scale = (width / intrinsic_w).min(height / intrinsic_h);
+            (intrinsic_w * scale, intrinsic_h * scale)
+        }
+        BackgroundSize::Explicit(size_x, size_y) => {
+            let resolve = |axis: SizeAxis, box_dim: f32| match axis {
+                SizeAxis::Length(pt) => Some(pt),
+                SizeAxis::Percent(pct) => Some(pct / 100.0 * box_dim),
+                SizeAxis::Auto => None,
+            };
+            match (resolve(size_x, width), resolve(size_y, height)) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, w / aspect),
+                (None, Some(h)) => (h * aspect, h),
+                (None, None) => (intrinsic_w, intrinsic_h),
+            }
+        }
+    };
+    if tile_w <= 0.0 || tile_h <= 0.0 {
+        return Vec::new();
+    }
+
+    // Anchor offset from the box's top-left (CSS measures position from the top).
+    let offset_x = match spec.position.x {
+        PosAxis::Length(pt) => pt,
+        PosAxis::Percent(pct) => (width - tile_w) * pct / 100.0,
+    };
+    let offset_y_top = match spec.position.y {
+        PosAxis::Length(pt) => pt,
+        PosAxis::Percent(pct) => (height - tile_h) * pct / 100.0,
+    };
+    // The anchor tile's lower-left corner in PDF (y-up) coordinates.
+    let anchor_x = x + offset_x;
+    let anchor_y = y + height - offset_y_top - tile_h;
+
+    let (repeat_x, repeat_y) = match spec.repeat {
+        BackgroundRepeat::Repeat => (true, true),
+        BackgroundRepeat::RepeatX => (true, false),
+        BackgroundRepeat::RepeatY => (false, true),
+        BackgroundRepeat::NoRepeat => (false, false),
+    };
+    let (mut kx_min, mut kx_max) = (0i32, 0i32);
+    if repeat_x {
+        kx_min = ((x - anchor_x) / tile_w).floor() as i32;
+        kx_max = ((x + width - anchor_x) / tile_w).ceil() as i32;
+    }
+    let (mut ky_min, mut ky_max) = (0i32, 0i32);
+    if repeat_y {
+        ky_min = ((y - anchor_y) / tile_h).floor() as i32;
+        ky_max = ((y + height - anchor_y) / tile_h).ceil() as i32;
+    }
+    // A huge box over a tiny tile could emit an unbounded number of images; cap
+    // it and fall back to a single anchored tile rather than blow up the page.
+    const MAX_TILES: usize = 4000;
+    let cols = (kx_max - kx_min + 1).max(1) as usize;
+    let rows = (ky_max - ky_min + 1).max(1) as usize;
+    if cols.saturating_mul(rows) > MAX_TILES {
+        (kx_min, kx_max, ky_min, ky_max) = (0, 0, 0, 0);
+    }
+
+    let mut commands = Vec::with_capacity(cols * rows + 2);
+    commands.push(PaintCommand::PushClipRect(RectCommand { x, y, width, height }));
+    for ky in ky_min..=ky_max {
+        for kx in kx_min..=kx_max {
+            commands.push(PaintCommand::Image(ImageCommand {
+                image_index,
+                x: anchor_x + kx as f32 * tile_w,
+                y: anchor_y + ky as f32 * tile_h,
+                width: tile_w,
+                height: tile_h,
+            }));
+        }
+    }
+    commands.push(PaintCommand::PopClip);
+    commands
 }
 
 /// Stroke a block's border along its border-box rectangle. A uniform border

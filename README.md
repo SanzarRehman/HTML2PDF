@@ -126,7 +126,9 @@ Works today:
 - CSS colors, font sizes, bold text (rendered as faux-bold fill+stroke), text
   alignment (including `text-align: justify`), text decoration
   (underline/line-through), margins, padding (with vertical margin collapse),
-  `line-height`, and solid or `linear-gradient()` block/table backgrounds.
+  `line-height`, and backgrounds: solid color, `linear-gradient()` (blocks and
+  table cells), and `background-image: url()` raster images on flow blocks
+  (`background-size`/`-position`/`-repeat`, tiled and clipped to the box).
 - **Percentage lengths and min/max sizing**: `%` widths, padding, margins, and
   positioned-box offsets resolve against the containing block;
   `min-width`/`max-width` (points or `%`) and `min-height`/`max-height` (points)
@@ -235,9 +237,9 @@ Out of scope by design (static print target):
 
 Not complete yet (queued, CSS-first):
 
-- Remaining background layers: `background-image: url()` and
-  `background-size`/`position`/`repeat` — the next item up (solid color and
-  `linear-gradient()` already paint on blocks and cells).
+- Remaining background layers: `url()` images on **table cells** (flow blocks
+  already paint `url()` with size/position/repeat), radial/repeating gradients,
+  multiple layers, and `background-origin`/`-clip`.
 - `%` **heights** (`%` widths/padding/margins/offsets and `min-width`/
   `min-height`/`max-height` already work; height percentages need a definite
   containing height, which is indefinite in normal flow).
@@ -455,11 +457,11 @@ The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 surface is deferred. The front of the queue, in order (see
 [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
 
-1. Background layers beyond the shipped solid-color / `linear-gradient()`
-   slice: `url()` images, radial/repeating gradients, sizing/positioning, and
-   multiple layers.
-2. `display: inline-block` — the atomic inline-level block box. (Table `rowspan`
-   shipped 2026-07-10.)
+1. `display: inline-block` — the atomic inline-level block box. (Table
+   `rowspan` shipped 2026-07-10; `background-image: url()` on flow blocks with
+   size/position/repeat shipped 2026-07-12.)
+2. Remaining background layers: `url()` on table cells, radial/repeating
+   gradients, and multiple layers.
 3. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
 4. `min()`/`max()`/`clamp()` math functions; `%` heights (needs a definite
    containing height) and multi-page overflow clipping; general `counter()` in

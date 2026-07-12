@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 28.8pt; }
+  body { font-size: 11pt; }
+  .panel {
+    width: 240pt;
+    height: 70pt;
+    margin-bottom: 12pt;
+    border: 1px solid #333;
+    padding: 6pt;
+  }
+  .cover {
+    background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAJUlEQVR4nGO85urIAAPpDq1wNhOchQZIl2CZkswH52yRyqGFHQC9uQTZFl+roQAAAABJRU5ErkJggg==);
+    background-size: cover;
+    background-repeat: no-repeat;
+    color: #fff;
+  }
+  .badge {
+    background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAJUlEQVR4nGO85urIAAPpDq1wNhOchQZIl2CZkswH52yRyqGFHQC9uQTZFl+roQAAAABJRU5ErkJggg==);
+    background-repeat: no-repeat;
+    background-position: right top;
+    background-color: #eef3fb;
+  }
+  .tile {
+    background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAJUlEQVR4nGO85urIAAPpDq1wNhOchQZIl2CZkswH52yRyqGFHQC9uQTZFl+roQAAAABJRU5ErkJggg==);
+    background-size: 16pt 16pt;
+    background-repeat: repeat;
+  }
+</style>
+</head>
+<body>
+  <h1>Background image</h1>
+  <div class="panel cover">cover, no-repeat</div>
+  <div class="panel badge">badge: right top over a solid backdrop</div>
+  <div class="panel tile">tiled 16pt across the panel</div>
+</body>
+</html>

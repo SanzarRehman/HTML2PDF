@@ -1,0 +1,30 @@
+{
+  "fixture": "background-image",
+  "layer": "features",
+  "description": "CSS background-image: url() on blocks — cover/no-repeat, positioned badge over a backdrop color, and an explicitly-sized tiled panel.",
+  "pdf_assertions": {
+    "must_contain_operators": [
+      "BT",
+      "ET",
+      "Tj",
+      "Do",
+      "re",
+      "S"
+    ],
+    "must_contain_text": [
+      "Background",
+      "cover",
+      "badge",
+      "tiled"
+    ],
+    "min_size_bytes": 700,
+    "max_size_bytes": 2000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Three bordered panels below an h1 heading.",
+    "The first panel is fully covered by the image (scaled to cover, aspect preserved, no tiling).",
+    "The second panel shows a single image anchored to its top-right corner over a pale blue backdrop color.",
+    "The third panel tiles the image at 16pt across its whole area, clipped to the panel."
+  ]
+}

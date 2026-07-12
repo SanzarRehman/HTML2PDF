@@ -194,6 +194,7 @@ pub struct BlockBox {
 pub enum Background {
     Color(Color),
     LinearGradient(LinearGradient),
+    Image(crate::html::BackgroundImageSpec),
 }
 
 /// Flex container parameters resolved from the cascade.

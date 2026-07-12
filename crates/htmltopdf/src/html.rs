@@ -74,6 +74,88 @@ pub struct GradientStop {
     pub position: Option<f32>,
 }
 
+/// A CSS `background-image: url(...)` raster background and its `background-size`
+/// / `-position` / `-repeat` controls. `src` empty means only a sizing/position/
+/// repeat longhand was seen (no image) — such a spec paints nothing. The last
+/// three fields are filled during [`resolve_images`] and `build_block`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundImageSpec {
+    pub src: String,
+    pub size: BackgroundSize,
+    pub position: BackgroundPosition,
+    pub repeat: BackgroundRepeat,
+    /// Index into `Document::images`, set during resolution (`None` = unresolved).
+    pub image_index: Option<usize>,
+    /// Intrinsic pixel size, set during resolution (drives `auto`/`cover`/`contain`).
+    pub intrinsic: Option<(u32, u32)>,
+    /// Non-white `background-color` painted behind the image (shows through
+    /// transparency and any un-repeated gaps).
+    pub backdrop: Option<Color>,
+}
+
+impl Default for BackgroundImageSpec {
+    fn default() -> Self {
+        Self {
+            src: String::new(),
+            size: BackgroundSize::Auto,
+            position: BackgroundPosition::default(),
+            repeat: BackgroundRepeat::Repeat,
+            image_index: None,
+            intrinsic: None,
+            backdrop: None,
+        }
+    }
+}
+
+/// CSS `background-size`. `Auto` uses the image's intrinsic size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundSize {
+    Auto,
+    Cover,
+    Contain,
+    /// Per-axis size; an `Auto` axis derives from the other via the aspect ratio.
+    Explicit(SizeAxis, SizeAxis),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeAxis {
+    Auto,
+    Length(f32),
+    Percent(f32),
+}
+
+/// CSS `background-position`, one component per axis. `x`/`y` are the offset of
+/// the image within the box: a length is an absolute inset, a percent aligns the
+/// same percentage point of the image to that point of the box. Default `0% 0%`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackgroundPosition {
+    pub x: PosAxis,
+    pub y: PosAxis,
+}
+
+impl Default for BackgroundPosition {
+    fn default() -> Self {
+        Self {
+            x: PosAxis::Percent(0.0),
+            y: PosAxis::Percent(0.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PosAxis {
+    Length(f32),
+    Percent(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackgroundRepeat {
+    Repeat,
+    RepeatX,
+    RepeatY,
+    NoRepeat,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableCell {
     pub text: String,
@@ -252,9 +334,11 @@ pub struct CellStyle {
     pub color: Option<Color>,
     pub background_color: Option<Color>,
     /// CSS `background-image: linear-gradient(...)` / `background` gradient.
-    /// Background images other than gradients are intentionally not resolved in
-    /// this first print-focused background-image slice.
     pub background_gradient: Option<LinearGradient>,
+    /// CSS `background-image: url(...)` raster background with its size/position/
+    /// repeat controls. Boxed (rarely set) to keep the per-cell struct small; a
+    /// spec with an empty `src` carries only sizing longhands and paints nothing.
+    pub background_image: Option<Box<BackgroundImageSpec>>,
     /// `display: flex` — this element establishes a flex container.
     pub display_flex: bool,
     pub flex_direction: Option<FlexDirection>,
@@ -348,6 +432,7 @@ impl Default for CellStyle {
             color: None,
             background_color: None,
             background_gradient: None,
+            background_image: None,
             display_flex: false,
             flex_direction: None,
             justify_content: None,
@@ -963,6 +1048,7 @@ fn resolve_images_in(
     for child in children {
         match child {
             BoxChild::Block(block) => {
+                resolve_background_image(&mut block.background, base_dir, remote, images);
                 resolve_images_in(&mut block.children, base_dir, remote, images)
             }
             BoxChild::Image(image) => resolve_image_box(image, base_dir, remote, images),
@@ -978,6 +1064,29 @@ fn resolve_images_in(
             BoxChild::Table(_) => {}
         }
     }
+}
+
+/// Decode a block's `background-image: url()` into the document image table,
+/// recording its index and intrinsic pixel size on the spec. A source that fails
+/// to load leaves `image_index = None`, so only the backdrop color paints.
+fn resolve_background_image(
+    background: &mut Option<crate::box_tree::Background>,
+    base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
+    images: &mut Vec<crate::image::DecodedImage>,
+) {
+    let Some(crate::box_tree::Background::Image(spec)) = background else {
+        return;
+    };
+    if spec.src.is_empty() {
+        return;
+    }
+    let Some(decoded) = crate::image::load_image(&spec.src, base_dir, remote) else {
+        return;
+    };
+    spec.intrinsic = Some((decoded.width, decoded.height));
+    spec.image_index = Some(images.len());
+    images.push(decoded);
 }
 
 /// CSS pixels to PDF points at the reference 96 dpi (1px = 0.75pt).
@@ -1381,17 +1490,26 @@ fn build_block(
         bottom: own.padding_bottom.unwrap_or(0.0) + border_widths.bottom,
         left: own.padding_left.unwrap_or(0.0) + border_widths.left,
     };
-    // A gradient takes precedence over the fallback background color. A white
-    // color matches the page, so it is treated as "no background".
+    // A raster `background-image: url()` wins over a gradient, which wins over
+    // the fallback background color. A white color matches the page, so it is
+    // treated as "no background". The `background-color` (if non-white) is
+    // carried as the image's backdrop so it shows through transparency.
+    let backdrop = own.background_color.filter(|color| *color != Color::WHITE);
     let background = own
-        .background_gradient
-        .clone()
-        .map(crate::box_tree::Background::LinearGradient)
+        .background_image
+        .as_deref()
+        .filter(|spec| !spec.src.is_empty())
+        .map(|spec| {
+            let mut spec = spec.clone();
+            spec.backdrop = backdrop;
+            crate::box_tree::Background::Image(spec)
+        })
         .or_else(|| {
-            own.background_color
-                .filter(|color| *color != Color::WHITE)
-                .map(crate::box_tree::Background::Color)
-        });
+            own.background_gradient
+                .clone()
+                .map(crate::box_tree::Background::LinearGradient)
+        })
+        .or_else(|| backdrop.map(crate::box_tree::Background::Color));
 
     // Font selection: an own `font-family` overrides the inherited one; `<pre>`
     // defaults to monospace (the only block-level UA family rule we apply);
@@ -2757,6 +2875,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         margin_bottom: own.margin_bottom,
         background_color: own.background_color,
         background_gradient: own.background_gradient.clone(),
+        background_image: own.background_image.clone(),
         // Flex/grid properties are not inherited.
         display_flex: own.display_flex,
         flex_direction: own.flex_direction,
@@ -5483,10 +5602,46 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "height" => target.cell.height = parse_css_length(value),
         "color" => target.cell.color = parse_css_color(value),
         "background-color" => target.cell.background_color = parse_css_color(value),
-        "background-image" => target.cell.background_gradient = parse_css_linear_gradient(value),
+        "background-image" => {
+            // A `url()` is a raster background; otherwise fall back to gradient.
+            if let Some(src) = parse_css_url(value) {
+                target.cell.background_image.get_or_insert_with(Default::default).src = src;
+                target.cell.background_gradient = None;
+            } else if let Some(gradient) = parse_css_linear_gradient(value) {
+                target.cell.background_gradient = Some(gradient);
+            }
+        }
+        "background-size" => {
+            if let Some(size) = parse_css_background_size(value) {
+                target.cell.background_image.get_or_insert_with(Default::default).size = size;
+            }
+        }
+        "background-position" => {
+            if let Some(position) = parse_css_background_position(value) {
+                target.cell.background_image.get_or_insert_with(Default::default).position =
+                    position;
+            }
+        }
+        "background-repeat" => {
+            if let Some(repeat) = parse_css_background_repeat(value) {
+                target.cell.background_image.get_or_insert_with(Default::default).repeat = repeat;
+            }
+        }
         "background" => {
             target.cell.background_color = parse_css_background_color(value);
-            target.cell.background_gradient = parse_css_linear_gradient(value);
+            if let Some(src) = parse_css_url(value) {
+                let spec = target.cell.background_image.get_or_insert_with(Default::default);
+                spec.src = src;
+                // Pull a repeat keyword out of the shorthand so a `no-repeat`
+                // logo is not tiled; size/position from the shorthand use the
+                // dedicated longhands.
+                if let Some(repeat) = value.split_whitespace().find_map(parse_css_background_repeat) {
+                    spec.repeat = repeat;
+                }
+                target.cell.background_gradient = None;
+            } else {
+                target.cell.background_gradient = parse_css_linear_gradient(value);
+            }
         }
         "padding-top" => {
             let (pt, pct) = parse_len_or_pct(value);
@@ -5790,6 +5945,100 @@ fn is_bold_weight(value: &str) -> bool {
 
 fn parse_css_background_color(value: &str) -> Option<Color> {
     value.split_whitespace().find_map(parse_css_color)
+}
+
+/// Extract the target of a CSS `url(...)` token from a value (which may be a
+/// `background` shorthand). Handles optional single/double quotes. Returns the
+/// raw reference (path, `data:` URI, or `http(s)` URL); resolution is deferred.
+fn parse_css_url(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let open = lower.find("url(")? + 4;
+    let close = value[open..].find(')')? + open;
+    let inner = value[open..close].trim();
+    let inner = inner
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| inner.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')))
+        .unwrap_or(inner)
+        .trim();
+    (!inner.is_empty()).then(|| inner.to_string())
+}
+
+/// Parse `background-size`: `cover`, `contain`, or one/two of `auto` / `<len>` /
+/// `<percent>`. A single value sets the width; the height becomes `auto`.
+fn parse_css_background_size(value: &str) -> Option<BackgroundSize> {
+    let value = value.trim();
+    match value.to_ascii_lowercase().as_str() {
+        "cover" => return Some(BackgroundSize::Cover),
+        "contain" => return Some(BackgroundSize::Contain),
+        _ => {}
+    }
+    let mut parts = value.split_whitespace();
+    let width = parse_size_axis(parts.next()?)?;
+    let height = match parts.next() {
+        Some(token) => parse_size_axis(token)?,
+        None => SizeAxis::Auto,
+    };
+    Some(BackgroundSize::Explicit(width, height))
+}
+
+fn parse_size_axis(token: &str) -> Option<SizeAxis> {
+    if token.eq_ignore_ascii_case("auto") {
+        return Some(SizeAxis::Auto);
+    }
+    let (pt, pct) = parse_len_or_pct(token);
+    match pct {
+        Some(pct) => Some(SizeAxis::Percent(pct)),
+        None => pt.map(SizeAxis::Length),
+    }
+}
+
+/// Parse `background-position`: one or two components of a keyword
+/// (`left`/`right`/`top`/`bottom`/`center`) or `<len>`/`<percent>`. Keywords
+/// bind to their axis; positional values fill x then y. The 3-/4-value edge
+/// syntax is not modeled.
+fn parse_css_background_position(value: &str) -> Option<BackgroundPosition> {
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() > 2 {
+        return None;
+    }
+    let mut x: Option<PosAxis> = None;
+    let mut y: Option<PosAxis> = None;
+    let mut positional: Vec<PosAxis> = Vec::new();
+    for token in &tokens {
+        match token.to_ascii_lowercase().as_str() {
+            "left" => x = Some(PosAxis::Percent(0.0)),
+            "right" => x = Some(PosAxis::Percent(100.0)),
+            "top" => y = Some(PosAxis::Percent(0.0)),
+            "bottom" => y = Some(PosAxis::Percent(100.0)),
+            "center" => positional.push(PosAxis::Percent(50.0)),
+            _ => positional.push(parse_pos_axis(token)?),
+        }
+    }
+    let mut positional = positional.into_iter();
+    let x = x.unwrap_or_else(|| positional.next().unwrap_or(PosAxis::Percent(50.0)));
+    let y = y.unwrap_or_else(|| positional.next().unwrap_or(PosAxis::Percent(50.0)));
+    Some(BackgroundPosition { x, y })
+}
+
+fn parse_pos_axis(token: &str) -> Option<PosAxis> {
+    let (pt, pct) = parse_len_or_pct(token);
+    match pct {
+        Some(pct) => Some(PosAxis::Percent(pct)),
+        None => pt.map(PosAxis::Length),
+    }
+}
+
+fn parse_css_background_repeat(value: &str) -> Option<BackgroundRepeat> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "repeat" => Some(BackgroundRepeat::Repeat),
+        "no-repeat" => Some(BackgroundRepeat::NoRepeat),
+        "repeat-x" => Some(BackgroundRepeat::RepeatX),
+        "repeat-y" => Some(BackgroundRepeat::RepeatY),
+        // `space`/`round` are approximated as plain repeat for now.
+        "space" | "round" => Some(BackgroundRepeat::Repeat),
+        _ => None,
+    }
 }
 
 /// Parse the useful print subset of CSS `linear-gradient()`: a direction or
@@ -6102,6 +6351,10 @@ impl CellStyle {
         self.color = other.color.or(self.color);
         self.background_color = other.background_color.or(self.background_color);
         self.background_gradient = other.background_gradient.or(self.background_gradient.take());
+        // Whole-value precedence: a higher layer's background-image spec (with its
+        // own size/position/repeat) replaces a lower one. Splitting those
+        // sub-properties across rules is uncommon and not merged field-by-field.
+        self.background_image = other.background_image.or(self.background_image.take());
         self.display_flex |= other.display_flex;
         self.flex_direction = other.flex_direction.or(self.flex_direction);
         self.justify_content = other.justify_content.or(self.justify_content);
@@ -7741,6 +7994,40 @@ mod tests {
         );
         let cell = &cell_document.blocks[0].cells[0];
         assert_eq!(cell.style.background_gradient.as_ref().unwrap().angle_degrees, 180.0);
+    }
+
+    #[test]
+    fn parses_background_image_url_with_size_position_repeat() {
+        let document = parse(
+            r#"
+            <style>
+              .hero {
+                background-image: url("assets/logo.png");
+                background-size: cover;
+                background-position: right top;
+                background-repeat: no-repeat;
+                background-color: #eef;
+              }
+            </style>
+            <div class="hero" style="width:200pt;height:60pt">Report</div>
+            "#,
+        );
+        let flow = document.flow.as_ref().expect("flow tree");
+        let blocks = flow_blocks(flow);
+        let crate::box_tree::Background::Image(spec) = blocks[0]
+            .background
+            .as_ref()
+            .expect("hero background")
+        else {
+            panic!("expected a background image, got {:?}", blocks[0].background);
+        };
+        assert_eq!(spec.src, "assets/logo.png");
+        assert_eq!(spec.size, super::BackgroundSize::Cover);
+        assert_eq!(spec.repeat, super::BackgroundRepeat::NoRepeat);
+        assert_eq!(spec.position.x, super::PosAxis::Percent(100.0));
+        assert_eq!(spec.position.y, super::PosAxis::Percent(0.0));
+        // The non-white background-color rides along as the backdrop.
+        assert_eq!(spec.backdrop, Some(crate::color::Color::from_rgb_u8(0xee, 0xee, 0xff)));
     }
 
     #[test]

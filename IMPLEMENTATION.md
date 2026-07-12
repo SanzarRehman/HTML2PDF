@@ -862,9 +862,6 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **Backgrounds: remaining pieces** — `background-image: url()` (PNG/JPEG
-      via the existing decoder) and `background-size`/`-position`/`-repeat`.
-      (`linear-gradient()` shipped 2026-07-10; see below.)
 - [ ] **`display: inline-block`** — the atomic-inline-that-is-a-block primitive.
 - [ ] **Flex/grid leftovers**: `flex-shrink` / `order` / `align-self` /
       `align-content` / `wrap-reverse`; grid `grid-template-rows`, named
@@ -875,6 +872,21 @@ Details for each item are in the feature list below and in
 
 #### Recently shipped (2026-07)
 
+- [x] **`background-image: url()` on flow blocks** (2026-07-12): raster
+      backgrounds through the existing image decoder (`data:`, local, or
+      policy-gated remote). A boxed `CellStyle::background_image`
+      (`BackgroundImageSpec`) carries the deferred `src` plus `background-size`
+      (`auto`/`cover`/`contain`/explicit len·%), `background-position` (keywords
+      + len·%), and `background-repeat`. `build_block` lowers a non-empty spec to
+      `Background::Image`, precedence image > gradient > color, with a non-white
+      `background-color` carried as the image's backdrop. `resolve_images` gained
+      a block-background pass that decodes the source and records the image index
+      + intrinsic size. Painting (`background_image_commands`) resolves the tile
+      size, anchors it, tiles per repeat (capped at 4000 tiles), and clips to the
+      border box. `features/background-image` fixture. Not yet: `url()` on table
+      cells, sizing/position in the `background` shorthand, alpha compositing,
+      `background-origin`/`-clip`, and rounded-corner clipping. The 22k-cell doc
+      stays byte-identical (the boxed field is `None` there).
 - [x] **Table `rowspan`** (2026-07-10): cells now span rows. A `build_table_grid`
       pre-pass resolves column origins with an occupancy vector so later rows
       skip columns still covered by a span from above (the classic case where a
