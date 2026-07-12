@@ -1,0 +1,19 @@
+{
+  "fixture": "flex-item",
+  "layer": "features",
+  "description": "Flex item leftovers: order (visual reordering), flex-shrink (0 pins an item, others absorb overflow), align-self (per-item cross-axis override), flex-wrap: wrap-reverse (lines stack bottom-to-top), and align-content (cross-axis line distribution in a tall container).",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "re", "f", "S"],
+    "must_contain_text": ["Alpha", "Bravo", "Charlie", "Keep", "Squeeze", "Tall", "End", "Center", "Wone", "Wthree", "Aone", "Athree"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "The order row reads Bravo, Charlie, Alpha left to right (source order Alpha, Bravo, Charlie overridden by order 3/1/2).",
+    "In the flex-shrink row, Keep holds its 200pt basis while Squeeze shrinks to absorb all the overflow.",
+    "In the align-self row, Tall sits at the top, Center is vertically centered, and End is bottom-aligned.",
+    "wrap-reverse stacks the two flex lines bottom-to-top: Wthree's line sits above the Wone/Wtwo line.",
+    "align-content: center vertically centers the two wrapped lines inside the 150pt-tall container."
+  ]
+}

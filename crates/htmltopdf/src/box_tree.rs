@@ -13,7 +13,7 @@
 
 use crate::color::Color;
 use crate::html::{
-    AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent,
+    AlignContent, AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent,
     LinearGradient, PositionKind, TableCell, TextAlign,
 };
 
@@ -117,6 +117,14 @@ pub struct BlockBox {
     /// container (`flex-grow`; `flex-basis` in points, `None` = auto/content).
     pub flex_grow: f32,
     pub flex_basis: Option<f32>,
+    /// `flex-shrink` factor (default 1; `0` pins the item at its base size).
+    pub flex_shrink: f32,
+    /// `order`: flex/grid items are laid out in ascending `order` (stable within
+    /// equal values), independent of source order. Default 0.
+    pub order: i32,
+    /// `align-self`: per-item override of the container's `align-items`.
+    /// `None` = inherit the container value.
+    pub align_self: Option<AlignItems>,
     /// `Some` when this block is a `display: grid` container: its children are
     /// placed into columns row-major instead of stacking vertically.
     pub grid: Option<GridContainer>,
@@ -206,6 +214,13 @@ pub struct FlexContainer {
     pub gap: f32,
     /// `flex-wrap: wrap` — items break onto additional flex lines.
     pub wrap: bool,
+    /// `flex-wrap: wrap-reverse` — the flex lines stack in reverse cross-axis
+    /// order (the first line at the bottom). Implies `wrap`.
+    pub wrap_reverse: bool,
+    /// `align-content` — cross-axis distribution of the flex lines when the
+    /// container has a definite height taller than its content and wraps onto
+    /// multiple lines. No effect on a single-line or content-height container.
+    pub align_content: AlignContent,
 }
 
 /// Grid container parameters resolved from the cascade. An empty `columns`

@@ -293,8 +293,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   `width`/`min-width`/`max-width` (points or `%`), `min-height`/`max-height`
   (points), **`margin: auto` centering**, and `overflow: hidden` clipping of a
   fixed-height box.
-- **Modern layout, first pass each**: flexbox (`display: flex` — grow/basis,
-  justify/align, gaps, row+column), grid (`display: grid` — `fr`/`auto`/
+- **Modern layout, first pass each**: flexbox (`display: flex` — grow/basis/
+  shrink, `order`, `wrap`/`wrap-reverse`, justify/align/`align-self`/
+  `align-content`, gaps, row+column), grid (`display: grid` — `fr`/`auto`/
   `repeat()` tracks, spans, gaps), **`display: inline-block`** (a block box that
   flows inline on the baseline — badges/buttons/tags), **floats** with real text
   wrap and `clear`,
@@ -353,8 +354,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   in default builds); a true font-metric baseline model (0.8 em ascent
   approximation today).
 - Isolated stacking contexts (`z-index` compares globally — negative z does
-  paint below the flow now); `flex-shrink`/`order`/`align-self`; grid named
-  lines/areas and `grid-template-rows`.
+  paint below the flow now); grid named lines/areas, `grid-template-rows`, and
+  per-cell alignment. (Flex `flex-shrink`/`order`/`align-self`/`align-content`/
+  `wrap-reverse` shipped.)
 - Images / nested block layout inside table cells; tagged PDF.
 - `@font-face` web fonts; emoji; `dir="auto"` and RTL table cells; `%` heights/
   margins/offsets; `calc()`/custom properties.

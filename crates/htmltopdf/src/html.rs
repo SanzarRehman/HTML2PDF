@@ -353,8 +353,18 @@ pub struct CellStyle {
     pub flex_grow: Option<f32>,
     /// `flex-basis` in points; `None` = `auto` (use the item's content size).
     pub flex_basis: Option<f32>,
+    /// `flex-shrink` factor on a flex item; `None` = default 1.
+    pub flex_shrink: Option<f32>,
+    /// `order` on a flex/grid item; `None` = 0.
+    pub order: Option<i32>,
+    /// `align-self` on a flex item; `None`/`auto` = inherit `align-items`.
+    pub align_self: Option<AlignItems>,
     /// `flex-wrap: wrap` (or a wrapping `flex-flow`) on a flex container.
     pub flex_wrap: Option<bool>,
+    /// `flex-wrap: wrap-reverse` on a flex container.
+    pub flex_wrap_reverse: Option<bool>,
+    /// `align-content` on a flex container.
+    pub align_content: Option<AlignContent>,
     /// `display: grid` — this element establishes a grid container.
     pub display_grid: bool,
     /// `grid-template-columns` track list (`None` = single auto column).
@@ -444,7 +454,12 @@ impl Default for CellStyle {
             gap: None,
             flex_grow: None,
             flex_basis: None,
+            flex_shrink: None,
+            order: None,
+            align_self: None,
             flex_wrap: None,
+            flex_wrap_reverse: None,
+            align_content: None,
             display_grid: false,
             grid_template: None,
             row_gap: None,
@@ -721,6 +736,21 @@ pub enum AlignItems {
     FlexStart,
     Center,
     FlexEnd,
+}
+
+/// Cross-axis distribution of *flex lines* in a wrapping container
+/// (`align-content`). Only bites when the container is taller than its content
+/// and has more than one line; `stretch` (the default) is treated as
+/// `flex-start` since lines are not inflated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignContent {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1644,6 +1674,8 @@ fn build_block(
         align: own.align_items.unwrap_or(AlignItems::Stretch),
         gap: own.gap.unwrap_or(0.0),
         wrap: own.flex_wrap.unwrap_or(false),
+        wrap_reverse: own.flex_wrap_reverse.unwrap_or(false),
+        align_content: own.align_content.unwrap_or(AlignContent::Stretch),
     });
     let grid = own.display_grid.then(|| crate::box_tree::GridContainer {
         columns: own.grid_template.clone().unwrap_or_default(),
@@ -1675,6 +1707,9 @@ fn build_block(
         flex,
         flex_grow: own.flex_grow.unwrap_or(0.0),
         flex_basis: own.flex_basis,
+        flex_shrink: own.flex_shrink.unwrap_or(1.0),
+        order: own.order.unwrap_or(0),
+        align_self: own.align_self,
         grid,
         grid_span: own.grid_span.unwrap_or(1),
         grid_col_start: own.grid_col_start,
@@ -2922,7 +2957,12 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         gap: own.gap,
         flex_grow: own.flex_grow,
         flex_basis: own.flex_basis,
+        flex_shrink: own.flex_shrink,
+        order: own.order,
+        align_self: own.align_self,
         flex_wrap: own.flex_wrap,
+        flex_wrap_reverse: own.flex_wrap_reverse,
+        align_content: own.align_content,
         display_grid: own.display_grid,
         grid_template: own.grid_template.clone(),
         row_gap: own.row_gap,
@@ -5223,23 +5263,27 @@ fn normalize_declaration_value(value: &str) -> (String, bool) {
 }
 
 /// Parse the `flex` shorthand: `none` / `auto` / `initial`, or
-/// `<grow> [<shrink>] [<basis>]`. Only grow and basis are recorded (shrink
-/// defaults to 1 in layout). `flex: 1` means grow 1 with a 0 basis.
+/// `<grow> [<shrink>] [<basis>]`. `flex: 1` means grow 1, shrink 1, basis 0.
 fn apply_flex_shorthand(target: &mut DeclarationLayer, value: &str) {
     let v = value.trim();
     match v.to_ascii_lowercase().as_str() {
         "none" => {
+            // `0 0 auto`, but our layout treats a `None` basis as content-size;
+            // a 0 basis is kept to preserve historical output.
             target.cell.flex_grow = Some(0.0);
+            target.cell.flex_shrink = Some(0.0);
             target.cell.flex_basis = Some(0.0);
             return;
         }
         "auto" => {
             target.cell.flex_grow = Some(1.0);
+            target.cell.flex_shrink = Some(1.0);
             target.cell.flex_basis = None;
             return;
         }
         "initial" => {
             target.cell.flex_grow = Some(0.0);
+            target.cell.flex_shrink = Some(1.0);
             target.cell.flex_basis = None;
             return;
         }
@@ -5248,6 +5292,15 @@ fn apply_flex_shorthand(target: &mut DeclarationLayer, value: &str) {
     let tokens: Vec<&str> = v.split_whitespace().collect();
     if let Some(g) = tokens.first().and_then(|t| t.parse::<f32>().ok()) {
         target.cell.flex_grow = Some(g);
+    }
+    // The second bare (unitless) number, if present, is `flex-shrink`.
+    let bare_numbers: Vec<f32> = tokens
+        .iter()
+        .filter(|t| !t.chars().any(|c| c.is_ascii_alphabetic() || c == '%'))
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    if let Some(&s) = bare_numbers.get(1) {
+        target.cell.flex_shrink = Some(s);
     }
     let mut basis_set = false;
     for token in &tokens {
@@ -5377,6 +5430,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         "flex-wrap" => {
             let v = value.trim().to_ascii_lowercase();
             target.cell.flex_wrap = Some(v == "wrap" || v == "wrap-reverse");
+            target.cell.flex_wrap_reverse = Some(v == "wrap-reverse");
         }
         "flex-flow" => {
             // Shorthand: any order of a direction keyword and a wrap keyword.
@@ -5387,7 +5441,11 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                         target.cell.flex_direction = Some(FlexDirection::Column)
                     }
                     "row" | "row-reverse" => target.cell.flex_direction = Some(FlexDirection::Row),
-                    "wrap" | "wrap-reverse" => target.cell.flex_wrap = Some(true),
+                    "wrap" => target.cell.flex_wrap = Some(true),
+                    "wrap-reverse" => {
+                        target.cell.flex_wrap = Some(true);
+                        target.cell.flex_wrap_reverse = Some(true);
+                    }
                     "nowrap" => target.cell.flex_wrap = Some(false),
                     _ => {}
                 }
@@ -5409,6 +5467,28 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 "center" => Some(AlignItems::Center),
                 "flex-end" | "end" => Some(AlignItems::FlexEnd),
                 _ => Some(AlignItems::Stretch),
+            };
+        }
+        "align-self" => {
+            // `auto` (the default) leaves the item to inherit the container's
+            // `align-items`, represented as `None`.
+            target.cell.align_self = match value.to_ascii_lowercase().as_str() {
+                "flex-start" | "start" => Some(AlignItems::FlexStart),
+                "center" => Some(AlignItems::Center),
+                "flex-end" | "end" => Some(AlignItems::FlexEnd),
+                "stretch" => Some(AlignItems::Stretch),
+                _ => None,
+            };
+        }
+        "align-content" => {
+            target.cell.align_content = match value.to_ascii_lowercase().as_str() {
+                "flex-start" | "start" => Some(AlignContent::FlexStart),
+                "flex-end" | "end" => Some(AlignContent::FlexEnd),
+                "center" => Some(AlignContent::Center),
+                "space-between" => Some(AlignContent::SpaceBetween),
+                "space-around" => Some(AlignContent::SpaceAround),
+                "space-evenly" => Some(AlignContent::SpaceEvenly),
+                _ => Some(AlignContent::Stretch),
             };
         }
         "gap" => {
@@ -5513,6 +5593,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             }
         }
         "flex-grow" => target.cell.flex_grow = value.trim().parse::<f32>().ok(),
+        "flex-shrink" => target.cell.flex_shrink = value.trim().parse::<f32>().ok(),
         "flex-basis" => {
             target.cell.flex_basis = if value.eq_ignore_ascii_case("auto") {
                 None
@@ -5521,6 +5602,7 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             };
         }
         "flex" => apply_flex_shorthand(target, value),
+        "order" => target.cell.order = value.trim().parse::<i32>().ok(),
         "text-align" => {
             // `start`/`end` assume left-to-right text.
             target.cell.align = match value.to_ascii_lowercase().as_str() {
@@ -6404,7 +6486,12 @@ impl CellStyle {
         self.gap = other.gap.or(self.gap);
         self.flex_grow = other.flex_grow.or(self.flex_grow);
         self.flex_basis = other.flex_basis.or(self.flex_basis);
+        self.flex_shrink = other.flex_shrink.or(self.flex_shrink);
+        self.order = other.order.or(self.order);
+        self.align_self = other.align_self.or(self.align_self);
         self.flex_wrap = other.flex_wrap.or(self.flex_wrap);
+        self.flex_wrap_reverse = other.flex_wrap_reverse.or(self.flex_wrap_reverse);
+        self.align_content = other.align_content.or(self.align_content);
         self.display_grid |= other.display_grid;
         self.grid_template = other.grid_template.or(self.grid_template.take());
         self.row_gap = other.row_gap.or(self.row_gap);
@@ -6766,6 +6853,44 @@ mod tests {
         let sp = blocks.iter().find(|b| block_text(b) == "spanner").unwrap();
         assert_eq!(sp.grid_span, 2);
         assert_eq!(sp.grid_col_start, None);
+    }
+
+    #[test]
+    fn parses_flex_item_leftovers() {
+        use super::{AlignContent, AlignItems};
+        let document = parse(
+            "<style>\
+             .c { display: flex; flex-wrap: wrap-reverse; align-content: center; }\
+             .a { order: 3; flex-shrink: 0; align-self: flex-end; }\
+             .b { flex: 2 3 40pt; }\
+             </style>\
+             <div class=\"c\">\
+               <div class=\"a\">a</div>\
+               <div class=\"b\">b</div>\
+             </div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+
+        let container = blocks.iter().find(|b| b.flex.is_some()).unwrap();
+        let flex = container.flex.as_ref().unwrap();
+        assert!(flex.wrap, "wrap-reverse implies wrapping");
+        assert!(flex.wrap_reverse, "wrap-reverse flag set");
+        assert_eq!(flex.align_content, AlignContent::Center);
+
+        let a = blocks.iter().find(|b| block_text(b) == "a").unwrap();
+        assert_eq!(a.order, 3);
+        assert_eq!(a.flex_shrink, 0.0);
+        assert_eq!(a.align_self, Some(AlignItems::FlexEnd));
+
+        // `flex: 2 3 40pt` → grow 2, shrink 3, basis 40pt.
+        let b = blocks.iter().find(|b| block_text(b) == "b").unwrap();
+        assert_eq!(b.flex_grow, 2.0);
+        assert_eq!(b.flex_shrink, 3.0);
+        assert_eq!(b.flex_basis, Some(40.0));
+        // Unset item properties keep their defaults (order 0, inherit align-self).
+        assert_eq!(b.order, 0);
+        assert_eq!(b.align_self, None);
     }
 
     #[test]

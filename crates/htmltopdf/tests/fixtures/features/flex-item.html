@@ -1,0 +1,58 @@
+<html><head><style>
+  body { font-size: 12pt; }
+  h2 { font-size: 13pt; margin: 10pt 0 4pt; }
+  .row { display: flex; width: 320pt; border: 1pt solid #999; margin-bottom: 6pt; }
+  .box { padding: 4pt 8pt; background: #e8eef7; border: 1pt solid #66c; }
+
+  /* order: source is Alpha, Bravo, Charlie; visual order Bravo, Charlie, Alpha. */
+  #alpha { order: 3; } #bravo { order: 1; } #charlie { order: 2; }
+
+  /* flex-shrink: Keep is pinned (shrink 0); Squeeze absorbs the overflow. */
+  .keep { flex-shrink: 0; flex-basis: 200pt; }
+  .squeeze { flex-basis: 200pt; }
+
+  /* align-self overrides align-items per item against the tall row. */
+  .selfrow { align-items: flex-start; }
+  .tall { height: 50pt; }
+  .self-end { align-self: flex-end; }
+  .self-center { align-self: center; }
+
+  /* wrap-reverse: two flex lines stack bottom-to-top. */
+  .wrapr { display: flex; flex-wrap: wrap-reverse; width: 170pt; border: 1pt solid #999; }
+  .wrapr .box { flex-basis: 74pt; }
+
+  /* align-content centers the wrapped lines inside a tall container. */
+  .ac { display: flex; flex-wrap: wrap; align-content: center;
+        width: 170pt; height: 150pt; border: 1pt solid #999; }
+  .ac .box { flex-basis: 74pt; }
+</style></head><body>
+<h2>order</h2>
+<div class="row">
+  <div class="box" id="alpha">Alpha</div>
+  <div class="box" id="bravo">Bravo</div>
+  <div class="box" id="charlie">Charlie</div>
+</div>
+
+<h2>flex-shrink</h2>
+<div class="row">
+  <div class="box keep">Keep</div>
+  <div class="box squeeze">Squeeze</div>
+</div>
+
+<h2>align-self</h2>
+<div class="row selfrow">
+  <div class="box tall">Tall</div>
+  <div class="box self-end">End</div>
+  <div class="box self-center">Center</div>
+</div>
+
+<h2>wrap-reverse</h2>
+<div class="wrapr">
+  <div class="box">Wone</div><div class="box">Wtwo</div><div class="box">Wthree</div>
+</div>
+
+<h2>align-content</h2>
+<div class="ac">
+  <div class="box">Aone</div><div class="box">Atwo</div><div class="box">Athree</div>
+</div>
+</body></html>

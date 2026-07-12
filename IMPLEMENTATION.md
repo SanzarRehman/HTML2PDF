@@ -862,9 +862,12 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **Flex/grid leftovers**: `flex-shrink` / `order` / `align-self` /
-      `align-content` / `wrap-reverse`; grid `grid-template-rows`, named
-      areas/lines, cell alignment.
+- [ ] **Grid leftovers**: `grid-template-rows`, named areas/lines, `minmax()`
+      row sizing, dense packing, and item alignment within a cell
+      (`justify-items` / `align-items` / `justify-self` / `align-self`). (The
+      flex item leftovers — `order`, `flex-shrink`, `align-self`,
+      `align-content`, `wrap-reverse` — shipped 2026-07-12; `order` already
+      re-sequences grid items too.)
 - [ ] **Remaining background & inline-block pieces**: `background-image: url()`
       on table cells; multi-line / wrapping inline-block content, nested block
       children, and `vertical-align` on inline-blocks.
@@ -874,6 +877,26 @@ Details for each item are in the feature list below and in
 
 #### Recently shipped (2026-07)
 
+- [x] **Flex item leftovers** (2026-07-12): `order`, `flex-shrink`,
+      `align-self`, `align-content`, and `flex-wrap: wrap-reverse`. Items now
+      re-sequence by `order` (stable sort, applied to grid items too) before
+      wrapping and placement. Overflow shrink is weighted by `flex-shrink × base`
+      so `flex-shrink: 0` pins an item at its base size while the rest absorb the
+      deficit — with every factor at the default 1 the math is the *exact* old
+      `avail / total_base` scale, so shrink-free content is byte-identical (the
+      width distribution was extracted into a shared `flex_line_widths` used by
+      both the paint and measure passes). `align-self` overrides the container's
+      `align-items` per item on the cross axis. `wrap-reverse` stacks the flex
+      lines bottom-to-top (last line first in our top-down model). `align-content`
+      distributes leftover cross-axis space among the lines
+      (`center`/`flex-end`/`space-between`/`-around`/`-evenly`) when the container
+      has a definite height taller than its content — a no-op for the common
+      auto-height / single-line case, so existing flex/grid fixtures and the
+      22k-cell doc stay byte-identical. `features/flex-item` fixture. Limits:
+      `width`/`height` still don't seed `flex-basis` (only an explicit
+      `flex-basis` does); `align-content` and `wrap-reverse` don't apply in
+      `flex-direction: column`; and `wrap-reverse` reverses line order but not the
+      per-line `align-items` start/end sense.
 - [x] **`display: inline-block`** (2026-07-12): the atomic-inline-that-is-a-block
       primitive — the step that breaks the engine's block-vs-inline dichotomy. A
       `CellStyle::display_inline_block` flag routes the element in `build_node`

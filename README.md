@@ -164,8 +164,9 @@ Works today:
   positioned boxes. Table cells take per-side rules too — the classic
   `th { border-bottom: 2px solid }` paints exactly that edge, while uniform
   spreadsheet gridlines keep the fast path.
-- Modern layout, first pass each: **flexbox** (`display: flex` — grow/basis,
-  `flex-wrap`, `justify-content`, `align-items`, gaps, row and column), **grid**
+- Modern layout, first pass each: **flexbox** (`display: flex` — grow/basis/
+  `flex-shrink`, `order`, `flex-wrap`/`wrap-reverse`, `justify-content`,
+  `align-items`/`align-self`/`align-content`, gaps, row and column), **grid**
   (`display: grid` — fixed/`fr`/`auto`/`repeat()`/`minmax()` tracks, `span N`
   and line-based `grid-column: A / B` placement, gaps),
   **floats** with real text wrap (`float: left/right`, `clear`, stacked floats),
@@ -249,9 +250,11 @@ Not complete yet (queued, CSS-first):
   `min-height`/`max-height` already work; height percentages need a definite
   containing height, which is indefinite in normal flow).
 - `display: inline-block` — the atomic inline-level block box.
-- Flex/grid leftovers: `flex-shrink`/`order`/`align-self`/`align-content`/
-  `wrap-reverse`; grid `grid-template-rows`, named lines/areas; and border
-  polish (real `double`/`groove`, per-corner radius, `border-collapse`).
+- Grid leftovers: `grid-template-rows`, named lines/areas, `minmax()` rows,
+  dense packing, and per-cell alignment; plus border polish (real
+  `double`/`groove`, per-corner radius, `border-collapse`). (Flex item
+  leftovers — `flex-shrink`/`order`/`align-self`/`align-content`/`wrap-reverse`
+  — shipped.)
 - Isolated stacking contexts (`z-index` compares globally today; negative z
   already paints below the flow, but `opacity`/`transform` don't create
   contexts).
@@ -460,11 +463,14 @@ speed and memory stay visible as fidelity improves.
 The queue is **CSS-first**: since the output is a static PDF, dynamic CSS
 (`:hover`, transitions, animations) is out of scope by design, and the JS DOM
 surface is deferred. Recently shipped: table `rowspan` (2026-07-10),
-`background-image: url()` on flow blocks with size/position/repeat, and
-`display: inline-block` (2026-07-12). The front of the queue, in order (see
-[IMPLEMENTATION.md](IMPLEMENTATION.md) for the full checklist):
+`background-image: url()` on flow blocks with size/position/repeat,
+`display: inline-block`, and the flex item leftovers — `order`, `flex-shrink`,
+`align-self`, `align-content`, `wrap-reverse` (2026-07-12). The front of the
+queue, in order (see [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full
+checklist):
 
-1. Flex/grid leftovers and border polish; isolated `z-index` stacking contexts.
+1. Grid leftovers (`grid-template-rows`, named areas/lines, per-cell alignment)
+   and border polish; isolated `z-index` stacking contexts.
 2. Remaining background & inline-block pieces: `url()` on table cells,
    radial/repeating gradients, multiple layers; multi-line / nested-block
    inline-block content and non-baseline `vertical-align`.

@@ -1032,6 +1032,118 @@ fn layout_table_box(
     *carried = TABLE_FLOW_MARGIN;
 }
 
+/// Distribute a flex line's main axis across its items: base sizes (from
+/// `flex-basis`, else content max-content, clamped to the line), then either
+/// `flex-grow` spreads free space or, on overflow, items give up space in
+/// proportion to `flex-shrink × base` (so `flex-shrink: 0` items keep their
+/// size). When every shrink factor is the default 1 this reduces to — and is
+/// computed with the exact arithmetic of — a uniform `avail / total_base` scale,
+/// so shrink-free content is byte-identical. Shared by the paint and measure
+/// passes so both agree on item widths.
+fn flex_line_widths(
+    items: &[FlexItem],
+    flex: &crate::box_tree::FlexContainer,
+    inner_width: f32,
+    options: &RenderOptions,
+) -> Vec<f32> {
+    let gap = flex.gap;
+    let total_gap = gap * (items.len() as f32 - 1.0).max(0.0);
+    let avail = (inner_width - total_gap).max(0.0);
+
+    let bases: Vec<f32> = items
+        .iter()
+        .map(|item| item.basis(options).clamp(0.0, avail))
+        .collect();
+    let total_base: f32 = bases.iter().sum();
+    let total_grow: f32 = items.iter().map(FlexItem::grow).sum();
+    let free = avail - total_base;
+
+    if free > 0.0 && total_grow > 0.0 {
+        // Distribute free space by flex-grow.
+        bases
+            .iter()
+            .zip(items)
+            .map(|(base, item)| base + free * (item.grow() / total_grow))
+            .collect()
+    } else if free < 0.0 && total_base > 0.0 {
+        if items.iter().all(|item| item.shrink() == 1.0) {
+            // Default shrink: uniform scale (kept bit-for-bit for parity).
+            let scale = avail / total_base;
+            bases.iter().map(|base| base * scale).collect()
+        } else {
+            // Weighted shrink by `flex-shrink × base`; `flex-shrink: 0` pins size.
+            let weights: Vec<f32> = bases
+                .iter()
+                .zip(items)
+                .map(|(base, item)| item.shrink() * base)
+                .collect();
+            let total_weight: f32 = weights.iter().sum();
+            if total_weight > 0.0 {
+                let deficit = -free;
+                bases
+                    .iter()
+                    .zip(&weights)
+                    .map(|(base, w)| (base - deficit * (w / total_weight)).max(0.0))
+                    .collect()
+            } else {
+                // Nothing may shrink (every item is `flex-shrink: 0`): overflow.
+                bases
+            }
+        }
+    } else {
+        bases
+    }
+}
+
+/// The cross-axis height one flex line will consume: the tallest item at the
+/// widths `flex_line_widths` assigns. Used by `align-content` to learn the
+/// stacked height before placing lines.
+fn measure_flex_line_height(
+    items: &[FlexItem],
+    flex: &crate::box_tree::FlexContainer,
+    inner_width: f32,
+    options: &RenderOptions,
+) -> f32 {
+    let widths = flex_line_widths(items, flex, inner_width, options);
+    items
+        .iter()
+        .zip(&widths)
+        .map(|(item, width)| item.measure_height(*width, options))
+        .fold(0.0_f32, f32::max)
+}
+
+/// `align-content` offsets: the lead (cross-axis space before the first flex
+/// line) and the spacing added to each inter-line gap, given `free` leftover
+/// cross space across `n` lines. Zero for `stretch`/`flex-start` or no free
+/// space, so a content-height container is never shifted.
+fn align_content_offsets(mode: crate::html::AlignContent, free: f32, n: usize) -> (f32, f32) {
+    use crate::html::AlignContent;
+    if free <= 0.0 || n == 0 {
+        return (0.0, 0.0);
+    }
+    let n = n as f32;
+    match mode {
+        AlignContent::Stretch | AlignContent::FlexStart => (0.0, 0.0),
+        AlignContent::FlexEnd => (free, 0.0),
+        AlignContent::Center => (free / 2.0, 0.0),
+        AlignContent::SpaceBetween => {
+            if n > 1.0 {
+                (0.0, free / (n - 1.0))
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        AlignContent::SpaceAround => {
+            let unit = free / n;
+            (unit / 2.0, unit)
+        }
+        AlignContent::SpaceEvenly => {
+            let unit = free / (n + 1.0);
+            (unit, unit)
+        }
+    }
+}
+
 /// First-pass flexbox (row): lay out a flex container's block children as
 /// horizontal flex items across `inner_width`, sharing one top edge. Item main
 /// sizes come from `flex-basis` (or declared width, or content max-content),
@@ -1059,7 +1171,7 @@ fn layout_flex_box(
     // Flex items: block children are items; contiguous inline content (a `Line`)
     // becomes an anonymous item. Images/tables inside a flex row are still
     // skipped (rare; documented).
-    let items: Vec<FlexItem> = block
+    let mut items: Vec<FlexItem> = block
         .children
         .iter()
         .filter_map(|child| match child {
@@ -1070,6 +1182,12 @@ fn layout_flex_box(
         .collect();
     if items.is_empty() {
         return;
+    }
+    // `order` re-sequences items independently of source order. The sort is
+    // stable, so with the default 0 everywhere the order is unchanged (and the
+    // guard skips the sort entirely for the common shrink-/order-free case).
+    if items.iter().any(|item| item.order() != 0) {
+        items.sort_by_key(|item| item.order());
     }
 
     let gap = flex.gap;
@@ -1110,9 +1228,23 @@ fn layout_flex_box(
         vec![0..items.len()]
     };
 
-    for (line_index, range) in lines.iter().enumerate() {
+    // `flex-wrap: wrap-reverse` stacks lines in reverse cross-axis order (the
+    // first line at the bottom); in our top-down model that is last-line-first.
+    let mut order = lines;
+    if flex.wrap_reverse {
+        order.reverse();
+    }
+
+    // `align-content` distributes leftover cross-axis space when the container
+    // has a definite height taller than the stacked lines. With the default
+    // `stretch`/`flex-start` (or an auto height) both offsets are 0, so the
+    // common path is byte-identical.
+    let (lead, between) = align_content_layout(block, flex, &order, &items, inner_width, options);
+    *y -= lead;
+
+    for (line_index, range) in order.iter().enumerate() {
         if line_index > 0 {
-            *y -= gap; // cross-axis gap between flex lines
+            *y -= gap + between; // cross-axis gap + align-content spacing
         }
         layout_flex_line(
             &items[range.clone()],
@@ -1126,6 +1258,46 @@ fn layout_flex_box(
             options,
         );
     }
+}
+
+/// Resolve `align-content` into a (lead, between-lines) offset pair for the
+/// current container. Returns `(0, 0)` unless the container has a definite
+/// height with free cross space and a distributing `align-content` value.
+#[allow(clippy::too_many_arguments)]
+fn align_content_layout(
+    block: &crate::box_tree::BlockBox,
+    flex: &crate::box_tree::FlexContainer,
+    order: &[std::ops::Range<usize>],
+    items: &[FlexItem],
+    inner_width: f32,
+    options: &RenderOptions,
+) -> (f32, f32) {
+    use crate::html::AlignContent;
+    if matches!(
+        flex.align_content,
+        AlignContent::Stretch | AlignContent::FlexStart
+    ) {
+        return (0.0, 0.0);
+    }
+    // The container's definite content-box height, if any.
+    let definite = [block.css_height, block.min_height]
+        .into_iter()
+        .flatten()
+        .fold(None, |acc: Option<f32>, h| Some(acc.map_or(h, |a| a.max(h))));
+    let Some(height) = definite else {
+        return (0.0, 0.0);
+    };
+    let cross = if block.border_box {
+        (height - block.padding.top - block.padding.bottom).max(0.0)
+    } else {
+        height
+    };
+    let content: f32 = order
+        .iter()
+        .map(|range| measure_flex_line_height(&items[range.clone()], flex, inner_width, options))
+        .sum::<f32>()
+        + flex.gap * (order.len() as f32 - 1.0).max(0.0);
+    align_content_offsets(flex.align_content, (cross - content).max(0.0), order.len())
 }
 
 /// Lay out one flex line (the whole container when not wrapping): distribute
@@ -1147,33 +1319,9 @@ fn layout_flex_line(
 
     let gap = flex.gap;
     let total_gap = gap * (items.len() as f32 - 1.0).max(0.0);
-    let avail = (inner_width - total_gap).max(0.0);
 
-    // Base main size per item: flex-basis, else content max-content, clamped to
-    // the line's available width.
-    let bases: Vec<f32> = items
-        .iter()
-        .map(|item| item.basis(options).clamp(0.0, avail))
-        .collect();
-
-    let total_base: f32 = bases.iter().sum();
-    let total_grow: f32 = items.iter().map(FlexItem::grow).sum();
-    let free = avail - total_base;
-
-    let widths: Vec<f32> = if free > 0.0 && total_grow > 0.0 {
-        // Distribute free space by flex-grow.
-        bases
-            .iter()
-            .zip(items)
-            .map(|(base, item)| base + free * (item.grow() / total_grow))
-            .collect()
-    } else if free < 0.0 && total_base > 0.0 {
-        // Overflow: shrink every item proportionally to its base so the line fits.
-        let scale = avail / total_base;
-        bases.iter().map(|base| base * scale).collect()
-    } else {
-        bases.clone()
-    };
+    // Base main size (flex-basis / content) then grow/shrink to fit the line.
+    let widths = flex_line_widths(items, flex, inner_width, options);
 
     // justify-content distributes any leftover main-axis space.
     let used: f32 = widths.iter().sum::<f32>() + total_gap;
@@ -1193,7 +1341,8 @@ fn layout_flex_line(
 
     // Cross-axis alignment factor: how much of the leftover height goes above
     // the item. `stretch` behaves as `flex-start` (items are not inflated).
-    let align_factor = match flex.align {
+    // `align-self` overrides the container's `align-items` per item.
+    let align_factor = |align: AlignItems| match align {
         AlignItems::Stretch | AlignItems::FlexStart => 0.0,
         AlignItems::Center => 0.5,
         AlignItems::FlexEnd => 1.0,
@@ -1202,7 +1351,8 @@ fn layout_flex_line(
     let top = *y;
     let mut lowest = *y;
     for ((item, width), height) in items.iter().zip(&widths).zip(&heights) {
-        let mut item_y = top - (row_height - height) * align_factor;
+        let align = item.align_self().unwrap_or(flex.align);
+        let mut item_y = top - (row_height - height) * align_factor(align);
         let mut carried = 0.0;
         item.layout(cursor, *width, pages, &mut item_y, &mut carried, overlays, containing, options);
         lowest = lowest.min(item_y);
@@ -1224,6 +1374,30 @@ impl FlexItem<'_> {
         match self {
             FlexItem::Block(b) => b.flex_grow,
             FlexItem::Line(_) => 0.0,
+        }
+    }
+
+    /// `flex-shrink` factor. Anonymous inline items shrink at the default 1.
+    fn shrink(&self) -> f32 {
+        match self {
+            FlexItem::Block(b) => b.flex_shrink,
+            FlexItem::Line(_) => 1.0,
+        }
+    }
+
+    /// `order`, for stable re-sequencing of items. Anonymous items sort at 0.
+    fn order(&self) -> i32 {
+        match self {
+            FlexItem::Block(b) => b.order,
+            FlexItem::Line(_) => 0,
+        }
+    }
+
+    /// `align-self` cross-axis override; `None` inherits the container value.
+    fn align_self(&self) -> Option<crate::html::AlignItems> {
+        match self {
+            FlexItem::Block(b) => b.align_self,
+            FlexItem::Line(_) => None,
         }
     }
 
@@ -1319,7 +1493,7 @@ fn layout_grid_box(
 
     // Grid items with their column span and any line-based `grid-column`
     // placement. Anonymous inline content spans 1, auto-placed.
-    let items: Vec<(FlexItem, usize, Option<i32>, Option<i32>)> = block
+    let mut items: Vec<(FlexItem, usize, Option<i32>, Option<i32>)> = block
         .children
         .iter()
         .filter_map(|child| match child {
@@ -1332,6 +1506,11 @@ fn layout_grid_box(
         .collect();
     if items.is_empty() {
         return;
+    }
+    // `order` re-sequences grid items before auto-placement (stable, so the
+    // default 0 keeps document order untouched).
+    if items.iter().any(|(item, ..)| item.order() != 0) {
+        items.sort_by_key(|(item, ..)| item.order());
     }
 
     let tracks: Vec<GridTrack> = if grid.columns.is_empty() {
@@ -5638,6 +5817,9 @@ mod tests {
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
+                    flex_shrink: 1.0,
+                    order: 0,
+                    align_self: None,
                     grid: None,
                     grid_span: 1,
                     grid_col_start: None,
@@ -5730,6 +5912,9 @@ mod tests {
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
+                    flex_shrink: 1.0,
+                    order: 0,
+                    align_self: None,
                     grid: None,
                     grid_span: 1,
                     grid_col_start: None,
@@ -5820,6 +6005,9 @@ mod tests {
                 flex: None,
                 flex_grow: 0.0,
                 flex_basis: None,
+                flex_shrink: 1.0,
+                order: 0,
+                align_self: None,
                 grid: None,
                 grid_span: 1,
                 grid_col_start: None,
@@ -5938,6 +6126,9 @@ mod tests {
                         flex: None,
                         flex_grow: 0.0,
                         flex_basis: None,
+                        flex_shrink: 1.0,
+                        order: 0,
+                        align_self: None,
                         grid: None,
                         grid_span: 1,
                         grid_col_start: None,
@@ -6027,6 +6218,9 @@ mod tests {
                     flex: None,
                     flex_grow: 0.0,
                     flex_basis: None,
+                    flex_shrink: 1.0,
+                    order: 0,
+                    align_self: None,
                     grid: None,
                     grid_span: 1,
                     grid_col_start: None,
