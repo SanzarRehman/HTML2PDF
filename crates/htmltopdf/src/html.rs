@@ -375,6 +375,11 @@ pub struct CellStyle {
     pub row_gap: Option<f32>,
     /// `grid-column: span N` on a grid item.
     pub grid_span: Option<usize>,
+    /// `grid-row: span N` on a grid item.
+    pub grid_row_span: Option<usize>,
+    /// Line-based `grid-row: start [/ end]` (1-based; negative from the end).
+    pub grid_row_start: Option<i32>,
+    pub grid_row_end: Option<i32>,
     /// Line-based `grid-column: start [/ end]` (1-based; negative counts from
     /// the end, so `1 / -1` spans the full row).
     pub grid_col_start: Option<i32>,
@@ -467,6 +472,9 @@ impl Default for CellStyle {
             grid_template_rows: None,
             row_gap: None,
             grid_span: None,
+            grid_row_span: None,
+            grid_row_start: None,
+            grid_row_end: None,
             grid_col_start: None,
             grid_col_end: None,
             float_dir: None,
@@ -1717,6 +1725,9 @@ fn build_block(
         align_self: own.align_self,
         grid,
         grid_span: own.grid_span.unwrap_or(1),
+        grid_row_span: own.grid_row_span.unwrap_or(1),
+        grid_row_start: own.grid_row_start,
+        grid_row_end: own.grid_row_end,
         grid_col_start: own.grid_col_start,
         grid_col_end: own.grid_col_end,
         float_dir: own.float_dir,
@@ -2973,6 +2984,9 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         grid_template_rows: own.grid_template_rows.clone(),
         row_gap: own.row_gap,
         grid_span: own.grid_span,
+        grid_row_span: own.grid_row_span,
+        grid_row_start: own.grid_row_start,
+        grid_row_end: own.grid_row_end,
         grid_col_start: own.grid_col_start,
         grid_col_end: own.grid_col_end,
         float_dir: own.float_dir,
@@ -5604,6 +5618,31 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 }
             }
         }
+        "grid-row" => {
+            // Mirror of `grid-column` on the block (row) axis: `span N`, `A`,
+            // `A / B`, `A / span N`, `A / -1`.
+            let v = value.trim().to_ascii_lowercase();
+            let (start, end) = match v.split_once('/') {
+                Some((a, b)) => (a.trim(), Some(b.trim())),
+                None => (v.as_str(), None),
+            };
+            if let Some(rest) = start.strip_prefix("span") {
+                if let Ok(n) = rest.trim().parse::<usize>() {
+                    target.cell.grid_row_span = Some(n.max(1));
+                }
+            } else if let Ok(line) = start.parse::<i32>() {
+                target.cell.grid_row_start = Some(line);
+            }
+            if let Some(end) = end {
+                if let Some(rest) = end.strip_prefix("span") {
+                    if let Ok(n) = rest.trim().parse::<usize>() {
+                        target.cell.grid_row_span = Some(n.max(1));
+                    }
+                } else if let Ok(line) = end.parse::<i32>() {
+                    target.cell.grid_row_end = Some(line);
+                }
+            }
+        }
         "flex-grow" => target.cell.flex_grow = value.trim().parse::<f32>().ok(),
         "flex-shrink" => target.cell.flex_shrink = value.trim().parse::<f32>().ok(),
         "flex-basis" => {
@@ -6509,6 +6548,9 @@ impl CellStyle {
         self.grid_template_rows = other.grid_template_rows.or(self.grid_template_rows.take());
         self.row_gap = other.row_gap.or(self.row_gap);
         self.grid_span = other.grid_span.or(self.grid_span);
+        self.grid_row_span = other.grid_row_span.or(self.grid_row_span);
+        self.grid_row_start = other.grid_row_start.or(self.grid_row_start);
+        self.grid_row_end = other.grid_row_end.or(self.grid_row_end);
         self.grid_col_start = other.grid_col_start.or(self.grid_col_start);
         self.grid_col_end = other.grid_col_end.or(self.grid_col_end);
         self.float_dir = other.float_dir.or(self.float_dir);
@@ -6866,6 +6908,36 @@ mod tests {
         let sp = blocks.iter().find(|b| block_text(b) == "spanner").unwrap();
         assert_eq!(sp.grid_span, 2);
         assert_eq!(sp.grid_col_start, None);
+    }
+
+    #[test]
+    fn parses_grid_row_lines_and_spans() {
+        let document = parse(
+            "<style>\
+             .g { display: grid; grid-template-columns: 1fr 1fr; }\
+             .span { grid-row: span 2; }\
+             .range { grid-row: 1 / 3; }\
+             .pin { grid-row: 2; grid-column: 2; }\
+             </style>\
+             <div class=\"g\">\
+               <div class=\"span\">s</div>\
+               <div class=\"range\">r</div>\
+               <div class=\"pin\">p</div>\
+             </div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+
+        let s = blocks.iter().find(|b| block_text(b) == "s").unwrap();
+        assert_eq!(s.grid_row_span, 2);
+        assert_eq!(s.grid_row_start, None);
+
+        let r = blocks.iter().find(|b| block_text(b) == "r").unwrap();
+        assert_eq!((r.grid_row_start, r.grid_row_end), (Some(1), Some(3)));
+
+        let p = blocks.iter().find(|b| block_text(b) == "p").unwrap();
+        assert_eq!(p.grid_row_start, Some(2));
+        assert_eq!(p.grid_col_start, Some(2));
     }
 
     #[test]

@@ -1,0 +1,17 @@
+{
+  "fixture": "grid-2d",
+  "layer": "features",
+  "description": "2D grid placement: line-based grid-row placement and row spans via an occupancy grid. Auto items flow around spanned/pinned cells; an explicitly placed cell leaves earlier gaps for later auto items; a row-spanning item taller than its rows grows the last spanned row.",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "re", "f", "S"],
+    "must_contain_text": ["Sidebar", "Rowone", "Rowtwo", "Firstcell", "Pincell", "Thirdcell", "Tall", "Rightup", "Rightlow"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Sidebar spans both rows in the left column; Rowone and Rowtwo stack in the right column beside it.",
+    "Firstcell is top-left and Pincell is pinned to row 2 / column 2; Thirdcell fills the top-right gap Pincell left (so bottom-left stays empty).",
+    "The tall two-row span grows its second row so the whole cell fits, pushing the grid (and content after it) down; Rightup and Rightlow stay in the right column."
+  ]
+}

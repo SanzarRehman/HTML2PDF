@@ -134,6 +134,13 @@ pub struct BlockBox {
     /// resolved against the track count at layout time.
     pub grid_col_start: Option<i32>,
     pub grid_col_end: Option<i32>,
+    /// `grid-row: span N` when this block is a grid item (1 = one row).
+    pub grid_row_span: usize,
+    /// Line-based `grid-row: start / end` (1-based; negative counts from the end
+    /// of the explicit grid). Presence of any row placement switches the grid to
+    /// the 2D occupancy path.
+    pub grid_row_start: Option<i32>,
+    pub grid_row_end: Option<i32>,
     /// CSS `float`: the block is taken out of normal flow and placed at the
     /// left/right edge; following line boxes shorten around it.
     pub float_dir: Option<FloatDir>,

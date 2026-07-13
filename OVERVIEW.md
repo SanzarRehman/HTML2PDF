@@ -296,8 +296,9 @@ tab. Each request is handled on its own worker thread, so it scales across cores
 - **Modern layout, first pass each**: flexbox (`display: flex` — grow/basis/
   shrink, `order`, `wrap`/`wrap-reverse`, justify/align/`align-self`/
   `align-content`, gaps, row+column), grid (`display: grid` — `fr`/`auto`/
-  `repeat()`/`minmax()` column + `grid-template-rows` tracks, spans, line-based
-  `grid-column`, `align-items`/`align-self`, gaps), **`display: inline-block`** (a block box that
+  `repeat()`/`minmax()` column + `grid-template-rows` tracks, 2D
+  `grid-column`/`grid-row` line placement + row spans, `align-items`/
+  `align-self`, gaps), **`display: inline-block`** (a block box that
   flows inline on the baseline — badges/buttons/tags), **floats** with real text
   wrap and `clear`,
   and **positioning** — `relative`, `absolute` (positioned-ancestor containing
@@ -355,10 +356,11 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   in default builds); a true font-metric baseline model (0.8 em ascent
   approximation today).
 - Isolated stacking contexts (`z-index` compares globally — negative z does
-  paint below the flow now); grid named lines/areas, line-based `grid-row`
-  placement/spans, and `justify-items`/`justify-self`. (Flex `flex-shrink`/
-  `order`/`align-self`/`align-content`/`wrap-reverse` and the grid row axis —
-  `grid-template-rows`, `align-items`/`align-self` — shipped.)
+  paint below the flow now); grid named lines/areas, dense packing, and
+  `justify-items`/`justify-self`. (Flex `flex-shrink`/`order`/`align-self`/
+  `align-content`/`wrap-reverse` and the full grid axis work —
+  `grid-template-rows`, 2D `grid-row` placement/spans, `align-items`/
+  `align-self` — shipped.)
 - Images / nested block layout inside table cells; tagged PDF.
 - `@font-face` web fonts; emoji; `dir="auto"` and RTL table cells; `%` heights/
   margins/offsets; `calc()`/custom properties.

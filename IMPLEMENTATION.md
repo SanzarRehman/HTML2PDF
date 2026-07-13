@@ -862,12 +862,13 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **Grid leftovers**: line-based *row* placement (`grid-row: A / B`) and row
-      spans, named areas/lines, dense packing, and horizontal item alignment
-      (`justify-items` / `justify-self`, which need shrink-to-fit items). (Row
-      *sizing* via `grid-template-rows` — fixed/auto/minmax/fr — and block-axis
-      `align-items` / `align-self` shipped 2026-07-12; `order` re-sequences grid
-      items too.)
+- [ ] **Grid leftovers**: named areas/lines (`grid-template-areas`), dense
+      packing, and horizontal item alignment (`justify-items` / `justify-self`,
+      which need shrink-to-fit items); plus splitting a row-spanning cell across
+      a page break. (2D placement via `grid-row` — line-based placement and row
+      spans on an occupancy grid — shipped 2026-07-13; row *sizing* via
+      `grid-template-rows` and block-axis `align-items` / `align-self` shipped
+      2026-07-12; `order` re-sequences grid items too.)
 - [ ] **Remaining background & inline-block pieces**: `background-image: url()`
       on table cells; multi-line / wrapping inline-block content, nested block
       children, and `vertical-align` on inline-blocks.
@@ -877,6 +878,23 @@ Details for each item are in the feature list below and in
 
 #### Recently shipped (2026-07)
 
+- [x] **2D grid: line-based `grid-row` placement + row spans** (2026-07-13): a
+      `grid-row: A / B` line pair or a `grid-row: span N` switches the container
+      to an **occupancy-grid** placement algorithm. Items with a definite row
+      and/or column pin there; the rest auto-place at the first free slot from a
+      sparse cursor, flowing around cells already filled by spans or pins. Per
+      CSS §8.5 the shared auto-placement cursor only advances for row-auto items,
+      so a row-pinned cell leaves an earlier gap open for a later auto item (e.g.
+      an item pinned to row 2 / col 2 lets the next auto item fill the empty
+      top-right cell). A row-spanning cell's box is the sum of its rows (plus the
+      crossed gaps); when its content is taller than that, the last spanned row
+      grows to fit — the same distribution table `rowspan` uses. Grids that place
+      only columns keep the historical linear cursor **verbatim** (gated on
+      `needs_2d`), so the `grid`/`flex-wrap` fixtures and the 22k-cell doc are
+      byte-identical. `features/grid-2d` fixture + a `grid-row` parse test.
+      Limits: no named lines/areas, no dense packing, and a row-spanning cell is
+      not split across a page break (it is laid out with its start row and may
+      overflow the page bottom).
 - [x] **Grid row axis: `grid-template-rows` + block-axis alignment** (2026-07-12):
       grid rows now follow an explicit track list — fixed lengths, `auto`
       (content), `minmax()` bounds, and `fr` shares of a *definite* container

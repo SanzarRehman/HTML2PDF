@@ -1466,6 +1466,53 @@ impl FlexItem<'_> {
     }
 }
 
+/// A 1-based `grid-column` line as a 0-based track index, clamped to the
+/// explicit grid (negative counts from the end: `-1` → the last line).
+fn grid_col_line(line: i32, track_count: usize) -> usize {
+    let lines = track_count as i32 + 1;
+    let zero_based = if line < 0 { lines + line } else { line - 1 };
+    zero_based.clamp(0, track_count as i32) as usize
+}
+
+/// A 1-based `grid-row` line as a 0-based row index. The row grid grows
+/// implicitly, so positive lines are unbounded; negative lines count from the
+/// end of the *explicit* rows (`grid-template-rows`), clamped at 0.
+fn grid_row_line(line: i32, explicit_rows: usize) -> usize {
+    match line.cmp(&0) {
+        std::cmp::Ordering::Greater => (line - 1) as usize,
+        std::cmp::Ordering::Less => (explicit_rows as i32 + 1 + line).max(0) as usize,
+        std::cmp::Ordering::Equal => 0,
+    }
+}
+
+/// Whether the `rows × cols` region anchored at (r0, c0) is entirely free in the
+/// occupancy grid (cells beyond the current extent count as free).
+fn grid_region_free(occ: &[Vec<bool>], r0: usize, c0: usize, rows: usize, cols: usize) -> bool {
+    (r0..r0 + rows).all(|r| {
+        (c0..c0 + cols).all(|c| !occ.get(r).and_then(|row| row.get(c)).copied().unwrap_or(false))
+    })
+}
+
+/// Mark the `rows × cols` region anchored at (r0, c0) as occupied, growing the
+/// occupancy grid downward as needed.
+fn grid_mark_region(
+    occ: &mut Vec<Vec<bool>>,
+    r0: usize,
+    c0: usize,
+    rows: usize,
+    cols: usize,
+    track_count: usize,
+) {
+    while occ.len() < r0 + rows {
+        occ.push(vec![false; track_count]);
+    }
+    for row in occ.iter_mut().skip(r0).take(rows) {
+        for cell in row.iter_mut().skip(c0).take(cols) {
+            *cell = true;
+        }
+    }
+}
+
 /// First-pass CSS grid: place the container's children into the column tracks
 /// of `grid-template-columns`, row-major (auto-placement), honoring
 /// `grid-column: span N`, `gap`, `fr` fractions, fixed lengths, and `auto`
@@ -1475,9 +1522,14 @@ impl FlexItem<'_> {
 /// new page as a unit. `align-items` / `align-self` place each item on the block
 /// (vertical) axis within its row.
 ///
-/// Not yet handled: line-based *row* placement (`grid-row: 1 / 3`) and row spans,
-/// named lines/areas, dense packing, and `justify-items` / `justify-self`
-/// (items fill their column width, so they are column-left).
+/// `grid-row` placement and row spans switch the container to a 2D occupancy
+/// algorithm (auto items flow around pinned/spanned cells); a row-spanning
+/// item's cell is the sum of its rows, and a span taller than those rows grows
+/// the last one (as table `rowspan` does).
+///
+/// Not yet handled: named lines/areas, dense packing, `justify-items` /
+/// `justify-self` (items fill their column width, so they are column-left), and
+/// splitting a row-spanning item across a page break.
 fn layout_grid_box(
     block: &crate::box_tree::BlockBox,
     grid: &crate::box_tree::GridContainer,
@@ -1495,16 +1547,39 @@ fn layout_grid_box(
 
     use crate::html::{MaxTrack, MinTrack};
 
-    // Grid items with their column span and any line-based `grid-column`
-    // placement. Anonymous inline content spans 1, auto-placed.
-    let mut items: Vec<(FlexItem, usize, Option<i32>, Option<i32>)> = block
+    // Grid items with their column/row spans and any line-based placement.
+    // Anonymous inline content spans one column, auto-placed.
+    struct GridItem<'a> {
+        item: FlexItem<'a>,
+        col_span: usize,
+        col_start: Option<i32>,
+        col_end: Option<i32>,
+        row_span: usize,
+        row_start: Option<i32>,
+        row_end: Option<i32>,
+    }
+    let mut items: Vec<GridItem> = block
         .children
         .iter()
         .filter_map(|child| match child {
-            BoxChild::Block(b) => {
-                Some((FlexItem::Block(b), b.grid_span.max(1), b.grid_col_start, b.grid_col_end))
-            }
-            BoxChild::Line(runs) => Some((FlexItem::Line(runs), 1, None, None)),
+            BoxChild::Block(b) => Some(GridItem {
+                item: FlexItem::Block(b),
+                col_span: b.grid_span.max(1),
+                col_start: b.grid_col_start,
+                col_end: b.grid_col_end,
+                row_span: b.grid_row_span.max(1),
+                row_start: b.grid_row_start,
+                row_end: b.grid_row_end,
+            }),
+            BoxChild::Line(runs) => Some(GridItem {
+                item: FlexItem::Line(runs),
+                col_span: 1,
+                col_start: None,
+                col_end: None,
+                row_span: 1,
+                row_start: None,
+                row_end: None,
+            }),
             _ => None,
         })
         .collect();
@@ -1513,8 +1588,8 @@ fn layout_grid_box(
     }
     // `order` re-sequences grid items before auto-placement (stable, so the
     // default 0 keeps document order untouched).
-    if items.iter().any(|(item, ..)| item.order() != 0) {
-        items.sort_by_key(|(item, ..)| item.order());
+    if items.iter().any(|gi| gi.item.order() != 0) {
+        items.sort_by_key(|gi| gi.item.order());
     }
 
     let tracks: Vec<GridTrack> = if grid.columns.is_empty() {
@@ -1524,56 +1599,141 @@ fn layout_grid_box(
     };
     let track_count = tracks.len();
 
-    // A 1-based grid line (negative = from the end) as a 0-based line index,
-    // clamped to the explicit grid (`-1` → line `track_count`, the last).
-    let resolve_line = |line: i32| -> usize {
-        let lines = track_count as i32 + 1;
-        let zero_based = if line < 0 { lines + line } else { line - 1 };
-        zero_based.clamp(0, track_count as i32) as usize
-    };
-
-    // Placement, row-major: auto-placed items take the next `span` tracks,
-    // wrapping to a fresh row when they don't fit; an explicit `grid-column`
-    // start pins the column (moving to the next row if the cursor is already
-    // past it), and an end line overrides the span (`1 / -1` = full row).
     struct Placed {
         item: usize,
         row: usize,
         col: usize,
         span: usize,
+        row_span: usize,
     }
-    let mut placements = Vec::with_capacity(items.len());
-    let (mut row, mut col) = (0usize, 0usize);
-    for (index, (_, span, col_start, col_end)) in items.iter().enumerate() {
-        match col_start.map(|line| resolve_line(line).min(track_count - 1)) {
-            Some(start) => {
-                let span = match col_end {
-                    Some(end) => resolve_line(*end).saturating_sub(start).max(1),
-                    None => *span,
+
+    // Any `grid-row` placement (a start/end line or a span) switches to the 2D
+    // occupancy algorithm; grids that only place columns keep the historical
+    // linear cursor verbatim, so their output stays byte-identical.
+    let needs_2d = items
+        .iter()
+        .any(|gi| gi.row_start.is_some() || gi.row_end.is_some() || gi.row_span > 1);
+
+    let placements: Vec<Placed> = if !needs_2d {
+        // Linear column placement: auto items take the next `span` tracks,
+        // wrapping to a fresh row when they don't fit; an explicit `grid-column`
+        // start pins the column (moving to the next row if the cursor passed
+        // it), and an end line overrides the span (`1 / -1` = full row).
+        let mut placements = Vec::with_capacity(items.len());
+        let (mut row, mut col) = (0usize, 0usize);
+        for (index, gi) in items.iter().enumerate() {
+            match gi.col_start.map(|line| grid_col_line(line, track_count).min(track_count - 1)) {
+                Some(start) => {
+                    let span = match gi.col_end {
+                        Some(end) => grid_col_line(end, track_count).saturating_sub(start).max(1),
+                        None => gi.col_span,
+                    }
+                    .min(track_count - start);
+                    if col > start {
+                        row += 1;
+                    }
+                    placements.push(Placed { item: index, row, col: start, span, row_span: 1 });
+                    col = start + span;
                 }
-                .min(track_count - start);
-                if col > start {
-                    row += 1;
+                None => {
+                    let span = gi.col_span.min(track_count);
+                    if col + span > track_count {
+                        row += 1;
+                        col = 0;
+                    }
+                    placements.push(Placed { item: index, row, col, span, row_span: 1 });
+                    col += span;
                 }
-                placements.push(Placed { item: index, row, col: start, span });
-                col = start + span;
             }
-            None => {
-                let span = (*span).min(track_count);
-                if col + span > track_count {
-                    row += 1;
-                    col = 0;
-                }
-                placements.push(Placed { item: index, row, col, span });
-                col += span;
+            if col >= track_count {
+                row += 1;
+                col = 0;
             }
         }
-        if col >= track_count {
-            row += 1;
-            col = 0;
+        placements
+    } else {
+        // 2D placement with an occupancy grid: items with a definite row and/or
+        // column pin there; the rest auto-place at the first free slot from a
+        // sparse cursor, flowing around already-occupied (spanned) cells.
+        let mut occ: Vec<Vec<bool>> = Vec::new();
+        let mut placements = Vec::with_capacity(items.len());
+        let (mut cur_row, mut cur_col) = (0usize, 0usize);
+        for (index, gi) in items.iter().enumerate() {
+            let col_fixed = gi
+                .col_start
+                .map(|line| grid_col_line(line, track_count).min(track_count - 1));
+            let col_span = match (col_fixed, gi.col_end) {
+                (Some(start), Some(end)) => grid_col_line(end, track_count)
+                    .saturating_sub(start)
+                    .max(1)
+                    .min(track_count - start),
+                (Some(start), None) => gi.col_span.min(track_count - start),
+                (None, _) => gi.col_span.min(track_count).max(1),
+            };
+            let row_fixed = gi.row_start.map(|line| grid_row_line(line, grid.rows.len()));
+            let row_span = match (row_fixed, gi.row_end) {
+                (Some(start), Some(end)) => {
+                    grid_row_line(end, grid.rows.len()).saturating_sub(start).max(1)
+                }
+                _ => gi.row_span.max(1),
+            };
+
+            let (row, col) = match (row_fixed, col_fixed) {
+                (Some(r), Some(c)) => (r, c),
+                (Some(r), None) => {
+                    let mut c = 0usize;
+                    while c + col_span <= track_count
+                        && !grid_region_free(&occ, r, c, row_span, col_span)
+                    {
+                        c += 1;
+                    }
+                    (r, c.min(track_count.saturating_sub(col_span)))
+                }
+                (None, Some(c)) => {
+                    let mut r = cur_row;
+                    while !grid_region_free(&occ, r, c, row_span, col_span) {
+                        r += 1;
+                    }
+                    (r, c)
+                }
+                (None, None) => {
+                    let (mut r, mut c) = (cur_row, cur_col);
+                    loop {
+                        if c + col_span > track_count {
+                            r += 1;
+                            c = 0;
+                            continue;
+                        }
+                        if grid_region_free(&occ, r, c, row_span, col_span) {
+                            break;
+                        }
+                        c += 1;
+                    }
+                    (r, c)
+                }
+            };
+            grid_mark_region(&mut occ, row, col, row_span, col_span, track_count);
+            // Only row-auto items advance the shared auto-placement cursor; a
+            // row-pinned item is placed without disturbing the flow (so a later
+            // auto item still fills an earlier gap, per CSS §8.5 sparse packing).
+            if row_fixed.is_none() {
+                cur_row = row;
+                cur_col = col + col_span;
+                if cur_col >= track_count {
+                    cur_row += 1;
+                    cur_col = 0;
+                }
+            }
+            placements.push(Placed { item: index, row, col, span: col_span, row_span });
         }
-    }
-    let row_count = placements.iter().map(|p| p.row).max().unwrap_or(0) + 1;
+        placements
+    };
+    let row_count = placements
+        .iter()
+        .map(|p| p.row + p.row_span)
+        .max()
+        .unwrap_or(1)
+        .max(1);
 
     // Track widths: fixed lengths as declared; `auto` sized to the widest
     // single-span item placed in that track; `fr` shares of what remains.
@@ -1589,7 +1749,7 @@ fn layout_grid_box(
                 | GridTrack::MinMax(_, MaxTrack::Auto)
         );
         if placed.span == 1 && content_sized {
-            let basis = items[placed.item].0.basis(options).min(avail);
+            let basis = items[placed.item].item.basis(options).min(avail);
             auto_size[placed.col] = auto_size[placed.col].max(basis);
         }
     }
@@ -1691,24 +1851,49 @@ fn layout_grid_box(
             + grid.column_gap * (span as f32 - 1.0).max(0.0)
     };
 
-    // Per-row content height: the tallest item in that row at its cell width.
-    let row_content: Vec<f32> = (0..row_count)
+    // Height a cell spanning `row_span` rows from `row` occupies (crossed gaps
+    // included). Needs the row heights, so it is defined after they resolve.
+    // Content height per row from single-row items only; a row-spanning item is
+    // distributed afterwards so it never inflates just its first row.
+    let single_content: Vec<f32> = (0..row_count)
         .map(|row| {
             placements
                 .iter()
-                .filter(|p| p.row == row)
-                .map(|p| items[p.item].0.measure_height(cell_width(p.col, p.span), options))
+                .filter(|p| p.row == row && p.row_span == 1)
+                .map(|p| items[p.item].item.measure_height(cell_width(p.col, p.span), options))
                 .fold(0.0f32, f32::max)
         })
         .collect();
     // Resolve the final row heights from `grid-template-rows` (fixed / auto /
     // minmax / fr against a definite container height). With no explicit rows
-    // this is exactly `row_content`, so the historical path is byte-identical.
-    let row_heights = resolve_grid_rows(grid, &row_content, block, row_count);
+    // this is exactly the content heights, so the historical path is byte-identical.
+    let mut row_heights = resolve_grid_rows(grid, &single_content, block, row_count);
 
-    // Block-axis (vertical) alignment of an item within its row: the fraction of
-    // the leftover row height placed above it. `stretch`/`flex-start` keep the
-    // item at the row top, so an unset `align-items` is byte-identical.
+    // Grow rows so a multi-row item fits its span: if it is taller than the rows
+    // it covers (plus the gaps between them), grow its last spanned row — the
+    // same distribution table `rowspan` uses. No-op when nothing spans rows.
+    for placed in &placements {
+        if placed.row_span > 1 {
+            let cell = cell_width(placed.col, placed.span);
+            let content = items[placed.item].item.measure_height(cell, options);
+            let end = (placed.row + placed.row_span).min(row_count);
+            let spanned: f32 = row_heights[placed.row..end].iter().sum::<f32>()
+                + grid.row_gap * (placed.row_span as f32 - 1.0);
+            if content > spanned {
+                row_heights[end - 1] += content - spanned;
+            }
+        }
+    }
+
+    // Height of the cell block a placement occupies down the row axis.
+    let cell_height = |row: usize, row_span: usize| -> f32 {
+        let end = (row + row_span).min(row_count);
+        row_heights[row..end].iter().sum::<f32>() + grid.row_gap * (row_span as f32 - 1.0).max(0.0)
+    };
+
+    // Block-axis (vertical) alignment of an item within its cell: the fraction of
+    // the leftover height placed above it. `stretch`/`flex-start` keep the item
+    // at the cell top, so an unset `align-items` is byte-identical.
     let align_factor = |align: AlignItems| match align {
         AlignItems::Stretch | AlignItems::FlexStart => 0.0,
         AlignItems::Center => 0.5,
@@ -1716,6 +1901,8 @@ fn layout_grid_box(
     };
 
     // Lay rows out top-down; a row moves to a fresh page as a unit (not split).
+    // A row-spanning item is laid out with its start row and may overflow later
+    // rows (it is not split across a page break).
     for (row, &row_height) in row_heights.iter().enumerate() {
         let row_placements: Vec<&Placed> =
             placements.iter().filter(|p| p.row == row).collect();
@@ -1730,11 +1917,12 @@ fn layout_grid_box(
         let top = *y;
         for placed in row_placements {
             let cell = cell_width(placed.col, placed.span);
-            let align = items[placed.item].0.align_self().unwrap_or(grid.align);
-            let item_height = items[placed.item].0.measure_height(cell, options);
-            let mut item_y = top - (row_height - item_height).max(0.0) * align_factor(align);
+            let box_height = cell_height(placed.row, placed.row_span);
+            let align = items[placed.item].item.align_self().unwrap_or(grid.align);
+            let item_height = items[placed.item].item.measure_height(cell, options);
+            let mut item_y = top - (box_height - item_height).max(0.0) * align_factor(align);
             let mut carried = 0.0;
-            items[placed.item].0.layout(
+            items[placed.item].item.layout(
                 lefts[placed.col],
                 cell,
                 pages,
@@ -5917,6 +6105,9 @@ mod tests {
                     align_self: None,
                     grid: None,
                     grid_span: 1,
+                    grid_row_span: 1,
+                    grid_row_start: None,
+                    grid_row_end: None,
                     grid_col_start: None,
                     grid_col_end: None,
                     float_dir: None,
@@ -6012,6 +6203,9 @@ mod tests {
                     align_self: None,
                     grid: None,
                     grid_span: 1,
+                    grid_row_span: 1,
+                    grid_row_start: None,
+                    grid_row_end: None,
                     grid_col_start: None,
                     grid_col_end: None,
                     float_dir: None,
@@ -6105,6 +6299,9 @@ mod tests {
                 align_self: None,
                 grid: None,
                 grid_span: 1,
+                grid_row_span: 1,
+                grid_row_start: None,
+                grid_row_end: None,
                 grid_col_start: None,
                 grid_col_end: None,
                 float_dir: None,
@@ -6226,6 +6423,9 @@ mod tests {
                         align_self: None,
                         grid: None,
                         grid_span: 1,
+                        grid_row_span: 1,
+                        grid_row_start: None,
+                        grid_row_end: None,
                         grid_col_start: None,
                         grid_col_end: None,
                         float_dir: None,
@@ -6318,6 +6518,9 @@ mod tests {
                     align_self: None,
                     grid: None,
                     grid_span: 1,
+                    grid_row_span: 1,
+                    grid_row_start: None,
+                    grid_row_end: None,
                     grid_col_start: None,
                     grid_col_end: None,
                     float_dir: None,
