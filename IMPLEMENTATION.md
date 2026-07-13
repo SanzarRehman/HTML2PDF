@@ -862,11 +862,12 @@ Details for each item are in the feature list below and in
 
 #### Front of the queue (do these next)
 
-- [ ] **Grid leftovers**: named areas/lines (`grid-template-areas`), dense
-      packing, and horizontal item alignment (`justify-items` / `justify-self`,
-      which need shrink-to-fit items); plus splitting a row-spanning cell across
-      a page break. (2D placement via `grid-row` — line-based placement and row
-      spans on an occupancy grid — shipped 2026-07-13; row *sizing* via
+- [ ] **Grid leftovers**: named grid *lines* (only *areas* are supported today),
+      dense packing (`grid-auto-flow: dense`), and horizontal item alignment
+      (`justify-items` / `justify-self`, which need shrink-to-fit items); plus
+      splitting a row-spanning cell across a page break. (Named areas
+      `grid-template-areas` + `grid-area` shipped 2026-07-13; 2D `grid-row`
+      placement and row spans shipped 2026-07-13; row *sizing* via
       `grid-template-rows` and block-axis `align-items` / `align-self` shipped
       2026-07-12; `order` re-sequences grid items too.)
 - [ ] **Remaining background & inline-block pieces**: `background-image: url()`
@@ -878,6 +879,24 @@ Details for each item are in the feature list below and in
 
 #### Recently shipped (2026-07)
 
+- [x] **`grid-template-areas` named placement** (2026-07-13): the declarative
+      "holy-grail" grid syntax. `grid-template-areas` parses its quoted row
+      strings (whitespace-separated cell names; `.` = empty cell) into one
+      bounding rectangle per name (first-appearance order, deterministic — no
+      `HashMap`), stored on the container as a boxed slice
+      (`Option<Box<[GridAreaRect]>>`, so unset styles pay one fat pointer). An
+      item's `grid-area: <name>` resolves against those rectangles at layout time
+      to a definite row/column span, pinning it via the existing 2D occupancy
+      path — so items land in their named region regardless of DOM order. The
+      numeric `grid-area: r / c / r2 / c2` form expands into the grid-line fields
+      at parse time, and named areas imply extra `auto` columns when
+      `grid-template-columns` is shorter. `features/grid-areas` fixture (a
+      header/sidebar/main/footer layout with a `fr` row taking the leftover
+      container height, plus a template with a `.` gap cell) + a parse test. No
+      grids without areas are touched, so the byte-identity set holds. Limits: no
+      named grid *lines* (auto-generated `<name>-start`/`-end`), and the same
+      non-stretch caveat as the rest of grid (a spanning cell's background is not
+      inflated to fill its rows).
 - [x] **2D grid: line-based `grid-row` placement + row spans** (2026-07-13): a
       `grid-row: A / B` line pair or a `grid-row: span N` switches the container
       to an **occupancy-grid** placement algorithm. Items with a definite row

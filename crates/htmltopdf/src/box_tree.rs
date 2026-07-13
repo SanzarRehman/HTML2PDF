@@ -13,8 +13,8 @@
 
 use crate::color::Color;
 use crate::html::{
-    AlignContent, AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridTrack, JustifyContent,
-    LinearGradient, PositionKind, TableCell, TextAlign,
+    AlignContent, AlignItems, BlockKind, Clear, FlexDirection, FloatDir, GridAreaRect, GridTrack,
+    JustifyContent, LinearGradient, PositionKind, TableCell, TextAlign,
 };
 
 /// The root of a non-table document: a sequence of top-level boxes. The root
@@ -134,6 +134,9 @@ pub struct BlockBox {
     /// resolved against the track count at layout time.
     pub grid_col_start: Option<i32>,
     pub grid_col_end: Option<i32>,
+    /// `grid-area: <name>` — pins this grid item to a named region of the
+    /// container's `grid-template-areas` (`None` = not area-placed).
+    pub grid_area: Option<Box<str>>,
     /// `grid-row: span N` when this block is a grid item (1 = one row).
     pub grid_row_span: usize,
     /// Line-based `grid-row: start / end` (1-based; negative counts from the end
@@ -238,6 +241,9 @@ pub struct GridContainer {
     /// `grid-template-rows` track list; empty = every row is auto (content)
     /// sized, the historical behavior.
     pub rows: Vec<GridTrack>,
+    /// `grid-template-areas` named rectangles; empty = none. A grid item's
+    /// `grid-area: <name>` resolves against these to a definite row/column span.
+    pub areas: Vec<GridAreaRect>,
     pub column_gap: f32,
     pub row_gap: f32,
     /// `align-items`: block-axis (vertical) placement of each item within its

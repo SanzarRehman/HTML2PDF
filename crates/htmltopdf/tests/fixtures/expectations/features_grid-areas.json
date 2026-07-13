@@ -1,0 +1,17 @@
+{
+  "fixture": "grid-areas",
+  "layer": "features",
+  "description": "grid-template-areas named placement: a grid-area name pins an item to the rectangle its name spans in the template, independent of DOM order. Covers a holy-grail layout (spanning header/footer, a fr row taking the container's leftover height) and a template with an empty (.) cell plus two-row column-spanning areas.",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "re", "f", "S"],
+    "must_contain_text": ["Header", "Sidebar", "Maincontent", "Footer", "Acol", "Bcol", "Cmid"],
+    "min_size_bytes": 900,
+    "max_size_bytes": 3000000,
+    "min_pages": 1
+  },
+  "visual_assertions": [
+    "Header spans the full width on the top row; Sidebar (left, 80pt) and Maincontent (right, 1fr) share the middle row; Footer spans the full width on the bottom row — even though Maincontent precedes Sidebar in the DOM.",
+    "The middle 1fr row takes the container's leftover height (200pt minus the two 30pt rows and the two 8pt gaps).",
+    "In the board grid, Acol is placed in the left column (both rows), Bcol in the right column (both rows), and Cmid only in the lower-middle cell — the upper-middle cell is the empty '.'."
+  ]
+}

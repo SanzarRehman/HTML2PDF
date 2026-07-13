@@ -43,6 +43,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "grid"),
     ("features", "grid-rows"),
     ("features", "grid-2d"),
+    ("features", "grid-areas"),
     ("features", "floats"),
     ("features", "positioning"),
     ("features", "line-height"),

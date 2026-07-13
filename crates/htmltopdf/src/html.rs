@@ -371,6 +371,12 @@ pub struct CellStyle {
     pub grid_template: Option<Vec<GridTrack>>,
     /// `grid-template-rows` track list (`None` = all rows auto/content-sized).
     pub grid_template_rows: Option<Vec<GridTrack>>,
+    /// `grid-template-areas` resolved to named cell rectangles (boxed slice —
+    /// rare, so unset styles pay one fat pointer rather than a full `Vec`).
+    pub grid_template_areas: Option<Box<[GridAreaRect]>>,
+    /// `grid-area: <name>` on a grid item (boxed; the numeric 4-value form is
+    /// expanded into the `grid-row`/`grid-column` line fields at parse time).
+    pub grid_area: Option<Box<str>>,
     /// `row-gap` (or the first value of a two-value `gap`), points.
     pub row_gap: Option<f32>,
     /// `grid-column: span N` on a grid item.
@@ -470,6 +476,8 @@ impl Default for CellStyle {
             display_grid: false,
             grid_template: None,
             grid_template_rows: None,
+            grid_template_areas: None,
+            grid_area: None,
             row_gap: None,
             grid_span: None,
             grid_row_span: None,
@@ -718,6 +726,18 @@ pub enum MaxTrack {
     Pt(f32),
     Fr(f32),
     Auto,
+}
+
+/// A named `grid-template-areas` region as a rectangle of grid cells (0-based
+/// rows/columns, ends exclusive). An item with `grid-area: <name>` is pinned to
+/// this rectangle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridAreaRect {
+    pub name: String,
+    pub row_start: usize,
+    pub row_end: usize,
+    pub col_start: usize,
+    pub col_end: usize,
 }
 
 /// Flex container main axis. First-pass flexbox supports `row` (horizontal);
@@ -1691,6 +1711,11 @@ fn build_block(
     let grid = own.display_grid.then(|| crate::box_tree::GridContainer {
         columns: own.grid_template.clone().unwrap_or_default(),
         rows: own.grid_template_rows.clone().unwrap_or_default(),
+        areas: own
+            .grid_template_areas
+            .as_deref()
+            .map(<[_]>::to_vec)
+            .unwrap_or_default(),
         column_gap: own.gap.unwrap_or(0.0),
         row_gap: own.row_gap.unwrap_or(0.0),
         align: own.align_items.unwrap_or(AlignItems::Stretch),
@@ -1725,6 +1750,7 @@ fn build_block(
         align_self: own.align_self,
         grid,
         grid_span: own.grid_span.unwrap_or(1),
+        grid_area: own.grid_area.clone(),
         grid_row_span: own.grid_row_span.unwrap_or(1),
         grid_row_start: own.grid_row_start,
         grid_row_end: own.grid_row_end,
@@ -2982,6 +3008,8 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         display_grid: own.display_grid,
         grid_template: own.grid_template.clone(),
         grid_template_rows: own.grid_template_rows.clone(),
+        grid_template_areas: own.grid_template_areas.clone(),
+        grid_area: own.grid_area.clone(),
         row_gap: own.row_gap,
         grid_span: own.grid_span,
         grid_row_span: own.grid_row_span,
@@ -5337,6 +5365,53 @@ fn apply_flex_shorthand(target: &mut DeclarationLayer, value: &str) {
     }
 }
 
+/// Parse `grid-template-areas` (a run of quoted row strings whose whitespace-
+/// separated tokens name each cell; `.` is an empty cell) into one rectangle per
+/// distinct name. The rectangle is the bounding box of the name's cells — a
+/// non-rectangular area is tolerated by taking its bounds. Rectangles keep
+/// first-appearance order so the result is deterministic.
+fn parse_grid_areas(value: &str) -> Vec<GridAreaRect> {
+    // Collect the quoted row strings (single or double quotes).
+    let mut rows: Vec<Vec<&str>> = Vec::new();
+    let mut in_quote = false;
+    let mut start = 0usize;
+    for (i, ch) in value.char_indices() {
+        if ch == '"' || ch == '\'' {
+            if in_quote {
+                rows.push(value[start..i].split_whitespace().collect());
+                in_quote = false;
+            } else {
+                in_quote = true;
+                start = i + ch.len_utf8();
+            }
+        }
+    }
+
+    let mut rects: Vec<GridAreaRect> = Vec::new();
+    for (r, row) in rows.iter().enumerate() {
+        for (c, name) in row.iter().enumerate() {
+            if *name == "." {
+                continue;
+            }
+            if let Some(rect) = rects.iter_mut().find(|a| a.name == *name) {
+                rect.row_start = rect.row_start.min(r);
+                rect.row_end = rect.row_end.max(r + 1);
+                rect.col_start = rect.col_start.min(c);
+                rect.col_end = rect.col_end.max(c + 1);
+            } else {
+                rects.push(GridAreaRect {
+                    name: (*name).to_string(),
+                    row_start: r,
+                    row_end: r + 1,
+                    col_start: c,
+                    col_end: c + 1,
+                });
+            }
+        }
+    }
+    rects
+}
+
 /// Parse a `grid-template-columns` track list: lengths, `fr` fractions, `auto`,
 /// and non-nested `repeat(N, tracks…)`. Unknown tokens (`minmax()`, named
 /// lines, percentages) are skipped.
@@ -5545,6 +5620,33 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             let tracks = parse_grid_tracks(value);
             if !tracks.is_empty() {
                 target.cell.grid_template_rows = Some(tracks);
+            }
+        }
+        "grid-template-areas" => {
+            let rects = parse_grid_areas(value);
+            if !rects.is_empty() {
+                target.cell.grid_template_areas = Some(rects.into_boxed_slice());
+            }
+        }
+        "grid-area" => {
+            // `<name>` pins the item to a named `grid-template-areas` region;
+            // the numeric `row-start / col-start / row-end / col-end` form (1–4
+            // slash-separated lines) expands into the grid line fields.
+            let v = value.trim();
+            if let Some((first, rest)) = v.split_once('/') {
+                let lines: Vec<&str> = std::iter::once(first)
+                    .chain(rest.split('/'))
+                    .map(str::trim)
+                    .collect();
+                let line = |i: usize| lines.get(i).and_then(|s| s.parse::<i32>().ok());
+                target.cell.grid_row_start = line(0).or(target.cell.grid_row_start);
+                target.cell.grid_col_start = line(1).or(target.cell.grid_col_start);
+                target.cell.grid_row_end = line(2).or(target.cell.grid_row_end);
+                target.cell.grid_col_end = line(3).or(target.cell.grid_col_end);
+            } else if let Ok(line) = v.parse::<i32>() {
+                target.cell.grid_row_start = Some(line);
+            } else if !v.is_empty() && !v.eq_ignore_ascii_case("auto") {
+                target.cell.grid_area = Some(Box::from(v));
             }
         }
         "position" => {
@@ -6546,6 +6648,8 @@ impl CellStyle {
         self.display_grid |= other.display_grid;
         self.grid_template = other.grid_template.or(self.grid_template.take());
         self.grid_template_rows = other.grid_template_rows.or(self.grid_template_rows.take());
+        self.grid_template_areas = other.grid_template_areas.or(self.grid_template_areas.take());
+        self.grid_area = other.grid_area.or(self.grid_area.take());
         self.row_gap = other.row_gap.or(self.row_gap);
         self.grid_span = other.grid_span.or(self.grid_span);
         self.grid_row_span = other.grid_row_span.or(self.grid_row_span);
@@ -6938,6 +7042,41 @@ mod tests {
         let p = blocks.iter().find(|b| block_text(b) == "p").unwrap();
         assert_eq!(p.grid_row_start, Some(2));
         assert_eq!(p.grid_col_start, Some(2));
+    }
+
+    #[test]
+    fn parses_grid_template_areas_and_grid_area() {
+        let document = parse(
+            "<style>\
+             .g { display: grid; grid-template-columns: 1fr 1fr;\
+                  grid-template-areas: \"head head\" \"side main\"; }\
+             .h { grid-area: head; }\
+             .s { grid-area: side; }\
+             </style>\
+             <div class=\"g\">\
+               <div class=\"h\">h</div>\
+               <div class=\"s\">s</div>\
+             </div>",
+        );
+        let flow = document.flow.expect("flow tree");
+        let blocks = flow_blocks(&flow);
+        let grid_block = blocks.iter().find(|b| b.grid.is_some()).unwrap();
+        let areas = &grid_block.grid.as_ref().unwrap().areas;
+
+        // `head` spans row 0 across both columns; `main` is the row-1 col-1 cell.
+        let head = areas.iter().find(|a| a.name == "head").unwrap();
+        assert_eq!(
+            (head.row_start, head.row_end, head.col_start, head.col_end),
+            (0, 1, 0, 2)
+        );
+        let main = areas.iter().find(|a| a.name == "main").unwrap();
+        assert_eq!(
+            (main.row_start, main.row_end, main.col_start, main.col_end),
+            (1, 2, 1, 2)
+        );
+
+        let h = blocks.iter().find(|b| block_text(b) == "h").unwrap();
+        assert_eq!(h.grid_area.as_deref(), Some("head"));
     }
 
     #[test]

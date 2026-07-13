@@ -1562,15 +1562,30 @@ fn layout_grid_box(
         .children
         .iter()
         .filter_map(|child| match child {
-            BoxChild::Block(b) => Some(GridItem {
-                item: FlexItem::Block(b),
-                col_span: b.grid_span.max(1),
-                col_start: b.grid_col_start,
-                col_end: b.grid_col_end,
-                row_span: b.grid_row_span.max(1),
-                row_start: b.grid_row_start,
-                row_end: b.grid_row_end,
-            }),
+            BoxChild::Block(b) => {
+                // `grid-area: <name>` resolves against the container's areas to a
+                // definite rectangle, pinning both axes (1-based lines, end
+                // exclusive → the line just past the last spanned track).
+                let (mut cs, mut ce, mut rs, mut re) =
+                    (b.grid_col_start, b.grid_col_end, b.grid_row_start, b.grid_row_end);
+                if let Some(name) = b.grid_area.as_deref() {
+                    if let Some(rect) = grid.areas.iter().find(|a| a.name == name) {
+                        cs = Some(rect.col_start as i32 + 1);
+                        ce = Some(rect.col_end as i32 + 1);
+                        rs = Some(rect.row_start as i32 + 1);
+                        re = Some(rect.row_end as i32 + 1);
+                    }
+                }
+                Some(GridItem {
+                    item: FlexItem::Block(b),
+                    col_span: b.grid_span.max(1),
+                    col_start: cs,
+                    col_end: ce,
+                    row_span: b.grid_row_span.max(1),
+                    row_start: rs,
+                    row_end: re,
+                })
+            }
             BoxChild::Line(runs) => Some(GridItem {
                 item: FlexItem::Line(runs),
                 col_span: 1,
@@ -1592,11 +1607,17 @@ fn layout_grid_box(
         items.sort_by_key(|gi| gi.item.order());
     }
 
-    let tracks: Vec<GridTrack> = if grid.columns.is_empty() {
+    let mut tracks: Vec<GridTrack> = if grid.columns.is_empty() {
         vec![GridTrack::Auto]
     } else {
         grid.columns.clone()
     };
+    // `grid-template-areas` can imply more columns than `grid-template-columns`
+    // lists; pad the shortfall with `auto` tracks so area placement has room.
+    let area_cols = grid.areas.iter().map(|a| a.col_end).max().unwrap_or(0);
+    while tracks.len() < area_cols {
+        tracks.push(GridTrack::Auto);
+    }
     let track_count = tracks.len();
 
     struct Placed {
@@ -6105,6 +6126,7 @@ mod tests {
                     align_self: None,
                     grid: None,
                     grid_span: 1,
+                    grid_area: None,
                     grid_row_span: 1,
                     grid_row_start: None,
                     grid_row_end: None,
@@ -6203,6 +6225,7 @@ mod tests {
                     align_self: None,
                     grid: None,
                     grid_span: 1,
+                    grid_area: None,
                     grid_row_span: 1,
                     grid_row_start: None,
                     grid_row_end: None,
@@ -6299,6 +6322,7 @@ mod tests {
                 align_self: None,
                 grid: None,
                 grid_span: 1,
+                grid_area: None,
                 grid_row_span: 1,
                 grid_row_start: None,
                 grid_row_end: None,
@@ -6423,6 +6447,7 @@ mod tests {
                         align_self: None,
                         grid: None,
                         grid_span: 1,
+                        grid_area: None,
                         grid_row_span: 1,
                         grid_row_start: None,
                         grid_row_end: None,
@@ -6518,6 +6543,7 @@ mod tests {
                     align_self: None,
                     grid: None,
                     grid_span: 1,
+                    grid_area: None,
                     grid_row_span: 1,
                     grid_row_start: None,
                     grid_row_end: None,

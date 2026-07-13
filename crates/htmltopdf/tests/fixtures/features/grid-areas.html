@@ -1,0 +1,43 @@
+<html><head><style>
+  body { font-size: 12pt; }
+  h3 { font-size: 13pt; margin: 10pt 0 4pt; }
+  .page {
+    display: grid;
+    grid-template-columns: 80pt 1fr;
+    grid-template-rows: 30pt 1fr 30pt;
+    height: 200pt; width: 320pt;
+    grid-template-areas:
+      "header header"
+      "sidebar main"
+      "footer footer";
+    column-gap: 8pt; row-gap: 8pt; border: 1pt solid #999;
+  }
+  .c { border: 1pt solid #66c; padding: 2pt 4pt; }
+  .head { grid-area: header; background: #f7e8e8; }
+  .side { grid-area: sidebar; background: #e8f7e8; }
+  .main { grid-area: main; background: #e8eef7; }
+  .foot { grid-area: footer; background: #f7f0e8; }
+
+  /* An area with a gap cell (.) and numeric grid-area placement. */
+  .board { display: grid; grid-template-columns: 60pt 60pt 60pt; row-gap: 6pt; column-gap: 6pt;
+           grid-template-areas: "a . b" "a c b"; border: 1pt solid #999; margin-top: 10pt; }
+  .board .c { background: #eef; }
+  .ba { grid-area: a; background: #fde8e8; }
+  .bb { grid-area: b; background: #e8fde8; }
+  .bc { grid-area: c; background: #e8e8fd; }
+</style></head><body>
+<h3>Holy-grail (named areas)</h3>
+<div class="page">
+  <div class="c head">Header</div>
+  <div class="c main">Maincontent</div>
+  <div class="c side">Sidebar</div>
+  <div class="c foot">Footer</div>
+</div>
+
+<h3>Gap cell + column-spanning areas</h3>
+<div class="board">
+  <div class="c ba">Acol</div>
+  <div class="c bb">Bcol</div>
+  <div class="c bc">Cmid</div>
+</div>
+</body></html>
