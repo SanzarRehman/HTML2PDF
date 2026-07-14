@@ -82,6 +82,44 @@ bash scripts/benchmark-concurrency.sh examples/concurrency-simple.html 20
 bash scripts/benchmark-concurrency.sh reg-2-9-1.html 20
 ```
 
+## htmltopdf vs UniDoc (UniHTML)
+
+[UniDoc](https://unidoc.io)'s HTML→PDF path, **UniHTML**, is a commercial Go SDK
+whose converter is a **headless Chromium** packaged as a 1.72 GB Docker server.
+The three fixtures below were rendered through both engines at matched Letter /
+48 pt geometry — left is `htmltopdf`, right is UniHTML (i.e. Chromium) — then
+rasterized and pixel-diffed.
+
+![htmltopdf vs UniDoc UniHTML](docs/vs-unidoc.png)
+
+Structure lines up closely. On the realistic **invoice** the two are near
+identical (headings, the table, blue header, column widths, `Total due`, footer);
+the residual diff is mostly the default font — with no `font-family` set,
+htmltopdf falls back to sans-serif while Chromium's UA default is serif. Text
+stays real and selectable in both (extracted word counts match). The two visible
+gaps are honest, known limitations of a from-scratch engine: htmltopdf does not
+yet **stretch** flex/grid item backgrounds to fill their cell
+(`align-items: stretch` ≈ `flex-start`, seen in the grid sidebar/main row), and
+it treats `flex-basis` as the item's outer size when wrapping (so it packs two
+tags per line where Chromium, adding padding under `box-sizing: content-box`,
+fits one).
+
+| | **htmltopdf** | UniDoc UniHTML | Advantage |
+| --- | --- | --- | --- |
+| **Raster fidelity vs Chromium** | invoice 4.0% · grid 8.1% · flex 10.8% differing px | *is* Chromium (reference) | full-browser fidelity to UniDoc |
+| **PDF size** | **1.6–2.1 KB** | 20–32 KB | **≈ 10–16× smaller** |
+| **Convert time / doc** | **≈ 18 ms** end-to-end CLI (layout itself µs) | ≈ 0.8 s to an already-warm server (first request 1.3 s) | **≈ 40× faster** |
+| **Runtime** | one Rust process, **no subprocess** | headless Chromium in a 1.72 GB Docker container + gRPC/HTTP server | — |
+| **License** | **MIT, free** | commercial — metered per-document credits, or perpetual per-developer | — |
+
+The speed figure understates htmltopdf: its 18 ms includes process + font startup
+on every call, while UniHTML's 0.8 s **excludes** the container and Chromium boot
+and the license round-trip. The trade-off is the usual one — UniHTML is a real
+browser, so it has total CSS fidelity (it stretches items, handles every
+box-sizing nuance, and supports the whole web platform), whereas htmltopdf is a
+compact CSS subset that already matches it on invoices, statements, and reports.
+Development measurements on one machine (Apple Silicon, macOS), not a guarantee.
+
 ## Why htmltopdf?
 
 - **Fast by design**: independent render jobs scale across CPU cores.
