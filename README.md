@@ -109,16 +109,26 @@ fits one).
 | **Raster fidelity vs Chromium** | invoice 4.0% · grid 8.1% · flex 10.8% differing px | *is* Chromium (reference) | full-browser fidelity to UniDoc |
 | **PDF size** | **1.6–2.1 KB** | 20–32 KB | **≈ 10–16× smaller** |
 | **Convert time / doc** | **≈ 18 ms** end-to-end CLI (layout itself µs) | ≈ 0.8 s to an already-warm server (first request 1.3 s) | **≈ 40× faster** |
+| **Memory (peak RSS)** | **≈ 3.5 MiB** on these fixtures · **≈ 112 MiB** on the 22k-cell doc | 17.6 MiB idle server, but each conversion runs **headless Chromium** — browser-class RSS (≈ 846 MB on the 22k-cell doc; up to ~9 GiB across 20 concurrent, per the Chromium figures above) — over a **1.72 GB** image | **≈ 30× less** on the 22k-cell doc |
 | **Runtime** | one Rust process, **no subprocess** | headless Chromium in a 1.72 GB Docker container + gRPC/HTTP server | — |
 | **License** | **MIT, free** | commercial — metered per-document credits, or perpetual per-developer | — |
 
-The speed figure understates htmltopdf: its 18 ms includes process + font startup
-on every call, while UniHTML's 0.8 s **excludes** the container and Chromium boot
-and the license round-trip. The trade-off is the usual one — UniHTML is a real
-browser, so it has total CSS fidelity (it stretches items, handles every
-box-sizing nuance, and supports the whole web platform), whereas htmltopdf is a
-compact CSS subset that already matches it on invoices, statements, and reports.
-Development measurements on one machine (Apple Silicon, macOS), not a guarantee.
+The RAM row is the architectural crux. htmltopdf's peak RSS was measured with
+`/usr/bin/time -l` (many documents render in one small process). UniHTML's
+converter *is* headless Chromium, so its per-conversion working set is the
+browser-class footprint quantified in the [vs-Chromium](#htmltopdf-vs-chromium)
+section above; its idle server (17.6 MiB, Chromium not yet spawned) and 1.72 GB
+image were measured directly, but the live render peak couldn't be re-captured
+here because the free metered credits ran out mid-measurement.
+
+The speed figure likewise understates htmltopdf: its 18 ms includes process +
+font startup on every call, while UniHTML's 0.8 s **excludes** the container and
+Chromium boot and the license round-trip. The trade-off is the usual one —
+UniHTML is a real browser, so it has total CSS fidelity (it stretches items,
+handles every box-sizing nuance, and supports the whole web platform), whereas
+htmltopdf is a compact CSS subset that already matches it on invoices,
+statements, and reports. Development measurements on one machine (Apple Silicon,
+macOS), not a guarantee.
 
 ## Why htmltopdf?
 
