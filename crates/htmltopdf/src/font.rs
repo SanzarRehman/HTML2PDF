@@ -226,6 +226,19 @@ impl Font {
         }
     }
 
+    /// The line-box ascent — the distance from the top of the line box down to
+    /// the baseline — as a fraction of the em. An embedded face reports its real
+    /// ascender (so glyphs sit on the baseline a browser would use); the built-in
+    /// Helvetica keeps the historic 0.8-em heuristic, since it has no parsed face
+    /// to measure and font-less documents must stay unchanged.
+    pub fn line_ascent_fraction(&self) -> f32 {
+        match &self.kind {
+            FontKind::Helvetica => 0.8,
+            // `ascent` is in PDF 1000-unit em; clamp against a degenerate face.
+            FontKind::TrueType(font) => (font.ascent as f32 / 1000.0).clamp(0.6, 1.2),
+        }
+    }
+
     /// Advance of one character as a fraction of the em.
     fn advance_em(&self, c: char) -> f32 {
         match &self.kind {

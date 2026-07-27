@@ -3055,7 +3055,14 @@ fn layout_line_box(
             .iter()
             .filter_map(|piece| piece.inline_block.as_ref().map(|f| f.height - f.baseline))
             .fold(0.0_f32, f32::max);
-        let text_ascent = max_font * 0.8;
+        // Baseline drop below the line-box top: the tallest run's real ascent.
+        // An embedded face reports its ascender; base-14 Helvetica keeps 0.8 em,
+        // so an all-Helvetica line (every font-less fixture, the table path) is
+        // byte-identical while an embedded-font line sits on a browser baseline.
+        let text_ascent = visual
+            .iter()
+            .map(|piece| piece.font_size * options.run_font(piece.font).line_ascent_fraction())
+            .fold(0.0_f32, f32::max);
         // The tallest atomic item's rise above the baseline (an image's height or
         // an inline-block's baseline distance); equals `max_image` with no inline-block.
         let atomic_top = max_image.max(ib_ascent);
@@ -3720,7 +3727,10 @@ fn layout_inline_block(
     } else {
         resolve_leading(block.line_height, max_font, FLOW_LEADING_FACTOR)
     };
-    let text_ascent = max_font * 0.8;
+    let text_ascent = pieces
+        .iter()
+        .map(|piece| piece.font_size * options.run_font(piece.font).line_ascent_fraction())
+        .fold(0.0_f32, f32::max);
     let ascent = text_ascent.max(max_image);
     let half_leading = ((leading - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
 
