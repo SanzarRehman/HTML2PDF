@@ -239,6 +239,24 @@ impl Font {
         }
     }
 
+    /// The natural line box (`line-height: normal`) as a fraction of the em —
+    /// the tallest run's ascent + descent. Browsers place glyphs on this box and
+    /// split any explicit `line-height` leading around it. An embedded face uses
+    /// its real metrics (Arial ≈ 1.12 em, close to Chrome's ~1.15); base-14
+    /// Helvetica keeps the historic 1.35-em box so font-less documents (and the
+    /// table path) are unchanged. (The `hhea` line gap is deliberately excluded —
+    /// including it overshoots Chrome's used `normal` for the tested faces.)
+    pub fn line_content_fraction(&self) -> f32 {
+        match &self.kind {
+            // Matches layout's Helvetica leading, so a Helvetica line is unchanged.
+            FontKind::Helvetica => 1.35,
+            // descent is stored negative, so `ascent - descent` = ascent + |descent|.
+            FontKind::TrueType(font) => {
+                ((font.ascent - font.descent) as f32 / 1000.0).clamp(1.0, 2.0)
+            }
+        }
+    }
+
     /// Advance of one character as a fraction of the em.
     fn advance_em(&self, c: char) -> f32 {
         match &self.kind {

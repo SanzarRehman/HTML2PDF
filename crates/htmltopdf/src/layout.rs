@@ -3063,20 +3063,34 @@ fn layout_line_box(
             .iter()
             .map(|piece| piece.font_size * options.run_font(piece.font).line_ascent_fraction())
             .fold(0.0_f32, f32::max);
+        // Natural content box (ascent+descent) of the tallest run — the reference
+        // that explicit `line-height` leading is split around. Real for embedded
+        // faces; the 1.35-em heuristic for base-14 Helvetica (font-less unchanged).
+        let content_box = visual
+            .iter()
+            .map(|piece| piece.font_size * options.run_font(piece.font).line_content_fraction())
+            .fold(0.0_f32, f32::max);
         // The tallest atomic item's rise above the baseline (an image's height or
         // an inline-block's baseline distance); equals `max_image` with no inline-block.
         let atomic_top = max_image.max(ib_ascent);
         let image_rise = (atomic_top - text_ascent).max(0.0);
-        let mut leading = resolve_leading(line_height, max_font, FLOW_LEADING_FACTOR) + image_rise;
+        // Used line height: an explicit `line-height` wins; else the tallest run's
+        // `normal` box (real ascent+descent+gap for embedded faces, 1.35 em for
+        // Helvetica — so a Helvetica line keeps the old `resolve_leading` value).
+        let base_leading = match line_height {
+            Some(crate::html::LineHeight::Number(n)) => max_font * n,
+            Some(crate::html::LineHeight::Length(points)) => points,
+            None => content_box,
+        };
+        let mut leading = base_leading + image_rise;
         // Grow the line box so an inline-block's descent below the baseline fits.
         if ib_descent > 0.0 {
             leading = leading.max(text_ascent.max(atomic_top) + ib_descent);
         }
-        // When line-height exceeds the default line box, distribute the extra as
+        // When line-height exceeds the natural content box, distribute the extra as
         // half-leading (glyphs sit mid-line, as browsers do). When it's smaller
-        // (or unset) the baseline stays where the default box puts it.
-        let half_leading =
-            ((leading - image_rise - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
+        // (or unset) the baseline stays where the natural box puts it.
+        let half_leading = ((leading - image_rise - content_box) / 2.0).max(0.0);
 
         // A page break retires the previous page's floats.
         if !has_space(*y, options, leading) {
@@ -3725,14 +3739,25 @@ fn layout_inline_block(
     let leading = if pieces.is_empty() {
         0.0
     } else {
-        resolve_leading(block.line_height, max_font, FLOW_LEADING_FACTOR)
+        match block.line_height {
+            Some(crate::html::LineHeight::Number(n)) => max_font * n,
+            Some(crate::html::LineHeight::Length(points)) => points,
+            None => pieces
+                .iter()
+                .map(|piece| piece.font_size * options.run_font(piece.font).line_content_fraction())
+                .fold(0.0_f32, f32::max),
+        }
     };
     let text_ascent = pieces
         .iter()
         .map(|piece| piece.font_size * options.run_font(piece.font).line_ascent_fraction())
         .fold(0.0_f32, f32::max);
+    let content_box = pieces
+        .iter()
+        .map(|piece| piece.font_size * options.run_font(piece.font).line_content_fraction())
+        .fold(0.0_f32, f32::max);
     let ascent = text_ascent.max(max_image);
-    let half_leading = ((leading - max_font * FLOW_LEADING_FACTOR) / 2.0).max(0.0);
+    let half_leading = ((leading - content_box) / 2.0).max(0.0);
 
     // Box dimensions (border box = content + padding, padding incl. border).
     let mut content_height = leading;
@@ -4683,9 +4708,10 @@ struct TableGeometry {
 /// floating-point rounding error.
 const WRAP_TOLERANCE: f32 = 0.25;
 
-/// UA-default leading factors (multiples of the font size) when no CSS
-/// `line-height` applies: flow line boxes and table-cell lines.
-const FLOW_LEADING_FACTOR: f32 = 1.35;
+/// UA-default table-cell leading factor (multiple of the font size) when no CSS
+/// `line-height` applies. Flow line boxes derive their `normal` leading from the
+/// run's font metrics instead (see `Font::normal_line_height_fraction`; base-14
+/// Helvetica reports 1.35 there, so a font-less flow line is unchanged).
 const CELL_LEADING_FACTOR: f32 = 1.18;
 
 /// The distance between successive baselines: an explicit CSS `line-height`
