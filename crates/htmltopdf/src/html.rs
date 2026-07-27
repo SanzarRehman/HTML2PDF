@@ -1572,13 +1572,26 @@ fn build_block(
     // no `<p>`-style block spacing. An explicit `margin` still applies.
     let inline_item = !is_block_tag(tag);
     let no_default_margin = inline_item || flex_grid_item;
+    // Headings take a UA margin scaled to their font size (browser `h1 {
+    // margin: 0.67em 0 }` …), so they get real breathing room above and below
+    // instead of the old absolute paragraph spacing (h1 had zero top margin).
+    // Other blocks keep the absolute per-kind spacing.
+    let heading_margin = heading_margin_em(kind).map(|em| font_size * em);
     let margin = crate::box_tree::Edges {
         top: own.margin_top.unwrap_or_else(|| {
-            if no_default_margin { 0.0 } else { crate::layout::spacing_before(kind) }
+            if no_default_margin {
+                0.0
+            } else {
+                heading_margin.unwrap_or_else(|| crate::layout::spacing_before(kind))
+            }
         }),
         right: own.margin_right.unwrap_or(0.0),
         bottom: own.margin_bottom.unwrap_or_else(|| {
-            if no_default_margin { 0.0 } else { crate::layout::spacing_after(kind) }
+            if no_default_margin {
+                0.0
+            } else {
+                heading_margin.unwrap_or_else(|| crate::layout::spacing_after(kind))
+            }
         }),
         left: own.margin_left.unwrap_or(0.0) + nesting_indent,
     };
@@ -1985,6 +1998,53 @@ fn is_heading(kind: BlockKind) -> bool {
             | BlockKind::Heading5
             | BlockKind::Heading6
     )
+}
+
+/// UA-default heading margin (top and bottom) as a multiple of the heading's
+/// *own* font-size (browser `h1 { margin: 0.67em 0 }` … `h6 { 2.33em 0 }`).
+/// `None` for non-headings, which keep the absolute paragraph spacing.
+fn heading_margin_em(kind: BlockKind) -> Option<f32> {
+    Some(match kind {
+        BlockKind::Heading1 => 0.67,
+        BlockKind::Heading2 => 0.83,
+        BlockKind::Heading3 => 1.0,
+        BlockKind::Heading4 => 1.33,
+        BlockKind::Heading5 => 1.67,
+        BlockKind::Heading6 => 2.33,
+        _ => return None,
+    })
+}
+
+/// UA-default heading font-size as a multiple of the *parent's* font-size
+/// (browser `h1 { font-size: 2em }` … `h6 { 0.67em }`). `None` for non-headings.
+fn heading_em_factor(kind: BlockKind) -> Option<f32> {
+    Some(match kind {
+        BlockKind::Heading1 => 2.0,
+        BlockKind::Heading2 => 1.5,
+        BlockKind::Heading3 => 1.17,
+        BlockKind::Heading4 => 1.0,
+        BlockKind::Heading5 => 0.83,
+        BlockKind::Heading6 => 0.67,
+        _ => return None,
+    })
+}
+
+/// Give a heading with no *authored* font-size its UA default before
+/// inheritance, so an ancestor's `font-size` no longer shrinks it. When an
+/// ancestor set a size, scale from it (`2em` etc., matching browsers); otherwise
+/// use the absolute per-level default, so a default-body document is unchanged.
+fn apply_heading_default_font_size(own: &mut CellStyle, tag: Option<&str>, inherited: &CellStyle) {
+    if own.font_size.is_some() {
+        return;
+    }
+    let Some(factor) = tag.map(block_kind_for).and_then(heading_em_factor) else {
+        return;
+    };
+    let kind = block_kind_for(tag.unwrap());
+    own.font_size = Some(match inherited.font_size {
+        Some(parent) => parent * factor,
+        None => crate::layout::font_size_for(kind),
+    });
 }
 
 fn block_kind_for(tag: &str) -> BlockKind {
@@ -2864,14 +2924,16 @@ fn compute_inherited_node(
     // `element_own` runs exactly as before.
     let (style, hidden, own_env) = if is_element {
         if stylesheet.uses_custom {
-            let (own, display_none, own_env) = element_own_with_env(dom, id, stylesheet, env);
+            let (mut own, display_none, own_env) = element_own_with_env(dom, id, stylesheet, env);
+            apply_heading_default_font_size(&mut own, node.tag(), &inherited);
             (
                 inherit_style(&inherited, &own),
                 parent_hidden || display_none,
                 Some(own_env),
             )
         } else {
-            let (own, display_none) = element_own(dom, id, stylesheet, cache);
+            let (mut own, display_none) = element_own(dom, id, stylesheet, cache);
+            apply_heading_default_font_size(&mut own, node.tag(), &inherited);
             (inherit_style(&inherited, &own), parent_hidden || display_none, None)
         }
     } else {

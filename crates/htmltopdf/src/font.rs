@@ -233,6 +233,10 @@ impl Font {
     /// to measure and font-less documents must stay unchanged.
     pub fn line_ascent_fraction(&self) -> f32 {
         match &self.kind {
+            // Base-14 Helvetica keeps the 0.8-em heuristic: it renders against a
+            // viewer's own Helvetica and, in the parity harness, against Chrome's
+            // Times fallback — measured to track those better than real Arial
+            // metrics do (font-less documents must also stay byte-identical).
             FontKind::Helvetica => 0.8,
             // `ascent` is in PDF 1000-unit em; clamp against a degenerate face.
             FontKind::TrueType(font) => (font.ascent as f32 / 1000.0).clamp(0.6, 1.2),
@@ -248,7 +252,9 @@ impl Font {
     /// including it overshoots Chrome's used `normal` for the tested faces.)
     pub fn line_content_fraction(&self) -> f32 {
         match &self.kind {
-            // Matches layout's Helvetica leading, so a Helvetica line is unchanged.
+            // Matches layout's Helvetica leading, so a font-less flow line is
+            // unchanged (byte-identical); a real-metric box was measured worse
+            // against Chrome's Times fallback (see line_ascent_fraction).
             FontKind::Helvetica => 1.35,
             // descent is stored negative, so `ascent - descent` = ascent + |descent|.
             FontKind::TrueType(font) => {
