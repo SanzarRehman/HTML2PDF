@@ -1414,7 +1414,7 @@ fn build_node(
             // attach it to the current line as an atomic inline item rather than
             // a block sibling (it flows with text and does not break the line).
             if computed.style[id].display_inline_block {
-                if let Some(block) = build_block(dom, id, env, ctx, tag) {
+                if let Some(block) = build_block(dom, id, env, ctx, tag, false) {
                     acc.push_inline_block(block, &ctx);
                 }
                 return;
@@ -1496,7 +1496,7 @@ fn build_node(
                 }
             } else if is_block_tag(tag) {
                 acc.flush_line();
-                if let Some(block) = build_block(dom, id, env, ctx, tag) {
+                if let Some(block) = build_block(dom, id, env, ctx, tag, false) {
                     acc.children.push(crate::box_tree::BoxChild::Block(block));
                 }
             } else {
@@ -1533,6 +1533,10 @@ fn build_block(
     env: &FlowEnv,
     parent: FlowCtx,
     tag: &str,
+    // This block is a child of a flex/grid container, so it is a flex/grid item.
+    // Items get zero default vertical margin (browsers apply no UA block spacing
+    // to items); an explicit `margin` still wins.
+    flex_grid_item: bool,
 ) -> Option<crate::box_tree::BlockBox> {
     let computed = env.computed;
     let kind = block_kind_for(tag);
@@ -1563,16 +1567,18 @@ fn build_block(
     } else {
         0.0
     };
-    // Inline elements promoted to flex items (built via the flex-container child
-    // loop) default to zero vertical margins, like a browser's UA styles.
+    // Inline elements (promoted to flex items) and flex/grid items default to
+    // zero vertical margins, like a browser's UA styles — a `<div>` item carries
+    // no `<p>`-style block spacing. An explicit `margin` still applies.
     let inline_item = !is_block_tag(tag);
+    let no_default_margin = inline_item || flex_grid_item;
     let margin = crate::box_tree::Edges {
         top: own.margin_top.unwrap_or_else(|| {
-            if inline_item { 0.0 } else { crate::layout::spacing_before(kind) }
+            if no_default_margin { 0.0 } else { crate::layout::spacing_before(kind) }
         }),
         right: own.margin_right.unwrap_or(0.0),
         bottom: own.margin_bottom.unwrap_or_else(|| {
-            if inline_item { 0.0 } else { crate::layout::spacing_after(kind) }
+            if no_default_margin { 0.0 } else { crate::layout::spacing_after(kind) }
         }),
         left: own.margin_left.unwrap_or(0.0) + nesting_indent,
     };
@@ -1668,7 +1674,7 @@ fn build_block(
                     ) && !computed.hidden[child] =>
                 {
                     acc.flush_line();
-                    if let Some(item) = build_block(dom, child, env, child_ctx, child_tag) {
+                    if let Some(item) = build_block(dom, child, env, child_ctx, child_tag, true) {
                         acc.children.push(crate::box_tree::BoxChild::Block(item));
                     }
                 }

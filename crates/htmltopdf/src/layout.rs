@@ -724,12 +724,12 @@ fn layout_box_children(
                 let mut shifted = start - dy;
                 layout_block_box(
                     block, x + dx, width, pages, &mut shifted, carried, floats, overlays,
-                    containing, options,
+                    containing, options, None,
                 );
                 *y = shifted + dy;
             }
             BoxChild::Block(block) => layout_block_box(
-                block, x, width, pages, y, carried, floats, overlays, containing, options,
+                block, x, width, pages, y, carried, floats, overlays, containing, options, None,
             ),
             BoxChild::Line(runs) => {
                 // Content flushes any pending margin above it.
@@ -818,6 +818,7 @@ fn layout_float(
         overlays,
         containing,
         options,
+        None,
     );
 
     floats.push(FloatBand {
@@ -920,6 +921,7 @@ fn layout_absolute_box(
         overlays,
         containing,
         options,
+        None,
     );
 }
 
@@ -1200,7 +1202,7 @@ fn layout_flex_box(
                 *y -= gap;
             }
             let mut carried = 0.0;
-            item.layout(inner_x, inner_width, pages, y, &mut carried, overlays, containing, options);
+            item.layout(inner_x, inner_width, pages, y, &mut carried, overlays, containing, options, None);
         }
         return;
     }
@@ -1235,11 +1237,18 @@ fn layout_flex_box(
         order.reverse();
     }
 
-    // `align-content` distributes leftover cross-axis space when the container
-    // has a definite height taller than the stacked lines. With the default
-    // `stretch`/`flex-start` (or an auto height) both offsets are 0, so the
-    // common path is byte-identical.
-    let (lead, between) = align_content_layout(block, flex, &order, &items, inner_width, options);
+    // Distribute the container's definite cross-axis space across the flex lines:
+    // `stretch` grows each line to fill it (so a single line fills a tall
+    // container and `align-items` can position within the full height); other
+    // `align-content` values offset the lines instead. An indefinite height
+    // leaves every line at its measured size with zero offsets, so an
+    // auto-height container is byte-identical to laying each line out directly.
+    let measured: Vec<f32> = order
+        .iter()
+        .map(|range| measure_flex_line_height(&items[range.clone()], flex, inner_width, options))
+        .collect();
+    let (lead, between, line_cross) =
+        distribute_cross(flex.align_content, &measured, gap, flex_definite_cross(block));
     *y -= lead;
 
     for (line_index, range) in order.iter().enumerate() {
@@ -1251,6 +1260,7 @@ fn layout_flex_box(
             flex,
             inner_x,
             inner_width,
+            line_cross[line_index],
             pages,
             y,
             overlays,
@@ -1260,55 +1270,76 @@ fn layout_flex_box(
     }
 }
 
-/// Resolve `align-content` into a (lead, between-lines) offset pair for the
-/// current container. Returns `(0, 0)` unless the container has a definite
-/// height with free cross space and a distributing `align-content` value.
-#[allow(clippy::too_many_arguments)]
-fn align_content_layout(
-    block: &crate::box_tree::BlockBox,
-    flex: &crate::box_tree::FlexContainer,
-    order: &[std::ops::Range<usize>],
-    items: &[FlexItem],
-    inner_width: f32,
-    options: &RenderOptions,
-) -> (f32, f32) {
-    use crate::html::AlignContent;
-    if matches!(
-        flex.align_content,
-        AlignContent::Stretch | AlignContent::FlexStart
-    ) {
-        return (0.0, 0.0);
-    }
-    // The container's definite content-box height, if any.
-    let definite = [block.css_height, block.min_height]
+/// The flex container's definite content-box cross size (`height` /
+/// `min-height`, honoring `box-sizing`), or `None` when the height is indefinite
+/// (content-sized).
+fn flex_definite_cross(block: &crate::box_tree::BlockBox) -> Option<f32> {
+    let height = [block.css_height, block.min_height]
         .into_iter()
         .flatten()
-        .fold(None, |acc: Option<f32>, h| Some(acc.map_or(h, |a| a.max(h))));
-    let Some(height) = definite else {
-        return (0.0, 0.0);
-    };
-    let cross = if block.border_box {
+        .fold(None, |acc: Option<f32>, h| Some(acc.map_or(h, |a| a.max(h))))?;
+    Some(if block.border_box {
         (height - block.padding.top - block.padding.bottom).max(0.0)
     } else {
         height
-    };
-    let content: f32 = order
-        .iter()
-        .map(|range| measure_flex_line_height(&items[range.clone()], flex, inner_width, options))
-        .sum::<f32>()
-        + flex.gap * (order.len() as f32 - 1.0).max(0.0);
-    align_content_offsets(flex.align_content, (cross - content).max(0.0), order.len())
+    })
+}
+
+/// Distribute a flex container's cross-axis space across its lines. Returns the
+/// lead offset before the first line, the extra spacing inserted between lines,
+/// and the target cross size of each line. Without a definite container cross
+/// size (or with no free space) every line keeps its measured height and both
+/// offsets are zero — byte-identical to measuring each line directly.
+fn distribute_cross(
+    mode: crate::html::AlignContent,
+    measured: &[f32],
+    gap: f32,
+    definite: Option<f32>,
+) -> (f32, f32, Vec<f32>) {
+    use crate::html::AlignContent;
+    let n = measured.len();
+    let content: f32 = measured.iter().sum::<f32>() + gap * (n as f32 - 1.0).max(0.0);
+    let free = definite.map_or(0.0, |cross| cross - content);
+    if free <= 0.0 || n == 0 {
+        return (0.0, 0.0, measured.to_vec());
+    }
+    if matches!(mode, AlignContent::Stretch) {
+        // Each line grows equally to absorb the free cross space.
+        let add = free / n as f32;
+        (0.0, 0.0, measured.iter().map(|m| m + add).collect())
+    } else {
+        let (lead, between) = align_content_offsets(mode, free, n);
+        (lead, between, measured.to_vec())
+    }
+}
+
+/// The cross-axis (border-box) height a flex/grid item is inflated to under
+/// `align: stretch`, or `None` when it keeps its natural content height. Only a
+/// block box with an auto (`height` unset) cross size stretches; an explicit
+/// height or an anonymous inline item is left alone.
+fn stretch_target(item: &FlexItem, align: crate::html::AlignItems, cross: f32) -> Option<f32> {
+    use crate::html::AlignItems;
+    match item {
+        FlexItem::Block(b) if matches!(align, AlignItems::Stretch) && b.css_height.is_none() => {
+            Some(cross)
+        }
+        _ => None,
+    }
 }
 
 /// Lay out one flex line (the whole container when not wrapping): distribute
 /// the main axis by flex-grow / proportional shrink, apply `justify-content`
-/// and `align-items` within the line, and advance `y` past its tallest item.
+/// and `align-items` within the line, and advance `y` past the line. `line_cross`
+/// is the line's target cross size (its measured height, grown to fill a definite
+/// container height under `align-content: stretch`); `align-items` positions each
+/// item within it and `stretch` inflates auto-height items to it.
 #[allow(clippy::too_many_arguments)]
 fn layout_flex_line(
     items: &[FlexItem],
     flex: &crate::box_tree::FlexContainer,
     inner_x: f32,
     inner_width: f32,
+    line_cross: f32,
     pages: &mut Vec<Page>,
     y: &mut f32,
     overlays: &mut Vec<Overlay>,
@@ -1331,13 +1362,13 @@ fn layout_flex_line(
     cursor += inner_x;
 
     // Measure pass: lay each item out into scratch pages to learn its height, so
-    // align-items can offset shorter items against the tallest one.
+    // align-items can offset shorter items against the line's cross size.
     let heights: Vec<f32> = items
         .iter()
         .zip(&widths)
         .map(|(item, width)| item.measure_height(*width, options))
         .collect();
-    let row_height = heights.iter().fold(0.0_f32, |a, &b| a.max(b));
+    let row_height = line_cross;
 
     // Cross-axis alignment factor: how much of the leftover height goes above
     // the item. `stretch` behaves as `flex-start` (items are not inflated).
@@ -1354,7 +1385,10 @@ fn layout_flex_line(
         let align = item.align_self().unwrap_or(flex.align);
         let mut item_y = top - (row_height - height) * align_factor(align);
         let mut carried = 0.0;
-        item.layout(cursor, *width, pages, &mut item_y, &mut carried, overlays, containing, options);
+        // `align-items/align-self: stretch` inflates an auto-height item's box to
+        // the line's cross size so its background/border fills the row.
+        let stretch = stretch_target(item, align, row_height);
+        item.layout(cursor, *width, pages, &mut item_y, &mut carried, overlays, containing, options, stretch);
         lowest = lowest.min(item_y);
         cursor += width + between;
     }
@@ -1401,17 +1435,26 @@ impl FlexItem<'_> {
         }
     }
 
-    /// Base main size: `flex-basis` when declared, else the content's
-    /// max-content width plus the item's own horizontal padding and margins
-    /// (the outer main size, so padded pills don't collapse to zero content).
+    /// Base main size: `flex-basis` when declared, else the item's `width`
+    /// (CSS `flex-basis: auto` resolves to the main-size property), else the
+    /// content's max-content width. Always the *outer* main size — the item's
+    /// own horizontal padding and margins are added on (unless `box-sizing:
+    /// border-box` already folded padding into `width`), so a padded pill keeps
+    /// its declared box and doesn't collapse to its content.
     fn basis(&self, options: &RenderOptions) -> f32 {
         match self {
             FlexItem::Block(b) => b.flex_basis.unwrap_or_else(|| {
-                measure_max_content(&b.children, options)
-                    + b.padding.left
-                    + b.padding.right
-                    + b.margin.left
-                    + b.margin.right
+                let margins = b.margin.left + b.margin.right;
+                match b.css_width {
+                    Some(w) if b.border_box => w + margins,
+                    Some(w) => w + b.padding.left + b.padding.right + margins,
+                    None => {
+                        measure_max_content(&b.children, options)
+                            + b.padding.left
+                            + b.padding.right
+                            + margins
+                    }
+                }
             }),
             FlexItem::Line(runs) => runs
                 .iter()
@@ -1426,6 +1469,10 @@ impl FlexItem<'_> {
         }
     }
 
+    /// Lay the item out at `width`. `stretch` is the cross-axis (border-box)
+    /// height the item's box is inflated to under `align-items/align-self:
+    /// stretch` (`None` = auto height, the item's natural content height).
+    #[allow(clippy::too_many_arguments)]
     fn layout(
         &self,
         x: f32,
@@ -1436,13 +1483,15 @@ impl FlexItem<'_> {
         overlays: &mut Vec<Overlay>,
         containing: Option<ContainingBlock>,
         options: &RenderOptions,
+        stretch: Option<f32>,
     ) {
         // A flex/grid item establishes its own flow: floats do not escape it.
         let mut floats: Vec<FloatBand> = Vec::new();
         match self {
             FlexItem::Block(b) => layout_block_box(
-                b, x, width, pages, y, carried, &mut floats, overlays, containing, options,
+                b, x, width, pages, y, carried, &mut floats, overlays, containing, options, stretch,
             ),
+            // Anonymous inline items have no box to stretch.
             FlexItem::Line(runs) => {
                 layout_line_box(runs, x, width, TextAlign::Left, None, false, 0.0, pages, y, &mut floats, options)
             }
@@ -1460,7 +1509,7 @@ impl FlexItem<'_> {
         let mut carried = 0.0;
         let mut overlays: Vec<Overlay> = Vec::new();
         self.layout(
-            0.0, width, &mut scratch, &mut item_y, &mut carried, &mut overlays, None, options,
+            0.0, width, &mut scratch, &mut item_y, &mut carried, &mut overlays, None, options, None,
         );
         start - item_y
     }
@@ -1943,6 +1992,9 @@ fn layout_grid_box(
             let item_height = items[placed.item].item.measure_height(cell, options);
             let mut item_y = top - (box_height - item_height).max(0.0) * align_factor(align);
             let mut carried = 0.0;
+            // `align-items/align-self: stretch` inflates an auto-height item's box
+            // to fill its cell (the row, or the full span of a row-spanning item).
+            let stretch = stretch_target(&items[placed.item].item, align, box_height);
             items[placed.item].item.layout(
                 lefts[placed.col],
                 cell,
@@ -1952,6 +2004,7 @@ fn layout_grid_box(
                 overlays,
                 containing,
                 options,
+                stretch,
             );
         }
         *y = top - row_height;
@@ -2184,6 +2237,9 @@ fn layout_block_box(
     overlays: &mut Vec<Overlay>,
     containing: Option<ContainingBlock>,
     options: &RenderOptions,
+    // A flex/grid `align: stretch` cross size: the border-box height to inflate
+    // this box to when its content is shorter (`None` for ordinary blocks).
+    stretch: Option<f32>,
 ) {
     // Resolve `%` padding/margin against the containing block's width (the
     // incoming `width`, before any own-width narrowing below). The point sides
@@ -2341,6 +2397,16 @@ fn layout_block_box(
     if let Some(height) = min_h {
         flush_margin(y, carried);
         let target = start_y - to_outer(height);
+        if target < *y && pages.len() - 1 == start_page {
+            *y = target;
+        }
+    }
+    // `align: stretch` inflates the border box to the flex line / grid cell cross
+    // size. `stretch` is already an outer (border-box) height, so it is not run
+    // through `to_outer`; it never shrinks the box (only extends when taller).
+    if let Some(cross) = stretch {
+        flush_margin(y, carried);
+        let target = start_y - cross;
         if target < *y && pages.len() - 1 == start_page {
             *y = target;
         }
@@ -5345,6 +5411,36 @@ mod tests {
         let one = lines.iter().find(|l| l.text == "one").unwrap();
         assert_eq!(three.x, one.x, "second line restarts at the left edge");
         assert!(three.y < one.y);
+    }
+
+    #[test]
+    fn align_items_stretch_fills_a_definite_container_height() {
+        // A flex container with a definite 100pt height and short items. With the
+        // default `align-items: stretch`, each item's background fills the full
+        // container height — which also requires flex items to carry no default
+        // `<p>` block margin (a 6pt/4pt margin would leave the fills short of
+        // 100pt), so this guards both fixes at once.
+        let document = crate::html::parse(
+            "<style>.row { display: flex; height: 100pt; gap: 10pt; } \
+                    .row > div { background: #4a90d9; }</style>\
+             <div class=\"row\"><div>one</div><div>two<br>lines</div></div>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let mut fill_heights: Vec<f32> = pages[0]
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                crate::paint::PaintCommand::FillRect(r) => Some(r.height),
+                _ => None,
+            })
+            .collect();
+        fill_heights.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!(fill_heights.len() >= 2, "two item backgrounds: {fill_heights:?}");
+        assert!(
+            (fill_heights[0] - 100.0).abs() < 0.5 && (fill_heights[1] - 100.0).abs() < 0.5,
+            "both items stretch to the 100pt container: {fill_heights:?}"
+        );
     }
 
     #[test]
