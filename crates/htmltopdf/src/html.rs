@@ -2037,10 +2037,13 @@ fn apply_heading_default_font_size(own: &mut CellStyle, tag: Option<&str>, inher
     if own.font_size.is_some() {
         return;
     }
-    let Some(factor) = tag.map(block_kind_for).and_then(heading_em_factor) else {
+    let Some(tag) = tag else {
         return;
     };
-    let kind = block_kind_for(tag.unwrap());
+    let kind = block_kind_for(tag);
+    let Some(factor) = heading_em_factor(kind) else {
+        return;
+    };
     own.font_size = Some(match inherited.font_size {
         Some(parent) => parent * factor,
         None => crate::layout::font_size_for(kind),

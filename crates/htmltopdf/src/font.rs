@@ -194,6 +194,15 @@ impl std::fmt::Debug for Font {
     }
 }
 
+/// Lock a mutex, recovering the guard if a previous holder panicked while
+/// holding it. The font caches hold only reusable data (shaped runs, fallback
+/// chains, loaded faces), so a poisoned lock is still safe to read/write — and
+/// recovering it stops one render's panic from cascading into every concurrent
+/// render that shares this `Arc<Font>` or the process-wide face cache.
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl Font {
     pub fn helvetica() -> Font {
         Font {
@@ -295,7 +304,7 @@ impl Font {
     /// cached for the lifetime of this `Font`, so the disk/parse cost is paid
     /// once per process-shared `Arc<Font>`, and only if ever needed.
     pub fn fallback_chain(&self) -> Arc<Vec<Arc<Font>>> {
-        let mut slot = self.fallbacks.lock().unwrap();
+        let mut slot = lock_recover(&self.fallbacks);
         if let Some(chain) = slot.as_ref() {
             return chain.clone();
         }
@@ -458,14 +467,11 @@ impl TrueTypeFont {
     /// Shape `text` with HarfBuzz (cached by the exact string). Returns an empty
     /// run (no glyphs, zero width) only if the face failed to parse at load.
     pub fn shape(&self, text: &str) -> Arc<ShapedRun> {
-        if let Some(hit) = self.shape_cache.lock().unwrap().get(text) {
+        if let Some(hit) = lock_recover(&self.shape_cache).get(text) {
             return hit.clone();
         }
         let run = Arc::new(self.shape_uncached(text));
-        self.shape_cache
-            .lock()
-            .unwrap()
-            .insert(text.to_string(), run.clone());
+        lock_recover(&self.shape_cache).insert(text.to_string(), run.clone());
         run
     }
 
@@ -751,12 +757,12 @@ pub fn resolve_spec(primary: &Arc<Font>, spec: &FontSpec) -> ResolvedFont {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
     let key = (family.to_ascii_lowercase(), spec.bold, spec.italic);
-    let cached = cache.lock().unwrap().get(&key).cloned();
+    let cached = lock_recover(cache).get(&key).cloned();
     let loaded = match cached {
         Some(hit) => hit,
         None => {
             let loaded = load_family_variant(family, spec.bold, spec.italic);
-            cache.lock().unwrap().insert(key, loaded.clone());
+            lock_recover(cache).insert(key, loaded.clone());
             loaded
         }
     };
@@ -1192,6 +1198,28 @@ pub(crate) fn char_to_winansi(ch: char) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_recover_survives_a_poisoned_mutex() {
+        // A previous holder panicking with the lock held poisons it, so a plain
+        // `.lock().unwrap()` would panic for every later caller — cascading one
+        // render's failure across the shared font caches. `lock_recover` returns
+        // the (still-valid) data instead.
+        let mutex = Arc::new(Mutex::new(5u32));
+        let clone = Arc::clone(&mutex);
+        // Silence the panic hook so the deliberate panic doesn't spam output.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::thread::spawn(move || {
+            let _guard = clone.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        std::panic::set_hook(prev);
+
+        assert!(mutex.lock().is_err(), "the mutex is poisoned");
+        assert_eq!(*lock_recover(&mutex), 5, "recovery yields the data anyway");
+    }
 
     #[test]
     fn woff1_converts_back_to_sfnt() {
