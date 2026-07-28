@@ -5,7 +5,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-FIXTURES_DIR="$REPO_DIR/crates/htmltopdf/tests/fixtures"
+# `HTMLTOPDF_FIXTURES_DIR` overrides the source (e.g. the matched-font temp tree).
+FIXTURES_DIR="${HTMLTOPDF_FIXTURES_DIR:-$REPO_DIR/crates/htmltopdf/tests/fixtures}"
 OUTPUT_DIR="${1:-/tmp/htmltopdf-parity/ours}"
 
 echo "Building htmltopdf (release)..."

@@ -9,8 +9,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-FIXTURES_DIR="$REPO_DIR/crates/htmltopdf/tests/fixtures"
-REF_DIR="$FIXTURES_DIR/references"
+# `HTMLTOPDF_FIXTURES_DIR` / `HTMLTOPDF_REF_DIR` override the source fixtures and
+# the reference output (used by the matched-font harness mode).
+FIXTURES_DIR="${HTMLTOPDF_FIXTURES_DIR:-$REPO_DIR/crates/htmltopdf/tests/fixtures}"
+REF_DIR="${HTMLTOPDF_REF_DIR:-$FIXTURES_DIR/references}"
 
 CHROME=$(command -v google-chrome-stable || command -v google-chrome \
     || command -v chromium || command -v chromium-browser || echo "")

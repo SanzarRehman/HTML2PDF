@@ -31,3 +31,7 @@ NEXT_STEPS.md
 # Chromium parity reference rasters (regenerable via scripts/generate-references.sh;
 # machine/Chrome-version specific, so not committed).
 crates/htmltopdf/tests/fixtures/references/
+
+# Matched-font visual-regression artifacts (regenerable)
+/visual-baseline-matched.json
+crates/htmltopdf/tests/fixtures/references-matched/

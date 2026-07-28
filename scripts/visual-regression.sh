@@ -12,6 +12,8 @@
 #   ./scripts/visual-regression.sh --update-baseline  # write visual-baseline.json
 #   ./scripts/visual-regression.sh --check         # fail if any fixture regressed vs baseline
 #   ./scripts/visual-regression.sh --montage 8     # also write montages for the worst 8
+#   ./scripts/visual-regression.sh --matched-font  # render BOTH engines in one font (measures
+#                                                  # layout, not Helvetica-vs-Times); own refs+baseline
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -26,16 +28,33 @@ REFRESH_REFS=0
 CHECK=0
 UPDATE_BASELINE=0
 MONTAGE=0
+MATCHED_FONT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --refresh-refs) REFRESH_REFS=1 ;;
         --check) CHECK=1 ;;
         --update-baseline) UPDATE_BASELINE=1 ;;
         --montage) MONTAGE="${2:-8}"; shift ;;
+        --matched-font) MATCHED_FONT="${2:-Arial}"; [ "${2:-}" = "" ] || shift ;;
         *) echo "unknown arg: $1"; exit 2 ;;
     esac
     shift
 done
+
+# Matched-font mode: preprocess fixtures with a shared base font so both engines
+# render identical glyphs (rasterized by the same poppler), isolating layout.
+# Uses its own reference set and baseline so it never clobbers the default ones.
+if [ -n "$MATCHED_FONT" ]; then
+    echo "==> Matched-font mode: '$MATCHED_FONT'"
+    SRC="/tmp/htmltopdf-parity/matched-src"
+    rm -rf "$SRC"; mkdir -p "$SRC"
+    python3 "$SCRIPT_DIR/inject-font.py" "$FIXTURES_DIR" "$SRC" "$MATCHED_FONT"
+    export HTMLTOPDF_FIXTURES_DIR="$SRC"
+    REF_DIR="$FIXTURES_DIR/references-matched"
+    export HTMLTOPDF_REF_DIR="$REF_DIR"
+    OURS_DIR="/tmp/htmltopdf-parity/ours-matched"
+    BASELINE="$REPO_DIR/visual-baseline-matched.json"
+fi
 
 mkdir -p "$OUT_DIR"
 
