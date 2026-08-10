@@ -1413,7 +1413,10 @@ fn build_node(
             // `display: inline-block`: build the element as a block box, but
             // attach it to the current line as an atomic inline item rather than
             // a block sibling (it flows with text and does not break the line).
-            if computed.style[id].display_inline_block {
+            // Replaced elements keep their dedicated box path. In particular,
+            // an `<img>` with the browser-default-ish `display: inline-block`
+            // must not be built as an empty generic block and silently dropped.
+            if tag != "img" && computed.style[id].display_inline_block {
                 if let Some(block) = build_block(dom, id, env, ctx, tag, false) {
                     acc.push_inline_block(block, &ctx);
                 }
@@ -1485,7 +1488,9 @@ fn build_node(
                             .iter()
                             .any(|run| run.image.is_some() || !run.text.trim().is_empty());
                         let inline = own.float_dir.is_none()
-                            && (pending_text || followed_by_inline_text(dom, id));
+                            && (own.display_inline_block
+                                || pending_text
+                                || followed_by_inline_text(dom, id));
                         if inline {
                             acc.push_image(image, &ctx);
                         } else {

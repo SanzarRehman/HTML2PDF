@@ -937,6 +937,31 @@ mod tests {
         assert!(text.contains("/ColorSpace /DeviceGray"));
     }
 
+    #[test]
+    fn renders_img_with_display_inline_block() {
+        // A common author rule (`.content img { display: inline-block }`) must
+        // keep the element on the replaced-image path. Generic inline-blocks
+        // are built from child content, so routing `<img>` through that path
+        // would treat it as empty and silently drop it.
+        let png = build_png(2, 1, 2, &[255, 0, 0, 0, 255, 0]);
+        let uri = format!("data:image/png;base64,{}", base64_encode(&png));
+        let html = format!(
+            "<style>.content img {{ display:inline-block;max-width:100% }}</style>\
+             <div class=\"content\"><p><img src=\"{uri}\"><br>caption</p></div>"
+        );
+
+        let pdf = crate::Engine::new()
+            .render_html(&html, crate::RenderOptions::default())
+            .expect("render should succeed");
+        let text = String::from_utf8_lossy(&pdf);
+
+        assert!(
+            text.contains("/Subtype /Image"),
+            "inline-block image not embedded"
+        );
+        assert!(text.contains("/Width 2"));
+    }
+
     /// Walk the flow tree and return the first resolved `ImageBox`.
     fn first_image(document: &crate::html::Document) -> crate::box_tree::ImageBox {
         use crate::box_tree::BoxChild;
