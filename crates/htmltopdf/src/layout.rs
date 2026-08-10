@@ -2320,10 +2320,13 @@ fn layout_block_box(
 
     // A positioned block (relative/absolute/fixed) establishes the containing
     // block that its absolutely-positioned descendants resolve offsets against.
+    // Per CSS those offsets resolve against the *padding* box, so the origin is
+    // the border/padding-box top (`start_y`) — not `*y`, which has already had
+    // `padding.top` subtracted and sits at the content-box top.
     let child_containing = if block.position.is_some() {
         Some(ContainingBlock {
             x: inner_x,
-            top: *y - *carried,
+            top: start_y - *carried,
             width: inner_width,
         })
     } else {
@@ -6175,6 +6178,33 @@ mod tests {
         // top:0 → the card's top edge: the badge overlays the card's first line,
         // far below the page top it would sit at without the positioned ancestor.
         assert!((badge.y - body.y).abs() < 2.0, "badge y {} vs body y {}", badge.y, body.y);
+    }
+
+    #[test]
+    fn absolute_top_zero_uses_positioned_ancestor_padding_edge() {
+        let document = crate::html::parse(
+            "<style>\
+             .card { position: relative; margin-top: 100pt; padding-top: 20pt; }\
+             .badge { position: absolute; top: 0; left: 0; margin: 0; }\
+             </style>\
+             <div class=\"card\">BODY<div class=\"badge\">BADGE</div></div>",
+        );
+        let options = RenderOptions::default();
+        let pages = layout_document(&document, &options);
+        let lines = &pages[0].lines;
+        let find = |text: &str| lines.iter().find(|line| line.text.contains(text)).unwrap();
+
+        let badge = find("BADGE");
+        let body = find("BODY");
+        // The parent's in-flow text starts below its 20pt top padding, while
+        // top:0 resolves from the outer edge of that padding box. With the old
+        // content-edge origin the two baselines were equal instead.
+        assert!(
+            ((badge.y - body.y) - 20.0).abs() < 1.0,
+            "badge y {} vs body y {}",
+            badge.y,
+            body.y
+        );
     }
 
     #[test]
