@@ -250,6 +250,11 @@ Works today:
   jumps to `id` anchors — styled with browser UA defaults (blue, underlined;
   `text-decoration: none` and author colors respected). Headings build the
   PDF bookmark sidebar (`h2` nests under `h1`, and so on).
+- **`break-inside: avoid` keep-together boxes**: a card, figure, or invoice
+  section that would be cut by the page bottom starts on the next page whole.
+  A box taller than a page still starts a fresh page and then breaks, as Chrome
+  does. (The deprecated `page-break-inside` alias is not supported — no legacy
+  to carry.)
 - **Paged-media running headers, footers, and page numbers**: CSS `@page`
   margin boxes (`@top-left/center/right`, `@bottom-left/center/right`) paint
   static text plus final `counter(page)` / `counter(pages)` values after the
@@ -313,6 +318,9 @@ Not complete yet (queued, CSS-first):
   as outlines); `dir="auto"` and bracket mirroring.
 - Broader JavaScript DOM surface (deferred): `insertBefore`, `cloneNode`,
   `querySelector(All)`, `parentNode`/`children` traversal, events, timers.
+- Forced page breaks (`break-before`/`break-after`), `break-inside: avoid` on
+  table rows and flex/grid items, and `orphans`/`widows`. (`break-inside: avoid`
+  on flow blocks works.)
 - `object-fit`; SVG and canvas; tagged PDF; images and nested block layout
   inside table cells; full visual compatibility with Chromium.
 

@@ -616,6 +616,127 @@ fn flush_margin(y: &mut f32, carried: &mut f32) {
     *carried = 0.0;
 }
 
+/// Whether a block leaves normal flow entirely (`position: absolute` / `fixed`):
+/// it neither moves the flow cursor nor paginates.
+fn is_out_of_flow(block: &crate::box_tree::BlockBox) -> bool {
+    matches!(
+        block.position,
+        Some(crate::html::PositionKind::Absolute) | Some(crate::html::PositionKind::Fixed)
+    )
+}
+
+/// Honor `break-inside: avoid` on an in-flow block: when the block does not fit
+/// the space left on the page, move the cursor to a fresh page so it prints in
+/// one piece. A block taller than a whole page cannot be kept together by any
+/// placement — it still starts a fresh page (the largest first fragment
+/// available) and then breaks inside, which is what Chrome's `--print-to-pdf`
+/// does; `avoid` is a hint the fragmenter may ignore when no break point can
+/// satisfy it (css-break-3 §4.3).
+#[allow(clippy::too_many_arguments)]
+fn avoid_page_split(
+    block: &crate::box_tree::BlockBox,
+    x: f32,
+    width: f32,
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    carried: &mut f32,
+    floats: &mut Vec<FloatBand>,
+    options: &RenderOptions,
+) {
+    // Inside a dry run there is nothing to decide (see `MEASURING_WHOLE_BLOCK`).
+    if MEASURING_WHOLE_BLOCK.get() {
+        return;
+    }
+    // Already at the top of a page: a fresh page offers no more room, and
+    // pushing one would only leave a blank page behind.
+    if *y >= options.page_size.height - options.margin_top {
+        return;
+    }
+    // `None` = the block outgrows a whole page, so it cannot fit here either.
+    if measure_whole_block_height(block, x, width, *carried, options)
+        .is_some_and(|height| has_space(*y, options, height))
+    {
+        return; // fits where it is
+    }
+    push_page(pages, y, options);
+    // A page break drops the collapsed margin above the block and retires the
+    // previous page's floats.
+    *carried = 0.0;
+    floats.clear();
+}
+
+std::thread_local! {
+    /// Set while a [`measure_whole_block_height`] dry run is in progress, so
+    /// nested `avoid` blocks skip their own dry run. That is equivalent, not an
+    /// approximation: if the outer block is kept whole then no page break can
+    /// occur inside it anyway, and if it cannot be kept whole the measurement is
+    /// thrown away. Without it the work would double per level of nested
+    /// `avoid` blocks.
+    ///
+    /// Thread-local because layout threads a plain `&RenderOptions` through a
+    /// deep call chain, and each render runs on one thread (the server hands
+    /// every request its own worker).
+    static MEASURING_WHOLE_BLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets [`MEASURING_WHOLE_BLOCK`] for the duration of a dry run and clears it
+/// again on the way out (including on an unwind).
+struct MeasuringGuard;
+
+impl MeasuringGuard {
+    fn enter() -> Self {
+        MEASURING_WHOLE_BLOCK.set(true);
+        Self
+    }
+}
+
+impl Drop for MeasuringGuard {
+    fn drop(&mut self) {
+        MEASURING_WHOLE_BLOCK.set(false);
+    }
+}
+
+/// Dry-run a block into a scratch page — starting at the top of one, with the
+/// margin currently carried into it — to learn the vertical space it needs when
+/// it is *not* split: `Some(height)`, or `None` when the content spilled past a
+/// single page (so it cannot be kept whole). Exact, because it runs the same
+/// layout code as the paint pass; positioned descendants are captured into a
+/// throwaway overlay list, as out-of-flow boxes contribute no height.
+///
+/// Cost: one extra layout of the subtree per `break-inside: avoid` block, in the
+/// same spirit as the float and flex-item measure passes.
+fn measure_whole_block_height(
+    block: &crate::box_tree::BlockBox,
+    x: f32,
+    width: f32,
+    carried_in: f32,
+    options: &RenderOptions,
+) -> Option<f32> {
+    let _guard = MeasuringGuard::enter();
+    let mut scratch = vec![Page::new()];
+    let start = options.page_size.height - options.margin_top;
+    let mut block_y = start;
+    let mut carried = carried_in;
+    let mut floats: Vec<FloatBand> = Vec::new();
+    let mut overlays: Vec<Overlay> = Vec::new();
+    layout_block_box(
+        block,
+        x,
+        width,
+        &mut scratch,
+        &mut block_y,
+        &mut carried,
+        &mut floats,
+        &mut overlays,
+        None,
+        options,
+        None,
+    );
+    // The block's own bottom margin stays *carried* out of the box, so it is not
+    // part of the height that has to fit — margins collapse away at a break.
+    (scratch.len() == 1).then_some(start - block_y)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_box_children(
     children: &[crate::box_tree::BoxChild],
@@ -638,14 +759,16 @@ fn layout_box_children(
 
     let mut pending_indent = text_indent;
     for child in children {
+        // `break-inside: avoid` on an in-flow block: keep it whole by starting it
+        // on a fresh page when the page bottom would otherwise split it. Floats
+        // never split anyway, and out-of-flow boxes don't paginate at all.
+        if let BoxChild::Block(block) = child {
+            if block.break_inside_avoid && block.float_dir.is_none() && !is_out_of_flow(block) {
+                avoid_page_split(block, x, width, pages, y, carried, floats, options);
+            }
+        }
         match child {
-            BoxChild::Block(block)
-                if matches!(
-                    block.position,
-                    Some(crate::html::PositionKind::Absolute)
-                        | Some(crate::html::PositionKind::Fixed)
-                ) =>
-            {
+            BoxChild::Block(block) if is_out_of_flow(block) => {
                 // Out of flow: does not move the cursor and does not take part
                 // in margin collapsing. The static fallback position is the
                 // current cursor (with any pending margin applied visually).
@@ -5423,6 +5546,93 @@ mod tests {
         assert_eq!(clips, pops, "every clip is popped");
     }
 
+    /// Which page a word landed on (`None` = nowhere).
+    fn page_of_word(pages: &[super::Page], word: &str) -> Option<usize> {
+        pages
+            .iter()
+            .position(|page| page.lines.iter().any(|line| line.text == word))
+    }
+
+    #[test]
+    fn break_inside_avoid_moves_a_split_block_to_the_next_page() {
+        // The A4 content box is 746pt tall, so a 600pt spacer leaves ~146pt —
+        // too little for the 200pt card. `break-inside: avoid` starts the card
+        // on page 2 instead of letting the page bottom cut through it.
+        let html = "<style>\
+             .spacer { height: 600pt; background: #eee; }\
+             .card { height: 200pt; background: #ddd; /*AVOID*/ }\
+             </style>\
+             <div class=\"spacer\"></div><div class=\"card\"><p>cardtext</p></div>";
+
+        let avoided = crate::html::parse(&html.replace("/*AVOID*/", "break-inside: avoid;"));
+        let pages = layout_document(&avoided, &RenderOptions::default());
+        assert_eq!(pages.len(), 2, "the card opens a second page");
+        assert_eq!(
+            page_of_word(&pages, "cardtext"),
+            Some(1),
+            "the avoided card prints whole on page 2"
+        );
+
+        // Control: the same document without the property leaves the card where
+        // it falls, straddling the page bottom.
+        let plain = crate::html::parse(html);
+        let pages = layout_document(&plain, &RenderOptions::default());
+        assert_eq!(
+            page_of_word(&pages, "cardtext"),
+            Some(0),
+            "without the property the card stays on page 1"
+        );
+    }
+
+    #[test]
+    fn nested_break_inside_avoid_moves_the_whole_group() {
+        // An avoid card wrapping another avoid card: the outer box is measured
+        // as one unit (the inner one does not probe again — see
+        // `MEASURING_WHOLE_BLOCK`) and the whole group lands on page 2.
+        let document = crate::html::parse(
+            "<style>\
+             .spacer { height: 600pt; background: #eee; }\
+             .outer { break-inside: avoid; background: #ddd; padding: 10pt; }\
+             .inner { break-inside: avoid; height: 150pt; background: #ccc; }\
+             </style>\
+             <div class=\"spacer\"></div>\
+             <div class=\"outer\"><p>outertext</p>\
+               <div class=\"inner\"><p>innertext</p></div></div>",
+        );
+        let pages = layout_document(&document, &RenderOptions::default());
+        assert_eq!(pages.len(), 2);
+        assert_eq!(page_of_word(&pages, "outertext"), Some(1));
+        assert_eq!(page_of_word(&pages, "innertext"), Some(1));
+    }
+
+    #[test]
+    fn break_inside_avoid_starts_an_over_tall_block_on_a_fresh_page() {
+        // A block no page can hold whole still starts a fresh page — the largest
+        // first fragment available — and then breaks inside it, matching Chrome's
+        // `--print-to-pdf`. `avoid` is a hint the fragmenter may ignore when no
+        // break point can satisfy it (css-break-3 §4.3).
+        let mut html = String::from(
+            "<style>.spacer { height: 300pt; background: #eee; }\
+             .tall { break-inside: avoid; }</style>\
+             <div class=\"spacer\"></div><div class=\"tall\"><p>firstword</p>",
+        );
+        for _ in 0..80 {
+            html.push_str("<p>filler filler filler filler filler filler</p>");
+        }
+        html.push_str("<p>lastword</p></div>");
+
+        let pages = layout_document(&crate::html::parse(&html), &RenderOptions::default());
+        assert_eq!(
+            page_of_word(&pages, "firstword"),
+            Some(1),
+            "an over-tall block still opens a fresh page"
+        );
+        assert!(
+            page_of_word(&pages, "lastword").is_some_and(|page| page > 1),
+            "and breaks across pages from there"
+        );
+    }
+
     #[test]
     fn flex_wrap_breaks_items_onto_new_lines() {
         let document = crate::html::parse(
@@ -6278,6 +6488,7 @@ mod tests {
                     padding_percent: Default::default(),
                     margin_percent: Default::default(),
                     overflow_hidden: false,
+                    break_inside_avoid: false,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -6377,6 +6588,7 @@ mod tests {
                     padding_percent: Default::default(),
                     margin_percent: Default::default(),
                     overflow_hidden: false,
+                    break_inside_avoid: false,
                     center: false,
                     line_height: None,
                     rtl: false,
@@ -6474,6 +6686,7 @@ mod tests {
                 padding_percent: Default::default(),
                 margin_percent: Default::default(),
                 overflow_hidden: false,
+                break_inside_avoid: false,
                 center: false,
                 line_height: None,
                 rtl: false,
@@ -6599,6 +6812,7 @@ mod tests {
                         padding_percent: Default::default(),
                         margin_percent: Default::default(),
                         overflow_hidden: false,
+                        break_inside_avoid: false,
                         center: false,
                         line_height,
                         rtl: false,
@@ -6695,6 +6909,7 @@ mod tests {
                     padding_percent: Default::default(),
                     margin_percent: Default::default(),
                     overflow_hidden: false,
+                    break_inside_avoid: false,
                     center: false,
                     line_height: None,
                     rtl: false,

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>break-inside: avoid</title>
+<style>
+  @page { margin: 36pt; }
+  body { font-size: 11pt; }
+  h1 { font-size: 18pt; margin: 0 0 10pt; }
+  h2 { font-size: 12pt; margin: 0 0 6pt; }
+  p { margin: 0 0 6pt; }
+  /* Each card is a keep-together unit: a card that would be cut by the page
+     bottom moves to the next page whole. */
+  .card {
+    break-inside: avoid;
+    border: 1pt solid #99a;
+    background: #f2f4f8;
+    padding: 8pt;
+    margin: 0 0 12pt;
+    height: 220pt;
+  }
+  /* A box so tall that keeping it whole costs most of a page. */
+  .chart {
+    break-inside: avoid;
+    border: 1pt solid #a99;
+    background: #f8f2f2;
+    padding: 8pt;
+    margin: 0 0 12pt;
+    height: 520pt;
+  }
+  /* Taller than a whole page: no placement can keep it together, so it still
+     starts a fresh page (the largest first fragment) and then breaks inside. */
+  .toolong { break-inside: avoid; border: 1pt solid #9a9; padding: 8pt; }
+</style>
+</head>
+<body>
+  <h1>Keep-together figures</h1>
+  <p>Intro paragraph: every bordered figure below carries break-inside: avoid,
+     so no figure is ever cut in half by a page boundary. A figure that does not
+     fit the space left on the page starts on the next one instead.</p>
+  <p>Second intro paragraph, so the first figure starts below the top of the
+     page and the third one runs into the page bottom.</p>
+
+  <div class="card">
+    <h2>Figure One</h2>
+    <p>Figure One body: 220pt tall, and it fits on page 1 with room to spare.</p>
+  </div>
+  <div class="card">
+    <h2>Figure Two</h2>
+    <p>Figure Two body: also 220pt tall, and it also fits on page 1.</p>
+  </div>
+  <div class="card">
+    <h2>Figure Three</h2>
+    <p>Figure Three body: the page bottom would cut this figure in half, so it
+       starts on page 2 instead and prints whole.</p>
+  </div>
+  <div class="chart">
+    <h2>Chart Four</h2>
+    <p>Chart Four body: a 520pt chart placeholder — too tall for the space left
+       under Figure Three, so it moves to a page of its own rather than being
+       split down the middle.</p>
+  </div>
+
+  <div class="toolong">
+    <h2>Too Long</h2>
+    <p>Too Long body line 01: taller than one page, so this block cannot be kept together.</p>
+    <p>Too Long body line 02: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 03: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 04: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 05: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 06: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 07: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 08: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 09: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 10: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 11: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 12: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 13: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 14: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 15: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 16: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 17: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 18: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 19: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 20: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 21: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 22: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 23: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 24: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 25: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 26: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 27: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 28: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 29: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 30: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 31: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 32: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 33: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 34: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 35: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 36: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 37: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 38: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 39: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 40: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 41: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 42: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 43: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 44: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 45: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 46: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 47: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 48: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 49: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 50: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 51: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 52: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 53: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 54: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 55: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 56: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 57: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 58: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 59: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body line 60: filler filler filler filler filler filler filler filler.</p>
+    <p>Too Long body last line: it started a fresh page and broke anyway.</p>
+  </div>
+</body>
+</html>
