@@ -95,7 +95,9 @@ rasterized and pixel-diffed.
 Structure lines up closely. On the realistic **invoice** the two are near
 identical (headings, the table, blue header, column widths, `Total due`, footer);
 the residual diff is mostly the default font — with no `font-family` set,
-htmltopdf falls back to sans-serif while Chromium's UA default is serif. Text
+htmltopdf falls back to sans-serif while Chromium's UA default is serif
+(layout otherwise follows Chrome's UA defaults: 16px base, `body` margin,
+`1em` paragraph margins, quirks mode for DOCTYPE-less input). Text
 stays real and selectable in both (extracted word counts match). The two visible
 gaps are honest, known limitations of a from-scratch engine: htmltopdf does not
 yet **stretch** flex/grid item backgrounds to fill their cell

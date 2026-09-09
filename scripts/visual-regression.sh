@@ -35,7 +35,12 @@ while [ $# -gt 0 ]; do
         --check) CHECK=1 ;;
         --update-baseline) UPDATE_BASELINE=1 ;;
         --montage) MONTAGE="${2:-8}"; shift ;;
-        --matched-font) MATCHED_FONT="${2:-Arial}"; [ "${2:-}" = "" ] || shift ;;
+        # An optional font name follows; another flag (or nothing) means Arial.
+        --matched-font)
+            case "${2:-}" in
+                ""|--*) MATCHED_FONT="Arial" ;;
+                *) MATCHED_FONT="$2"; shift ;;
+            esac ;;
         *) echo "unknown arg: $1"; exit 2 ;;
     esac
     shift
