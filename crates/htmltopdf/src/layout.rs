@@ -5824,6 +5824,12 @@ fn truncate_to_width(
     format!("{prefix}{ellipsis}")
 }
 
+/// UA-default font size per block kind, in points. The base is the browser
+/// default of 16px = 12pt; the heading sizes are its 2em/1.5em/1.17em/1em/
+/// 0.83em/0.67em, so they were already 12pt-relative. (11pt here made every
+/// font-less document's text ~8% smaller than Chrome's and paginate
+/// differently.) The table-row kinds are unused on this path — cells size
+/// through `cell_font_size` — and keep their historic value.
 pub(crate) fn font_size_for(kind: BlockKind) -> f32 {
     match kind {
         BlockKind::Heading1 => 24.0,
@@ -5832,36 +5838,12 @@ pub(crate) fn font_size_for(kind: BlockKind) -> f32 {
         BlockKind::Heading4 => 12.0,
         BlockKind::Heading5 => 10.5,
         BlockKind::Heading6 => 9.0,
-        BlockKind::Paragraph
-        | BlockKind::TableHeaderRow
-        | BlockKind::TableRow
-        | BlockKind::TableFooterRow => 11.0,
+        BlockKind::Paragraph => 12.0,
+        BlockKind::TableHeaderRow | BlockKind::TableRow | BlockKind::TableFooterRow => 11.0,
     }
 }
 
-pub(crate) fn spacing_before(kind: BlockKind) -> f32 {
-    match kind {
-        BlockKind::Heading1 => 0.0,
-        BlockKind::Heading2 => 10.0,
-        BlockKind::Heading3 | BlockKind::Heading4 | BlockKind::Heading5 | BlockKind::Heading6 => 8.0,
-        BlockKind::Paragraph
-        | BlockKind::TableHeaderRow
-        | BlockKind::TableRow
-        | BlockKind::TableFooterRow => 6.0,
-    }
-}
 
-pub(crate) fn spacing_after(kind: BlockKind) -> f32 {
-    match kind {
-        BlockKind::Heading1 => 12.0,
-        BlockKind::Heading2 => 8.0,
-        BlockKind::Heading3 | BlockKind::Heading4 | BlockKind::Heading5 | BlockKind::Heading6 => 6.0,
-        BlockKind::Paragraph
-        | BlockKind::TableHeaderRow
-        | BlockKind::TableRow
-        | BlockKind::TableFooterRow => 4.0,
-    }
-}
 
 #[cfg(test)]
 mod tests {

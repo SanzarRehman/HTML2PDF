@@ -1683,30 +1683,30 @@ fn build_block(
     // margin: 0.67em 0 }` …), so they get real breathing room above and below
     // instead of the old absolute paragraph spacing (h1 had zero top margin).
     // Other blocks keep the absolute per-kind spacing.
+    // Non-heading blocks take the UA `margin: 1em 0` of `p`/lists/`pre`/…, or
+    // nothing at all for generic containers — both scaled by the block's own
+    // font size, as in a browser. (The old absolute 6pt/4pt on *every*
+    // non-heading block put `<p>` spacing on `<div>`s and `<li>`s too.)
     let heading_margin = heading_margin_em(kind).map(|em| font_size * em);
+    let ua_vertical = font_size * ua_block_margin_em(tag);
+    let default_vertical = if no_default_margin {
+        0.0
+    } else {
+        heading_margin.unwrap_or(ua_vertical)
+    };
     // The UA `body { margin: 8px }` every browser applies, on all four sides.
     // Authored CSS (including `body { margin: 0 }`) overrides it per side.
     let body_margin = (tag == "body").then_some(BODY_UA_MARGIN);
     let margin = crate::box_tree::Edges {
-        top: own.margin_top.unwrap_or_else(|| {
-            body_margin.unwrap_or_else(|| {
-                if no_default_margin {
-                    0.0
-                } else {
-                    heading_margin.unwrap_or_else(|| crate::layout::spacing_before(kind))
-                }
-            })
-        }),
+        top: own
+            .margin_top
+            .or(body_margin)
+            .unwrap_or(default_vertical),
         right: own.margin_right.or(body_margin).unwrap_or(0.0),
-        bottom: own.margin_bottom.unwrap_or_else(|| {
-            body_margin.unwrap_or_else(|| {
-                if no_default_margin {
-                    0.0
-                } else {
-                    heading_margin.unwrap_or_else(|| crate::layout::spacing_after(kind))
-                }
-            })
-        }),
+        bottom: own
+            .margin_bottom
+            .or(body_margin)
+            .unwrap_or(default_vertical),
         left: own.margin_left.or(body_margin).unwrap_or(0.0) + nesting_indent,
     };
     // Border widths consume layout space like padding (content sits inside
@@ -2132,6 +2132,17 @@ fn heading_margin_em(kind: BlockKind) -> Option<f32> {
     })
 }
 
+/// UA-default vertical margin of a non-heading block as a multiple of its own
+/// font size: Chrome's `p, blockquote, pre, ul, ol, dl, figure { margin: 1em 0 }`.
+/// Generic containers (`div`, `section`, `li`, `dt`, `dd`, …) carry none —
+/// which is what makes a `<div>` wrapper layout-neutral in a browser.
+fn ua_block_margin_em(tag: &str) -> f32 {
+    match tag {
+        "p" | "blockquote" | "pre" | "ul" | "ol" | "dl" | "figure" => 1.0,
+        _ => 0.0,
+    }
+}
+
 /// UA-default heading font-size as a multiple of the *parent's* font-size
 /// (browser `h1 { font-size: 2em }` … `h6 { 0.67em }`). `None` for non-headings.
 fn heading_em_factor(kind: BlockKind) -> Option<f32> {
@@ -2179,13 +2190,13 @@ fn block_kind_for(tag: &str) -> BlockKind {
     }
 }
 
-/// Block-level tags that open their own box. Everything else is treated as
-/// inline (its text joins the enclosing line box).
 /// The UA stylesheet's `body { margin: 8px }`, in points (8 CSS px at 96dpi).
 /// Browsers apply it to every document; without it our content sat 6pt left of
 /// and above Chrome's on every fixture.
 pub(crate) const BODY_UA_MARGIN: f32 = 8.0 * 0.75;
 
+/// Block-level tags that open their own box. Everything else is treated as
+/// inline (its text joins the enclosing line box).
 fn is_block_tag(tag: &str) -> bool {
     matches!(
         tag,
