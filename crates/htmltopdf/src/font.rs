@@ -547,13 +547,28 @@ impl TrueTypeFont {
             return run;
         }
 
-        // Bidi path (UAX #9): resolve embedding levels against an LTR base —
-        // HTML's default paragraph direction; `dir`/`direction: rtl` is not
-        // supported yet — then shape each visual run with its own explicit
-        // direction and concatenate in visual order. Forcing the direction per
-        // run matters twice over: joining forms must be computed on logical
-        // text, and a whole-buffer direction guess mis-shapes mixed strings.
-        let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
+        // Bidi path (UAX #9): resolve embedding levels, then shape each visual
+        // run with its own explicit direction and concatenate in visual order.
+        // Forcing the direction per run matters twice over: joining forms must
+        // be computed on logical text, and a whole-buffer direction guess
+        // mis-shapes mixed strings.
+        //
+        // The base direction decides where a *neutral* at the edge of the text
+        // goes — the comma in "עולם," or the period ending an RTL sentence.
+        // Against an LTR base it resolves L and is shaped as its own run,
+        // painted to the right of the word: "‎,עולם". The text shaped here is
+        // one line piece (a word, or a same-style stretch of one), and the
+        // line-level reorder in layout already places pieces with the
+        // paragraph's real base; so a piece whose strong characters are all
+        // RTL is in an RTL context, and gets an RTL base so its punctuation
+        // stays with its word. A piece with any LTR strong character keeps the
+        // LTR base (a lone "World." inside RTL text is an LTR island).
+        let base = if strong_chars_are_all_rtl(text) {
+            unicode_bidi::Level::rtl()
+        } else {
+            unicode_bidi::Level::ltr()
+        };
+        let bidi = unicode_bidi::BidiInfo::new(text, Some(base));
         let paragraph = &bidi.paragraphs[0];
         let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
         let mut run_out = ShapedRun {
@@ -1196,6 +1211,23 @@ fn is_emoji(c: char) -> bool {
     )
 }
 
+/// Whether every strong-directional character in `text` is right-to-left
+/// (and there is at least one). Neutrals — punctuation, spaces — count
+/// neither way. See `shape_uncached`, and the PDF writer's fallback-segment
+/// emission, which paints an RTL piece's per-face segments in visual order.
+pub(crate) fn strong_chars_are_all_rtl(text: &str) -> bool {
+    use unicode_bidi::BidiClass::{AL, L, R};
+    let mut saw_rtl = false;
+    for ch in text.chars() {
+        match unicode_bidi::bidi_class(ch) {
+            L => return false,
+            R | AL => saw_rtl = true,
+            _ => {}
+        }
+    }
+    saw_rtl
+}
+
 /// Whether `text` contains any character from a right-to-left script (Hebrew,
 /// Arabic and its extensions, Syriac, Thaana, NKo, plus the RTL presentation
 /// forms and supplementary-plane RTL blocks). A cheap pre-filter so purely-LTR
@@ -1769,6 +1801,32 @@ mod tests {
             })
             .sum();
         assert!((whole - sum).abs() < 0.01, "whole {whole} vs sum {sum}");
+    }
+
+    #[test]
+    fn trailing_punctuation_stays_with_its_rtl_word() {
+        // "עולם," shaped as one piece: in visual (left-to-right) glyph order the
+        // comma must come *first* — it ends the word, and RTL text runs
+        // right-to-left, so "after the word" is its left side. Needs a face
+        // that covers Hebrew; skipped on a machine without one.
+        let primary = std::sync::Arc::new(Font::helvetica());
+        let resolved = super::resolve_spec(
+            &primary,
+            &super::FontSpec { family: Some("Arial".into()), bold: false, italic: false },
+        );
+        let Some(face) = resolved.font.embedding() else {
+            return;
+        };
+        let run = face.shape("\u{5e2}\u{5d5}\u{5dc}\u{5dd},");
+        let clusters: Vec<&str> = run.glyphs.iter().map(|g| g.chars.as_str()).filter(|c| !c.is_empty()).collect();
+        if clusters.is_empty() {
+            return; // no shaping face
+        }
+        assert_eq!(clusters[0], ",", "visual-first glyph must be the comma: {clusters:?}");
+        // A lone LTR word keeps its period on the right.
+        let run = face.shape("World.");
+        let clusters: Vec<&str> = run.glyphs.iter().map(|g| g.chars.as_str()).filter(|c| !c.is_empty()).collect();
+        assert_eq!(clusters.last().copied(), Some("."));
     }
 
     #[test]

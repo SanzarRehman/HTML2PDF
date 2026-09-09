@@ -836,8 +836,17 @@ fn page_content(page: &Page, options: &RenderOptions, font_plans: &[FontPlan]) -
                         content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
                         push_text_segment(&mut content, plan, &text.text);
                     }
-                    Some(segments) => {
+                    Some(mut segments) => {
                         content.push_str(&format!("{:.2} {:.2} Td\n", text.x, text.y));
+                        // Segments come back in logical order; the pen only
+                        // moves left to right. For an RTL piece the segment
+                        // that ends the word ("," after "עולם") must be painted
+                        // *first*, at the left — so the segments are emitted in
+                        // visual order, and each one then shapes its own
+                        // characters in the right direction.
+                        if crate::font::strong_chars_are_all_rtl(&text.text) {
+                            segments.reverse();
+                        }
                         let chain = base.fallback_chain();
                         let mut current = usize::MAX;
                         for (chain_index, segment) in segments {
