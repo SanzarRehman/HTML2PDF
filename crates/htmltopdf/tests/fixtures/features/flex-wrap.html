@@ -1,4 +1,7 @@
 <html><head><style>
+  /* Chrome's default print margin, so both engines lay out on the
+     same content box (see scripts/visual-regression.sh). */
+  @page { margin: 28.8pt; }
   .cards { display: flex; flex-wrap: wrap; gap: 10pt; }
   .card { flex-basis: 150pt; background: #e8eef7; padding: 8pt; }
   .grid { display: grid; grid-template-columns: 100pt minmax(120pt, 1fr) 2fr; gap: 8pt; }

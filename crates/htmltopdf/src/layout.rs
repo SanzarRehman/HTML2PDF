@@ -7697,7 +7697,9 @@ mod tests {
         let lines = &pages[0].lines;
         assert_eq!(lines.len(), 2);
 
-        let leading = 10.0 * 1.35;
+        // Derived from the face, not hard-coded: this test is about margin
+        // collapsing, not about the base-14 `line-height: normal` box.
+        let leading = 10.0 * crate::font::Font::helvetica().line_content_fraction();
         let gap = lines[0].y - lines[1].y;
         // Collapsed: gap = leading + max(20, 20) = leading + 20, NOT leading + 40.
         assert!(
@@ -7804,15 +7806,26 @@ mod tests {
         let doubled = render(Some(LineHeight::Number(2.0)));
         let fixed = render(Some(LineHeight::Length(30.0)));
 
+        // `normal` is the face's own content box; the other two are what CSS
+        // says regardless of the face.
+        let normal = 10.0 * crate::font::Font::helvetica().line_content_fraction();
         let gap = |pages: &[super::Page]| pages[0].lines[0].y - pages[0].lines[1].y;
-        assert!((gap(&default) - 13.5).abs() < 0.01, "default = 10 × 1.35");
+        assert!(
+            (gap(&default) - normal).abs() < 0.01,
+            "default = 10 × the face's normal line box ({normal}), got {}",
+            gap(&default)
+        );
         assert!((gap(&doubled) - 20.0).abs() < 0.01, "number scales the font");
         assert!((gap(&fixed) - 30.0).abs() < 0.01, "length is absolute");
 
         // Extra leading is split around the glyphs: with line-height 2.0 the
-        // first baseline sits (20 − 13.5)/2 = 3.25pt lower than by default.
+        // first baseline sits (20 − normal)/2 lower than by default.
         let shift = default[0].lines[0].y - doubled[0].lines[0].y;
-        assert!((shift - 3.25).abs() < 0.01, "half-leading shift, got {shift}");
+        let expected = (20.0 - normal) / 2.0;
+        assert!(
+            (shift - expected).abs() < 0.01,
+            "half-leading shift: expected {expected}, got {shift}"
+        );
     }
 
     #[test]

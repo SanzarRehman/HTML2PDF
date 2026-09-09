@@ -255,16 +255,19 @@ impl Font {
     /// The natural line box (`line-height: normal`) as a fraction of the em —
     /// the tallest run's ascent + descent. Browsers place glyphs on this box and
     /// split any explicit `line-height` leading around it. An embedded face uses
-    /// its real metrics (Arial ≈ 1.12 em, close to Chrome's ~1.15); base-14
-    /// Helvetica keeps the historic 1.35-em box so font-less documents (and the
-    /// table path) are unchanged. (The `hhea` line gap is deliberately excluded —
-    /// including it overshoots Chrome's used `normal` for the tested faces.)
+    /// its real metrics (Arial ≈ 1.12 em, close to Chrome's ~1.15). (The `hhea`
+    /// line gap is deliberately excluded — including it overshoots Chrome's used
+    /// `normal` for the tested faces.)
     pub fn line_content_fraction(&self) -> f32 {
         match &self.kind {
-            // Matches layout's Helvetica leading, so a font-less flow line is
-            // unchanged (byte-identical); a real-metric box was measured worse
-            // against Chrome's Times fallback (see line_ascent_fraction).
-            FontKind::Helvetica => 1.35,
+            // Base-14 Helvetica: the hhea box of the face a viewer actually
+            // substitutes for it (URW Nimbus Sans — ascender 936, descender
+            // -220 per 1000). This replaced a flat 1.35 em, which made every
+            // font-less document's lines ~17% taller than a browser's and
+            // paginated them differently: on the fixed-per-page fixture it cost
+            // a whole extra page (3 vs Chrome's 2), and per-paragraph pitch was
+            // 20.85pt against Chrome's 18.75pt. It is now 18.72pt.
+            FontKind::Helvetica => 1.156,
             // descent is stored negative, so `ascent - descent` = ascent + |descent|.
             FontKind::TrueType(font) => {
                 ((font.ascent - font.descent) as f32 / 1000.0).clamp(1.0, 2.0)
