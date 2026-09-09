@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      /* Barcodes, QR codes and logos in real documents live in table cells.
+         Every one of these images must be painted, and the column must be
+         wide enough for it (an image never wraps or shrinks). */
+      @page {
+        size: 8.5in 11in;
+        margin: 0.5in;
+      }
+      body {
+        font-size: 11pt;
+        margin: 0;
+      }
+      table {
+        border-collapse: collapse;
+      }
+      td,
+      th {
+        border: 1px solid #999;
+        padding: 4pt;
+      }
+      img.logo {
+        width: 48px;
+        height: 48px;
+      }
+      img.small {
+        width: 16px;
+        height: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Images in table cells</h2>
+    <table>
+      <tr>
+        <th>Label</th>
+        <th>Mark</th>
+      </tr>
+      <tr>
+        <td>alone</td>
+        <td><img class="logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /></td>
+      </tr>
+      <tr>
+        <td>after text</td>
+        <td>tag <img class="small" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /></td>
+      </tr>
+      <tr>
+        <td>with markup</td>
+        <td><b>bold</b> <img class="small" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /></td>
+      </tr>
+      <tr>
+        <td>nested</td>
+        <td><div><img class="small" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /></div></td>
+      </tr>
+      <tr>
+        <td>two marks</td>
+        <td><img class="small" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /><img class="small" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /></td>
+      </tr>
+    </table>
+  </body>
+</html>

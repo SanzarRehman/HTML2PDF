@@ -1,0 +1,18 @@
+{
+  "fixture": "table-images",
+  "layer": "features",
+  "description": "Inline <img> inside table cells: alone, after text, beside inline markup, nested in a div, and two in one cell. All are painted and the column is sized to fit them.",
+  "pdf_assertions": {
+    "must_contain_operators": ["/Subtype /Image", "BT", "Tj"],
+    "must_contain_text": ["(alone)", "(nested)", "/Im0 Do", "/Im1 Do", "/Im2 Do", "/Im3 Do", "/Im4 Do", "/Im5 Do"],
+    "page_box": [612, 792],
+    "min_pages": 1,
+    "max_pages": 1,
+    "min_size_bytes": 800
+  },
+  "visual_assertions": [
+    "Every row's second cell shows its image; none is missing.",
+    "The 48x48 logo sits inside its cell without overflowing the row or the column.",
+    "The two-mark row shows both small images side by side."
+  ]
+}

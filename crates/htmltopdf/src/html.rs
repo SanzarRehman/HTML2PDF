@@ -1131,12 +1131,32 @@ pub fn resolve_images(
     base_dir: Option<&std::path::Path>,
     remote: &crate::image::RemoteImagePolicy,
 ) {
-    let Some(flow) = document.flow.as_mut() else {
-        return;
-    };
     let mut images = std::mem::take(&mut document.images);
-    resolve_images_in(&mut flow.children, base_dir, remote, &mut images);
+    if let Some(flow) = document.flow.as_mut() {
+        resolve_images_in(&mut flow.children, base_dir, remote, &mut images);
+    }
+    // The spreadsheet/table path keeps its rows on `blocks`, outside the flow
+    // tree; its cells carry images too.
+    for block in &mut document.blocks {
+        resolve_cell_images(&mut block.cells, base_dir, remote, &mut images);
+    }
     document.images = images;
+}
+
+/// Resolve the inline `<img>` runs of a set of table cells.
+fn resolve_cell_images(
+    cells: &mut [TableCell],
+    base_dir: Option<&std::path::Path>,
+    remote: &crate::image::RemoteImagePolicy,
+    images: &mut Vec<crate::image::DecodedImage>,
+) {
+    for cell in cells {
+        for run in &mut cell.runs {
+            if let Some(image) = run.image.as_deref_mut() {
+                resolve_image_box(image, base_dir, remote, images);
+            }
+        }
+    }
 }
 
 fn resolve_images_in(
@@ -1161,8 +1181,11 @@ fn resolve_images_in(
                     }
                 }
             }
-            // Table cells carry no `<img>` content in the current model.
-            BoxChild::Table(_) => {}
+            BoxChild::Table(table) => {
+                for row in &mut table.rows {
+                    resolve_cell_images(&mut row.cells, base_dir, remote, images);
+                }
+            }
         }
     }
 }
@@ -1498,41 +1521,21 @@ fn build_node(
                 // shares its line with text flows *inline* (on the baseline);
                 // a standalone or floated one takes the block image path
                 // (page-fitting, pagination as a unit).
-                if let Some(src) = node.attr("src") {
-                    if !src.is_empty() {
-                        let own = &computed.style[id];
-                        let image = crate::box_tree::ImageBox {
-                            src: src.to_string(),
-                            attr_width: node
-                                .attr("width")
-                                .and_then(|v| v.trim().parse::<f32>().ok()),
-                            attr_height: node
-                                .attr("height")
-                                .and_then(|v| v.trim().parse::<f32>().ok()),
-                            css_width: own.width,
-                            css_width_percent: own.width_percent,
-                            css_height: own.height,
-                            max_width: own.max_width,
-                            max_width_percent: own.max_width_percent,
-                            image_index: None,
-                            width: 0.0,
-                            height: 0.0,
-                            float_dir: own.float_dir,
-                        };
-                        let pending_text = acc
-                            .pending
-                            .iter()
-                            .any(|run| run.image.is_some() || !run.text.trim().is_empty());
-                        let inline = own.float_dir.is_none()
-                            && (own.display_inline_block
-                                || pending_text
-                                || followed_by_inline_text(dom, id));
-                        if inline {
-                            acc.push_image(image, &ctx);
-                        } else {
-                            acc.flush_line();
-                            acc.children.push(crate::box_tree::BoxChild::Image(image));
-                        }
+                if let Some(image) = image_box_for(dom, id, &computed.style[id]) {
+                    let own = &computed.style[id];
+                    let pending_text = acc
+                        .pending
+                        .iter()
+                        .any(|run| run.image.is_some() || !run.text.trim().is_empty());
+                    let inline = own.float_dir.is_none()
+                        && (own.display_inline_block
+                            || pending_text
+                            || followed_by_inline_text(dom, id));
+                    if inline {
+                        acc.push_image(image, &ctx);
+                    } else {
+                        acc.flush_line();
+                        acc.children.push(crate::box_tree::BoxChild::Image(image));
                     }
                 }
             } else if is_block_tag(tag) {
@@ -2829,7 +2832,9 @@ fn cells_from_row(
 fn cell_has_markup(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
     dom.node(id).children.iter().any(|&child| match &dom.node(child).data {
         crate::dom::NodeData::Element { name, .. } => {
-            !matches!(name.as_str(), "script" | "style" | "head" | "title" | "br" | "img")
+            // An `<img>` is content in its own right: it needs the rich path
+            // (styled runs), since the flat-text path cannot carry an image.
+            !matches!(name.as_str(), "script" | "style" | "head" | "title" | "br")
                 || cell_has_markup(dom, child)
         }
         _ => false,
@@ -2839,8 +2844,8 @@ fn cell_has_markup(dom: &crate::dom::Dom, id: crate::dom::NodeId) -> bool {
 /// Build a rich cell's styled inline runs: descend the cell's subtree folding
 /// each element's computed style into the context (exactly like flow inline
 /// content — bold/italic/color/size/family, `<a href>` link + UA styling),
-/// flattening block-level descendants inline. `<img>` and `<br>` are skipped,
-/// matching the flat-text collector.
+/// flattening block-level descendants inline. `<img>` becomes an inline image
+/// run; `<br>` is skipped, matching the flat-text collector.
 fn collect_cell_runs(
     dom: &crate::dom::Dom,
     cell_id: crate::dom::NodeId,
@@ -2899,13 +2904,21 @@ fn collect_cell_runs_into(
             NodeData::Text(text) => acc.push_text(text, &ctx),
             NodeData::Element { name, .. } => {
                 let tag = name.as_str();
-                if matches!(tag, "script" | "style" | "head" | "title" | "img")
+                if matches!(tag, "script" | "style" | "head" | "title")
                     || env.computed.hidden[child]
                 {
                     continue;
                 }
                 if tag == "br" {
                     continue; // parity with the flat-text collector
+                }
+                if tag == "img" {
+                    // Cell images always flow inline on the cell's line: a cell
+                    // has no block formatting context of its own here.
+                    if let Some(image) = image_box_for(dom, child, &env.computed.style[child]) {
+                        acc.push_image(image, &ctx);
+                    }
+                    continue;
                 }
                 let child_ctx = inline_ctx(&ctx, env, dom, child, tag);
                 collect_cell_runs_into(dom, child, env, child_ctx, acc);
@@ -2917,6 +2930,33 @@ fn collect_cell_runs_into(
 
 /// Concatenate all descendant text of a node. html5ever has already decoded
 /// entities, so no further decoding is required.
+/// Build the unresolved [`ImageBox`](crate::box_tree::ImageBox) for an `<img>`
+/// element: its `src`, the presentational `width`/`height` attributes, and the
+/// cascaded CSS sizing. `None` when the element has no usable `src`.
+/// `resolve_images` later decodes it and fills in the laid-out size.
+fn image_box_for(
+    dom: &crate::dom::Dom,
+    id: crate::dom::NodeId,
+    own: &CellStyle,
+) -> Option<crate::box_tree::ImageBox> {
+    let node = dom.node(id);
+    let src = node.attr("src").filter(|src| !src.is_empty())?;
+    Some(crate::box_tree::ImageBox {
+        src: src.to_string(),
+        attr_width: node.attr("width").and_then(|v| v.trim().parse::<f32>().ok()),
+        attr_height: node.attr("height").and_then(|v| v.trim().parse::<f32>().ok()),
+        css_width: own.width,
+        css_width_percent: own.width_percent,
+        css_height: own.height,
+        max_width: own.max_width,
+        max_width_percent: own.max_width_percent,
+        image_index: None,
+        width: 0.0,
+        height: 0.0,
+        float_dir: own.float_dir,
+    })
+}
+
 fn collect_text(dom: &crate::dom::Dom, id: crate::dom::NodeId, out: &mut String) {
     match &dom.node(id).data {
         crate::dom::NodeData::Text(text) => out.push_str(text),

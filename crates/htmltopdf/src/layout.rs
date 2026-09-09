@@ -1352,15 +1352,16 @@ fn layout_flex_box(
     use crate::html::FlexDirection;
 
     // Flex items: block children are items; contiguous inline content (a `Line`)
-    // becomes an anonymous item. Images/tables inside a flex row are still
-    // skipped (rare; documented).
+    // becomes an anonymous item; a block-level `<img>` is an item in its own
+    // right. Tables inside a flex row are still skipped (rare; documented).
     let mut items: Vec<FlexItem> = block
         .children
         .iter()
         .filter_map(|child| match child {
             BoxChild::Block(b) => Some(FlexItem::Block(b)),
             BoxChild::Line(runs) => Some(FlexItem::Line(runs)),
-            _ => None,
+            BoxChild::Image(image) => Some(FlexItem::Image(image)),
+            BoxChild::Table(_) => None,
         })
         .collect();
     if items.is_empty() {
@@ -1582,13 +1583,17 @@ fn layout_flex_line(
 enum FlexItem<'a> {
     Block(&'a crate::box_tree::BlockBox),
     Line(&'a [crate::box_tree::InlineRun]),
+    /// A block-level `<img>` child of the container. Images are replaced
+    /// elements: they neither grow nor stretch, and their base size is the
+    /// resolved image width.
+    Image(&'a crate::box_tree::ImageBox),
 }
 
 impl FlexItem<'_> {
     fn grow(&self) -> f32 {
         match self {
             FlexItem::Block(b) => b.flex_grow,
-            FlexItem::Line(_) => 0.0,
+            FlexItem::Line(_) | FlexItem::Image(_) => 0.0,
         }
     }
 
@@ -1596,7 +1601,7 @@ impl FlexItem<'_> {
     fn shrink(&self) -> f32 {
         match self {
             FlexItem::Block(b) => b.flex_shrink,
-            FlexItem::Line(_) => 1.0,
+            FlexItem::Line(_) | FlexItem::Image(_) => 1.0,
         }
     }
 
@@ -1604,7 +1609,7 @@ impl FlexItem<'_> {
     fn order(&self) -> i32 {
         match self {
             FlexItem::Block(b) => b.order,
-            FlexItem::Line(_) => 0,
+            FlexItem::Line(_) | FlexItem::Image(_) => 0,
         }
     }
 
@@ -1612,7 +1617,7 @@ impl FlexItem<'_> {
     fn align_self(&self) -> Option<crate::html::AlignItems> {
         match self {
             FlexItem::Block(b) => b.align_self,
-            FlexItem::Line(_) => None,
+            FlexItem::Line(_) | FlexItem::Image(_) => None,
         }
     }
 
@@ -1647,6 +1652,7 @@ impl FlexItem<'_> {
                     }
                 })
                 .sum(),
+            FlexItem::Image(image) => image.width,
         }
     }
 
@@ -1676,6 +1682,8 @@ impl FlexItem<'_> {
             FlexItem::Line(runs) => {
                 layout_line_box(runs, x, width, TextAlign::Left, None, false, 0.0, pages, y, &mut floats, options)
             }
+            // A replaced element: painted at its resolved size, not stretched.
+            FlexItem::Image(image) => layout_image_box(image, x, width, pages, y, options),
         }
     }
 
@@ -4401,6 +4409,28 @@ fn render_one_cell(
         let mut px = start_x;
         for piece in pieces {
             let piece_width = piece.advance(options);
+            // An inline image in a cell paints with its bottom on the line's
+            // baseline, exactly as it does in flow content.
+            if let Some((image_index, image_w, image_h)) = piece.image {
+                page.commands.push(PaintCommand::Image(ImageCommand {
+                    image_index,
+                    x: px,
+                    y: text_y,
+                    width: image_w,
+                    height: image_h,
+                }));
+                if piece.link != 0 && image_w > 0.0 {
+                    page.link_areas.push(LinkArea {
+                        x: px,
+                        y: text_y,
+                        width: image_w,
+                        height: image_h,
+                        link: piece.link,
+                    });
+                }
+                px += image_w;
+                continue;
+            }
             if !piece.text.is_empty() {
                 page.push_colored_line(
                     Line {
@@ -4801,10 +4831,27 @@ fn plan_cell_at<'a>(
         (Vec::new(), piece_lines, leading)
     };
     let line_count = lines.len().max(piece_lines.len()).max(1);
+    // Content height: normally `lines x leading`, but a line carrying an inline
+    // image is as tall as that image (it sits on the baseline, so it needs its
+    // full height above it). Without this the image overflows the row it
+    // landed in.
+    let content_height: f32 = if piece_lines.is_empty() {
+        line_count as f32 * leading
+    } else {
+        piece_lines
+            .iter()
+            .map(|pieces| {
+                pieces
+                    .iter()
+                    .filter_map(|piece| piece.image.map(|(_, _, height)| height))
+                    .fold(leading, f32::max)
+            })
+            .sum()
+    };
     // A CSS-declared row height is a floor, but it shrinks with the table's
     // shrink-to-fit scale (as a browser's print scaling does) so rows don't
     // stay tall while the text is scaled down.
-    let height = ((line_count as f32 * leading) + padding_top + padding_bottom)
+    let height = (content_height + padding_top + padding_bottom)
         .max(base_row_height * table_geometry.paint_scale);
     let clip_content = cell.style.overflow.unwrap_or(Overflow::Hidden) == Overflow::Hidden;
 
@@ -5120,9 +5167,15 @@ fn table_geometry_cells(
             let end = (col + span).min(column_count);
             let font_size = cell_font_size(cell);
             let padding = cell_padding_x(cell);
-            let max_w = estimate_text_width(&cell.text, font_size, font) + padding;
+            // Inline images in the cell are unbreakable, unshrinkable content:
+            // they widen both the min- and the max-content contribution, or the
+            // column is sized to the text alone and the image overflows it.
+            let images = cell_image_width(cell);
+            let widest_image = cell_widest_image(cell);
+            let max_w = estimate_text_width(&cell.text, font_size, font) + images + padding;
             let min_w =
                 min_content_width(&cell.text, font_size, font, should_break_long_tokens(cell))
+                    .max(widest_image)
                     + padding;
             if end - col == 1 {
                 max_content[col] = max_content[col].max(max_w);
@@ -5235,6 +5288,28 @@ fn table_geometry_cells(
             paint_scale: scale,
         }
     }
+}
+
+/// The total width of a cell's inline images — their max-content contribution,
+/// since images never wrap or shrink.
+fn cell_image_width(cell: &TableCell) -> f32 {
+    cell.runs
+        .iter()
+        .filter_map(|run| run.image.as_deref())
+        .filter(|image| image.image_index.is_some())
+        .map(|image| image.width)
+        .sum()
+}
+
+/// The widest single inline image in a cell — its min-content contribution: a
+/// column can wrap between images but never inside one.
+fn cell_widest_image(cell: &TableCell) -> f32 {
+    cell.runs
+        .iter()
+        .filter_map(|run| run.image.as_deref())
+        .filter(|image| image.image_index.is_some())
+        .map(|image| image.width)
+        .fold(0.0, f32::max)
 }
 
 fn cell_width(columns: &[f32], start: usize, colspan: usize) -> f32 {
@@ -5606,6 +5681,93 @@ mod tests {
                 "{position}"
             );
         }
+    }
+
+    /// A tiny valid PNG data URI, shared by the image tests.
+    const TEST_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=";
+
+    /// Count the `Do`-equivalent image paint commands across every page.
+    fn painted_images(html: &str) -> usize {
+        let mut document = crate::html::parse(html);
+        crate::html::resolve_images(&mut document, None, &Default::default());
+        let options = RenderOptions::default()
+            .with_paper(super::Paper::Letter)
+            .with_document_hints(&document);
+        layout_document(&document, &options)
+            .iter()
+            .map(|page| {
+                page.commands
+                    .iter()
+                    .filter(|command| matches!(command, PaintCommand::Image(_)))
+                    .count()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn images_paint_in_every_container_including_tables() {
+        let img = format!("<img src=\"{TEST_PNG}\" style=\"width:40px;height:20px\">");
+        for (container, html) in [
+            ("block", format!("<div style=\"display:block\">{}</div>", img.repeat(4))),
+            ("inline", img.repeat(4)),
+            ("flex", format!("<div style=\"display:flex\">{}</div>", img.repeat(4))),
+            (
+                "table cell",
+                format!("<table>{}</table>", format!("<tr><td>{img}</td></tr>").repeat(4)),
+            ),
+            (
+                "table row",
+                format!("<table><tr>{}</tr></table>", format!("<td>{img}</td>").repeat(4)),
+            ),
+        ] {
+            assert_eq!(painted_images(&html), 4, "{container}");
+        }
+    }
+
+    #[test]
+    fn a_cell_image_survives_any_cell_content() {
+        // None of these shapes may drop the image: the cell is not merely
+        // falling into the plain text-only fast path.
+        let img = format!("<img src=\"{TEST_PNG}\" style=\"width:40px;height:20px\">");
+        for content in [
+            format!("{img}"),
+            format!("x{img}"),
+            format!("<b>x</b>{img}"),
+            format!("<span style=\"color:red\">x</span>{img}"),
+            format!("<div>{img}</div>"),
+            format!("<a href=\"https://example.com\">{img}</a>"),
+        ] {
+            assert_eq!(
+                painted_images(&format!("<table><tr><td>{content}</td></tr></table>")),
+                1,
+                "cell content: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cell_image_is_painted_at_its_resolved_size() {
+        // The column has to be sized to the image, or the table's shrink-to-fit
+        // squashes it: 40x20 CSS px = 30x15 pt.
+        let img = format!("<img src=\"{TEST_PNG}\" style=\"width:40px;height:20px\">");
+        let mut document = crate::html::parse(&format!("<table><tr><td>{img}</td></tr></table>"));
+        crate::html::resolve_images(&mut document, None, &Default::default());
+        let options = RenderOptions::default()
+            .with_paper(super::Paper::Letter)
+            .with_document_hints(&document);
+        let pages = layout_document(&document, &options);
+        let drawn = pages[0]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Image(image) => Some((image.width, image.height)),
+                _ => None,
+            })
+            .expect("cell image painted");
+        assert!(
+            (drawn.0 - 30.0).abs() < 0.01 && (drawn.1 - 15.0).abs() < 0.01,
+            "painted at {drawn:?}, want (30, 15)"
+        );
     }
 
     #[test]
@@ -8035,3 +8197,5 @@ mod tests {
         );
     }
 }
+
+

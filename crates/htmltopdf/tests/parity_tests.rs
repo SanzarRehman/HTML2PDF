@@ -71,6 +71,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "rich-cells"),
     ("features", "page-size"),
     ("features", "forced-breaks"),
+    ("features", "table-images"),
     ("combined", "invoice"),
     ("edge-cases", "unicode"),
     ("edge-cases", "long-table"),
