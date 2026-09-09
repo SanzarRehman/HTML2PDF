@@ -179,6 +179,11 @@ pub struct BlockBox {
     /// `overflow: hidden` (or `clip`): content past a definite box height is
     /// clipped rather than overflowing.
     pub overflow_hidden: bool,
+    /// `break-inside: avoid`: keep the box on one page. An in-flow block that
+    /// does not fit the space left on the page starts on a fresh one instead; a
+    /// block taller than a whole page still starts a fresh page and then breaks
+    /// inside it (as Chrome does).
+    pub break_inside_avoid: bool,
     /// `margin-left: auto` + `margin-right: auto` + a width = centered.
     pub center: bool,
     /// CSS `line-height` (inherited): overrides the default leading of this

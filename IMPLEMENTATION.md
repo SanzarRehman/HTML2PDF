@@ -873,9 +873,46 @@ Details for each item are in the feature list below and in
 - [ ] **Remaining background & inline-block pieces**: `background-image: url()`
       on table cells; multi-line / wrapping inline-block content, nested block
       children, and `vertical-align` on inline-blocks.
+- [ ] **Fragmentation leftovers**: forced breaks (`break-before`/`break-after`),
+      `break-inside: avoid` on table rows/cells and flex/grid items, and
+      `orphans`/`widows`.
+      (`break-inside: avoid` on flow blocks shipped 2026-09-04.)
 - [ ] **Broader JS DOM surface** (deferred per 2026-07-08 decision):
       `insertBefore`, `cloneNode`, `querySelector(All)`, JS-side
       `parentNode`/`children` traversal.
+
+#### Recently shipped (2026-08 →)
+
+- [x] **`break-inside: avoid` on flow blocks** (2026-09-04, issue #3): the
+      keep-together primitive print documents need — a card, figure, or invoice
+      section that would be cut by the page bottom starts on a fresh page
+      instead. `break-inside` cascades into `CellStyle::break_inside_avoid`
+      (`Option<bool>`, so an explicit `auto` — or a column-only `avoid-column`
+      — overrides an `avoid` from a weaker rule) and lands on the box tree as
+      `BlockBox::break_inside_avoid`. The deprecated `page-break-inside` alias
+      is deliberately **not** supported: the engine is new, so there is no
+      legacy content to carry.
+      In `layout_box_children`, an in-flow block carrying the flag is
+      **dry-run** into a scratch page first (`measure_whole_block_height`,
+      started at a page top with the margin currently carried in): the same
+      layout code as the paint pass, so the height accounts for borders,
+      padding, nested blocks, and tables exactly. If that height does not fit
+      the space left, the cursor moves to a fresh page (dropping the collapsed
+      margin and retiring the page's floats, as any page break does). A block
+      that outgrows a whole page still starts a fresh page and then breaks
+      inside it — verified against Chrome `--print-to-pdf`, which does the same
+      — so `avoid` never wedges the fragmenter. Nested `avoid` blocks skip their
+      own dry run while one is running (a thread-local flag): equivalent, since a
+      block kept whole cannot break inside anyway, and it keeps the cost linear
+      — an 18-deep nest of `avoid` divs went from 2.4 s to 20 ms with
+      byte-identical output. `features/break-inside` fixture
+      (a 220pt figure pushed to page 2, a 520pt chart moved to a page of its
+      own, an over-tall block that breaks anyway) matches Chrome page for page
+      (41 fixtures), plus three layout tests and a cascade test. Documents
+      without the property are **byte-identical** (the flag short-circuits
+      before any measuring). **Not yet done:** forced breaks
+      (`break-before`/`break-after`), `avoid` on table rows/cells and
+      flex/grid items, and `orphans`/`widows`.
 
 #### Recently shipped (2026-07)
 
