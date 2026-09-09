@@ -160,27 +160,20 @@ pub struct TrueTypeFont {
 }
 
 impl TrueTypeFont {
-    /// Blink's macOS ascent quirk, as a fraction of the em.
+    /// Whether Blink's macOS ascent quirk applies to this face.
     ///
     /// The three classic Mac faces — Helvetica, Times, Courier — ship with a
     /// zero `hhea` line gap, so their natural line box is exactly 1 em. Safari
-    /// has always padded that, and Chrome kept the behaviour to match it:
-    /// for those faces the ascent is inflated by 15% of ascent+descent, which
-    /// is why `line-height: normal` for 12pt Helvetica measures 13.5pt in
-    /// Chrome rather than 12pt. Every other face — Arial, Times New Roman,
-    /// Liberation, Nimbus — has a real line gap and gets nothing here.
-    fn mac_ascent_quirk(&self) -> f32 {
-        if self.line_gap != 0 {
-            return 0.0;
-        }
-        // Keyed on the family name exactly as Blink does; "Helvetica Neue" and
-        // "Times New Roman" are different faces with real line gaps.
-        let classic = matches!(self.family_name.as_str(), "Helvetica" | "Times" | "Courier");
-        if classic {
-            0.15 * (self.ascent - self.descent) as f32 / 1000.0
-        } else {
-            0.0
-        }
+    /// has always padded that, and Chrome kept the behaviour to match it: for
+    /// those families the (rounded) ascent is inflated by 15% of
+    /// ascent+descent, which is why `line-height: normal` for 12pt Helvetica
+    /// measures 13.5pt in Chrome rather than 12pt. Every other face — Arial,
+    /// Times New Roman, Liberation, Nimbus — has a real line gap and is left
+    /// alone. Keyed on the family name exactly as Blink is; "Helvetica Neue"
+    /// and "Times New Roman" are different faces.
+    fn mac_ascent_quirk(&self) -> bool {
+        self.line_gap == 0
+            && matches!(self.family_name.as_str(), "Helvetica" | "Times" | "Courier")
     }
 }
 
@@ -198,6 +191,19 @@ pub struct ShapedGlyph {
     /// share a cluster with a predecessor). Used for `/ToUnicode`, so ligature
     /// glyphs map back to all of their characters.
     pub chars: String,
+}
+
+/// The metrics of a line box at one font size, in points (see
+/// [`Font::line_metrics`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineMetrics {
+    /// Baseline distance below the line-box top.
+    pub ascent: f32,
+    pub descent: f32,
+    /// `ascent + descent`: the glyph box explicit leading is split around.
+    pub content: f32,
+    /// `content + line gap`: the used `line-height: normal`.
+    pub height: f32,
 }
 
 /// A shaped text run: the output of HarfBuzz for one source string.
@@ -266,46 +272,47 @@ impl Font {
         }
     }
 
-    /// The line-box ascent — the distance from the top of the line box down to
-    /// the baseline — as a fraction of the em. An embedded face reports its real
-    /// ascender (so glyphs sit on the baseline a browser would use); the built-in
-    /// Helvetica keeps the historic 0.8-em heuristic, since it has no parsed face
-    /// to measure and font-less documents must stay unchanged.
-    pub fn line_ascent_fraction(&self) -> f32 {
-        match &self.kind {
-            // Base-14 Helvetica keeps the 0.8-em heuristic: it renders against a
-            // viewer's own Helvetica and, in the parity harness, against Chrome's
-            // Times fallback — measured to track those better than real Arial
-            // metrics do (font-less documents must also stay byte-identical).
-            FontKind::Helvetica => 0.8,
-            // `ascent` is in PDF 1000-unit em; clamp against a degenerate face.
-            FontKind::TrueType(font) => {
-                (font.ascent as f32 / 1000.0 + font.mac_ascent_quirk()).clamp(0.6, 1.2)
-            }
+    /// Line-box metrics for one font size, in points, computed the way Blink
+    /// does: ascent, descent and line gap are each scaled to CSS pixels and
+    /// rounded to a whole pixel *before* they are summed. That is why
+    /// `line-height: normal` is not a fixed multiple of the size in Chrome —
+    /// Arial measures 1.091 em at 11px and 1.143 em at 14px — and matching it
+    /// is what makes a text-heavy page break where Chrome's does.
+    ///
+    /// `content` (ascent + descent) is the glyph box an explicit `line-height`
+    /// splits its extra leading around; `height` adds the line gap and is the
+    /// used `normal` line height.
+    ///
+    /// The built-in base-14 face stands in for a browser's *default* font, so
+    /// it takes the metrics Chrome's default serif (Times) has — including the
+    /// classic-Mac ascent quirk — rather than Helvetica's: a font-less
+    /// document then paginates like Chrome even though its glyphs differ.
+    pub fn line_metrics(&self, size_pt: f32) -> LineMetrics {
+        const PX_PER_PT: f32 = 4.0 / 3.0;
+        let (ascent, descent, gap, quirk) = match &self.kind {
+            FontKind::Helvetica => (0.750, 0.250, 0.0, true),
+            FontKind::TrueType(font) => (
+                font.ascent as f32 / 1000.0,
+                -font.descent as f32 / 1000.0,
+                font.line_gap as f32 / 1000.0,
+                font.mac_ascent_quirk(),
+            ),
+        };
+        let px = size_pt * PX_PER_PT;
+        // Skia's SkScalarRoundToScalar: floor(x + 0.5).
+        let round = |v: f32| (v + 0.5).floor();
+        let mut a = round(ascent * px).max(1.0);
+        let d = round(descent * px).max(0.0);
+        let g = round(gap * px).max(0.0);
+        if quirk {
+            // Blink (SimpleFontDataMac): applied to the already-rounded values.
+            a += ((a + d) * 0.15 + 0.5).floor();
         }
-    }
-
-    /// The natural line box (`line-height: normal`) as a fraction of the em —
-    /// the tallest run's ascent + descent. Browsers place glyphs on this box and
-    /// split any explicit `line-height` leading around it. An embedded face uses
-    /// its real metrics (Arial ≈ 1.12 em, close to Chrome's ~1.15). (The `hhea`
-    /// line gap is deliberately excluded — including it overshoots Chrome's used
-    /// `normal` for the tested faces.)
-    pub fn line_content_fraction(&self) -> f32 {
-        match &self.kind {
-            // Base-14 Helvetica: the hhea box of the face a viewer actually
-            // substitutes for it (URW Nimbus Sans — ascender 936, descender
-            // -220 per 1000). This replaced a flat 1.35 em, which made every
-            // font-less document's lines ~17% taller than a browser's and
-            // paginated them differently: on the fixed-per-page fixture it cost
-            // a whole extra page (3 vs Chrome's 2), and per-paragraph pitch was
-            // 20.85pt against Chrome's 18.75pt. It is now 18.72pt.
-            FontKind::Helvetica => 1.156,
-            // descent is stored negative, so `ascent - descent` = ascent + |descent|.
-            FontKind::TrueType(font) => {
-                ((font.ascent - font.descent) as f32 / 1000.0 + font.mac_ascent_quirk())
-                    .clamp(1.0, 2.0)
-            }
+        LineMetrics {
+            ascent: a / PX_PER_PT,
+            descent: d / PX_PER_PT,
+            content: (a + d) / PX_PER_PT,
+            height: (a + d + g) / PX_PER_PT,
         }
     }
 
@@ -1794,8 +1801,8 @@ mod tests {
                 "{stack} fell through to the base-14 face"
             );
             assert!(
-                resolved.font.line_content_fraction() < 1.35,
-                "{stack} kept the 1.35-em base-14 line box"
+                resolved.font.line_metrics(12.0).height / 12.0 < 1.35,
+                "{stack} kept the base-14 line box"
             );
         }
     }
@@ -1818,7 +1825,7 @@ mod tests {
         // Chrome's used `normal` for the common sans faces sits around
         // 1.09-1.15 em (it rounds ascent/descent/gap to whole CSS pixels, so the
         // ratio drifts with size). Anything near 1.35 is the old flat constant.
-        let fraction = resolved.font.line_content_fraction();
+        let fraction = resolved.font.line_metrics(12.0).height / 12.0;
         assert!(
             (0.95..=1.25).contains(&fraction),
             "normal line box {fraction} em is not browser-like"

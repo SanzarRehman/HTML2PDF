@@ -2682,9 +2682,9 @@ fn layout_image_box(
     // while keeping the strut's descent beneath it — exactly what the inline
     // image path does, and what puts the following paragraph where a browser
     // puts it. (A float is placed by `layout_float_image` instead.)
-    let face = options.run_font(image.font);
-    let strut_ascent = image.font_size * face.line_ascent_fraction();
-    let strut_box = image.font_size * face.line_content_fraction();
+    let strut = options.run_font(image.font).line_metrics(image.font_size);
+    let strut_ascent = strut.ascent;
+    let strut_box = strut.height;
     let rise = (draw_height - strut_ascent).max(0.0);
     let leading = strut_box + rise;
 
@@ -3564,32 +3564,28 @@ fn layout_line_box(
             .iter()
             .filter_map(|piece| piece.inline_block.as_ref().map(|f| f.height - f.baseline))
             .fold(0.0_f32, f32::max);
-        // Baseline drop below the line-box top: the tallest run's real ascent.
-        // An embedded face reports its ascender; base-14 Helvetica keeps 0.8 em,
-        // so an all-Helvetica line (every font-less fixture, the table path) is
-        // byte-identical while an embedded-font line sits on a browser baseline.
-        let text_ascent = visual
+        // Per-run line metrics at the run's own size, rounded to CSS pixels the
+        // way Blink does (see `Font::line_metrics`). The line takes the tallest
+        // run's ascent (baseline drop below the line-box top), glyph box
+        // (`content`, what explicit leading is split around) and `normal`
+        // height (glyph box plus line gap).
+        let metrics: Vec<crate::font::LineMetrics> = visual
             .iter()
-            .map(|piece| piece.font_size * options.run_font(piece.font).line_ascent_fraction())
-            .fold(0.0_f32, f32::max);
-        // Natural content box (ascent+descent) of the tallest run — the reference
-        // that explicit `line-height` leading is split around. Real for embedded
-        // faces; the 1.35-em heuristic for base-14 Helvetica (font-less unchanged).
-        let content_box = visual
-            .iter()
-            .map(|piece| piece.font_size * options.run_font(piece.font).line_content_fraction())
-            .fold(0.0_f32, f32::max);
+            .map(|piece| options.run_font(piece.font).line_metrics(piece.font_size))
+            .collect();
+        let text_ascent = metrics.iter().map(|m| m.ascent).fold(0.0_f32, f32::max);
+        let content_box = metrics.iter().map(|m| m.content).fold(0.0_f32, f32::max);
+        let normal_box = metrics.iter().map(|m| m.height).fold(0.0_f32, f32::max);
         // The tallest atomic item's rise above the baseline (an image's height or
         // an inline-block's baseline distance); equals `max_image` with no inline-block.
         let atomic_top = max_image.max(ib_ascent);
         let image_rise = (atomic_top - text_ascent).max(0.0);
-        // Used line height: an explicit `line-height` wins; else the tallest run's
-        // `normal` box (real ascent+descent+gap for embedded faces, 1.35 em for
-        // Helvetica — so a Helvetica line keeps the old `resolve_leading` value).
+        // Used line height: an explicit `line-height` wins; else the tallest
+        // run's `normal` height.
         let base_leading = match line_height {
             Some(crate::html::LineHeight::Number(n)) => max_font * n,
             Some(crate::html::LineHeight::Length(points)) => points,
-            None => content_box,
+            None => normal_box,
         };
         let mut leading = base_leading + image_rise;
         // Grow the line box so an inline-block's descent below the baseline fits.
@@ -4253,17 +4249,17 @@ fn layout_inline_block(
             Some(crate::html::LineHeight::Length(points)) => points,
             None => pieces
                 .iter()
-                .map(|piece| piece.font_size * options.run_font(piece.font).line_content_fraction())
+                .map(|piece| options.run_font(piece.font).line_metrics(piece.font_size).height)
                 .fold(0.0_f32, f32::max),
         }
     };
     let text_ascent = pieces
         .iter()
-        .map(|piece| piece.font_size * options.run_font(piece.font).line_ascent_fraction())
+        .map(|piece| options.run_font(piece.font).line_metrics(piece.font_size).ascent)
         .fold(0.0_f32, f32::max);
     let content_box = pieces
         .iter()
-        .map(|piece| piece.font_size * options.run_font(piece.font).line_content_fraction())
+        .map(|piece| options.run_font(piece.font).line_metrics(piece.font_size).content)
         .fold(0.0_f32, f32::max);
     let ascent = text_ascent.max(max_image);
     let half_leading = ((leading - content_box) / 2.0).max(0.0);
@@ -7718,7 +7714,7 @@ mod tests {
 
         // Derived from the face, not hard-coded: this test is about margin
         // collapsing, not about the base-14 `line-height: normal` box.
-        let leading = 10.0 * crate::font::Font::helvetica().line_content_fraction();
+        let leading = crate::font::Font::helvetica().line_metrics(10.0).height;
         let gap = lines[0].y - lines[1].y;
         // Collapsed: gap = leading + max(20, 20) = leading + 20, NOT leading + 40.
         assert!(
@@ -7827,7 +7823,7 @@ mod tests {
 
         // `normal` is the face's own content box; the other two are what CSS
         // says regardless of the face.
-        let normal = 10.0 * crate::font::Font::helvetica().line_content_fraction();
+        let normal = crate::font::Font::helvetica().line_metrics(10.0).height;
         let gap = |pages: &[super::Page]| pages[0].lines[0].y - pages[0].lines[1].y;
         assert!(
             (gap(&default) - normal).abs() < 0.01,
