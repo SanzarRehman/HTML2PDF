@@ -1,0 +1,16 @@
+{
+  "description": "@page { size } selects the page box; margins on the same rule still apply.",
+  "visual_assertions": [
+    "The page is US Legal (8.5in x 14in), not the Letter the renderer was asked for.",
+    "Content starts 0.75in from the top and left edges.",
+    "A horizontal rule separates the two paragraph groups."
+  ],
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "Tj"],
+    "must_contain_text": ["(Legal)", "(1008)"],
+    "page_box": [612, 1008],
+    "min_pages": 1,
+    "max_pages": 1,
+    "min_size_bytes": 500
+  }
+}

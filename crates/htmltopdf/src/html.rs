@@ -787,6 +787,10 @@ pub enum AlignContent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageStyle {
     pub orientation: PageOrientation,
+    /// The page box declared by `@page { size: ... }`, in points, with the
+    /// orientation keyword already applied. `None` = size not declared, so the
+    /// render's paper choice stands.
+    pub size: Option<(f32, f32)>,
     pub margin_top: Option<f32>,
     pub margin_right: Option<f32>,
     pub margin_bottom: Option<f32>,
@@ -801,6 +805,7 @@ impl Default for PageStyle {
     fn default() -> Self {
         Self {
             orientation: PageOrientation::Portrait,
+            size: None,
             margin_top: None,
             margin_right: None,
             margin_bottom: None,
@@ -2126,12 +2131,16 @@ fn parse_page_geometry(css: &str) -> (PageStyle, TableStyle, Vec<f32>) {
                 }
                 GeoItem::Page {
                     margins,
+                    size,
                     landscape,
                     margin_boxes,
                 } => {
                     if landscape {
                         page.orientation = PageOrientation::Landscape;
                     }
+                    // `size` already has the orientation keyword folded in, so
+                    // a later bare `landscape` rule cannot re-rotate it.
+                    page.size = page.size.or(size);
                     page.margin_top = page.margin_top.or(margins[0]);
                     page.margin_right = page.margin_right.or(margins[1]);
                     page.margin_bottom = page.margin_bottom.or(margins[2]);
@@ -2151,10 +2160,11 @@ enum GeoItem {
     ColWidth(f32),
     /// A table row height (`table.sheet0 tr { height }`).
     RowHeight(f32),
-    /// `@page` margins `[top, right, bottom, left]`, orientation, and
-    /// supported running-header/footer margin boxes.
+    /// `@page` margins `[top, right, bottom, left]`, page size, orientation,
+    /// and supported running-header/footer margin boxes.
     Page {
         margins: [Option<f32>; 4],
+        size: Option<(f32, f32)>,
         landscape: bool,
         margin_boxes: Vec<PageMarginBox>,
     },
@@ -2261,6 +2271,7 @@ impl<'i> AtRuleParser<'i> for GeometryParser {
                         decls.margin_bottom,
                         decls.margin_left,
                     ],
+                    size: decls.size,
                     landscape: decls.landscape,
                     margin_boxes: parse_page_margin_boxes(body),
                 }])
@@ -2284,6 +2295,8 @@ struct GeoDecls {
     margin_right: Option<f32>,
     margin_bottom: Option<f32>,
     margin_left: Option<f32>,
+    /// `@page { size }` resolved to points, orientation keyword applied.
+    size: Option<(f32, f32)>,
     landscape: bool,
 }
 
@@ -2331,8 +2344,12 @@ impl<'i> DeclarationParser<'i> for GeoDeclParser<'_> {
                 self.decls.margin_left = left;
             }
             "size" => {
-                if value.to_ascii_lowercase().contains("landscape") {
+                let lower = value.to_ascii_lowercase();
+                if lower.contains("landscape") {
                     self.decls.landscape = true;
+                }
+                if let Some(size) = parse_page_size(&value) {
+                    self.decls.size = Some(size);
                 }
             }
             _ => {}
@@ -3218,6 +3235,65 @@ fn parse_css_percent(value: &str) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .filter(|n| *n >= 0.0)
+}
+
+/// Parse a CSS Paged Media `size` value into a `(width, height)` point pair.
+///
+/// Accepts `<length>{1,2}` (`8.5in 11in`, `210mm`), a named page size
+/// (`A4`, `letter`, `legal`, `ledger`, …), either combined with a
+/// `portrait`/`landscape` keyword, and the bare keywords on their own.
+/// `auto` — and anything unrecognized — yields `None`, leaving the render's
+/// paper choice in place.
+fn parse_page_size(value: &str) -> Option<(f32, f32)> {
+    let mut named: Option<(f32, f32)> = None;
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut landscape = false;
+    let mut portrait = false;
+
+    for token in split_ws_top_level(value) {
+        let lower = token.to_ascii_lowercase();
+        match lower.as_str() {
+            "" | "auto" => continue,
+            "landscape" => {
+                landscape = true;
+                continue;
+            }
+            "portrait" => {
+                portrait = true;
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(size) = crate::layout::PageSize::from_name(&lower) {
+            named = Some((size.width, size.height));
+        } else if let Some(length) = parse_css_length(&lower) {
+            lengths.push(length);
+        } else {
+            // An unknown token makes the whole declaration invalid, per CSS.
+            return None;
+        }
+    }
+
+    let (width, height) = match (named, lengths.len()) {
+        // Two explicit lengths are the page box verbatim; an orientation
+        // keyword is not allowed alongside them and is ignored.
+        (None, 2) => return Some((lengths[0], lengths[1])),
+        // One length is a square page.
+        (None, 1) => (lengths[0], lengths[0]),
+        (Some(size), 0) => size,
+        // A bare `landscape`/`portrait` carries no size of its own; the caller
+        // already recorded the keyword and applies it to the chosen paper.
+        (None, 0) => return None,
+        _ => return None,
+    };
+
+    if landscape {
+        Some((width.max(height), width.min(height)))
+    } else if portrait {
+        Some((width.min(height), width.max(height)))
+    } else {
+        Some((width, height))
+    }
 }
 
 fn parse_css_length(value: &str) -> Option<f32> {

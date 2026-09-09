@@ -44,7 +44,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | `:link`/`:visited` | ❌ | |
 | Specificity + source-order cascade, `!important` | ✅ | |
 | `@media print` / `screen` | ✅ | Screen-only rules excluded. |
-| `@page` margins, orientation, margin boxes | 🟡 | `size: landscape`, `margin`, plus `@top-left/center/right` and `@bottom-left/center/right` running text. Margin-box `content` supports quoted strings and `counter(page)` / `counter(pages)` with final values. No named pages, page selectors, corner boxes, `string-set`, images, or full block layout in margin boxes. |
+| `@page` margins, orientation, margin boxes | 🟡 | `size` (`<length>{1,2}`, named sizes `A3`–`A6`/`B4`/`B5`/`JIS-B4`/`JIS-B5`/`letter`/`legal`/`ledger`/`executive`, and the `portrait`/`landscape` keywords), `margin`, plus `@top-left/center/right` and `@bottom-left/center/right` running text. Margin-box `content` supports quoted strings and `counter(page)` / `counter(pages)` with final values. No named pages, page selectors, corner boxes, `string-set`, images, or full block layout in margin boxes. |
 | `@font-face` | 🟡 | Author families shadow system lookup. `src:` fallback chain honored: `url()` loads TrueType/OpenType/**WOFF1** from `data:` URIs and local files (remote `http(s)` behind the same opt-in `RemoteImagePolicy` as images); `local()` matches family, PostScript, and "Family Bold/Italic" full names; unsupported `format()` hints (WOFF2/EOT/SVG) skipped without fetching. Per-family `font-weight`/`font-style` descriptors select real bold/italic variants; missing variants synthesize bold. No WOFF2 (needs Brotli), `unicode-range`, `font-display`, or variable-font selection; fonts load per render (no cache). |
 | `@supports`, `@keyframes`, `@import` | ❌ | |
 
@@ -136,7 +136,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | PDF 1.7, streaming, FlateDecode compression | ✅ | |
 | Image XObjects, per-page backgrounds/borders | ✅ | |
 | Multi-page pagination, repeated table headers | ✅ | |
-| Configurable page size (A4/Letter, portrait/landscape), margins | ✅ | `--paper`, `@page`. |
+| Configurable page size (named sizes or arbitrary dimensions, portrait/landscape), margins | ✅ | `--paper <name\|WIDTHxHEIGHT>`, `@page { size }`, or `RenderOptions::with_page_size` / `with_margins` (a caller value outranks both). |
 | Link annotations (`/Annots`) | 🟡 | URI actions + in-document `/Dest` (`#fragment` → `id` anchor); one merged rect per link per line, including inside table cells. No `PageMode /UseOutlines`, no `<a name>` anchors. |
 | Document outline (`/Outlines`) | ✅ | Built from `h1`–`h6` in document order; deeper levels nest under the closest shallower heading; non-ASCII titles as UTF-16BE. |
 | Running headers/footers + page numbers | 🟡 | Standards-style `@page` margin boxes with final `counter(page)` / `counter(pages)` values; static `position: fixed` headers/footers also repeat on every page. No visible generated TOC yet. |

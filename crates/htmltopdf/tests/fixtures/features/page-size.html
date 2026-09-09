@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      /* US Legal declared in CSS. The harness renders every fixture with
+         --paper letter, so a page box of 612x1008 proves `@page { size }`
+         reached layout rather than the paper choice standing. */
+      @page {
+        size: 8.5in 14in;
+        margin: 0.75in;
+      }
+      body {
+        font-size: 12pt;
+        margin: 0;
+      }
+      h1 {
+        font-size: 18pt;
+        margin: 0 0 12pt;
+      }
+      .rule {
+        border-top: 1pt solid #333;
+        margin: 12pt 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Page size from CSS</h1>
+    <p>This document declares US Legal on its own @page rule.</p>
+    <div class="rule"></div>
+    <p>The page box must measure 612 by 1008 points.</p>
+    <p>The 0.75in margin on the same rule must still apply.</p>
+  </body>
+</html>

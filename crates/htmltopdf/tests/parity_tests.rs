@@ -9,7 +9,12 @@
 //!     `Do` for images).
 //!   * `must_contain_text` — strings that must be present in the *inflated*
 //!     content streams (htmltopdf FlateDecode-compresses them).
-//!   * `min_size_bytes` / `max_size_bytes` / `min_pages` — coarse size/page bounds.
+//!   * `min_size_bytes` / `max_size_bytes` / `min_pages` / `max_pages` — coarse
+//!     size/page bounds. `max_pages` matters as much as `min_pages`: a page
+//!     count that drifts is a pagination bug, not a cosmetic one.
+//!   * `page_box` — the expected `[width, height]` MediaBox in points. A render
+//!     on the wrong paper still succeeds and still looks plausible, so without
+//!     this every other measurement taken from it is silently invalid.
 //!
 //! The `visual_assertions` in each JSON are human-readable descriptions of what
 //! the page should look like; they are checked by the raster diff against a
@@ -64,6 +69,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "z-index"),
     ("features", "inline-images"),
     ("features", "rich-cells"),
+    ("features", "page-size"),
     ("combined", "invoice"),
     ("edge-cases", "unicode"),
     ("edge-cases", "long-table"),
@@ -136,6 +142,23 @@ fn count_pages(pdf: &[u8]) -> usize {
     count.max(1)
 }
 
+/// The first `/MediaBox [x0 y0 x1 y1]` in the file, as `(width, height)`.
+fn page_box(pdf: &[u8]) -> Option<(f32, f32)> {
+    let text = String::from_utf8_lossy(pdf);
+    let start = text.find("/MediaBox")? + "/MediaBox".len();
+    let rest = &text[start..];
+    let open = rest.find('[')?;
+    let close = rest.find(']')?;
+    let nums: Vec<f32> = rest[open + 1..close]
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    match nums[..] {
+        [x0, y0, x1, y1] => Some((x1 - x0, y1 - y0)),
+        _ => None,
+    }
+}
+
 fn expectations(layer: &str, name: &str) -> serde_json::Value {
     let file = fixtures_dir()
         .join("expectations")
@@ -194,6 +217,27 @@ fn assert_fixture(layer: &str, name: &str) {
         assert!(
             pages >= min_pages,
             "{layer}/{name}: {pages} page(s) < min {min_pages}"
+        );
+    }
+    if let Some(max_pages) = pa["max_pages"].as_u64() {
+        let pages = count_pages(&pdf) as u64;
+        assert!(
+            pages <= max_pages,
+            "{layer}/{name}: {pages} page(s) > max {max_pages}"
+        );
+    }
+    if let Some(expected) = pa["page_box"].as_array() {
+        let want: Vec<f32> = expected
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+        let got = page_box(&pdf)
+            .unwrap_or_else(|| panic!("{layer}/{name}: no /MediaBox in the rendered PDF"));
+        assert!(
+            want.len() == 2
+                && (got.0 - want[0]).abs() < 1.0
+                && (got.1 - want[1]).abs() < 1.0,
+            "{layer}/{name}: page box {got:?}, want {want:?}"
         );
     }
 }

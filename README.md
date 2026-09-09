@@ -352,7 +352,7 @@ cargo run --release -p htmltopdf-cli -- --font /path/to/font.ttf input.html outp
 ## CLI
 
 ```bash
-htmltopdf [--font <path|family>] [--paper a4|letter] [--js] [--remote-images] <input.html> <output.pdf>
+htmltopdf [--font <path|family>] [--paper <name|WIDTHxHEIGHT>] [--js] [--remote-images] <input.html> <output.pdf>
 htmltopdf bench <input.html> <output-dir> [runs]
 htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>
 ```

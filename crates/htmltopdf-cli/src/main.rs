@@ -42,9 +42,12 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "--font requires a font file path or family name".to_string())?;
             font = Some(value.to_string_lossy().into_owned());
         } else if arg == "--paper" {
-            let value = iter
-                .next()
-                .ok_or_else(|| "--paper requires a value (a4 or letter)".to_string())?;
+            let value = iter.next().ok_or_else(|| {
+                format!(
+                    "--paper requires a value ({}, or WIDTHxHEIGHT with units)",
+                    htmltopdf::Paper::NAMES.join(", ")
+                )
+            })?;
             paper = Some(value.to_string_lossy().to_ascii_lowercase());
         } else if arg == "--js" {
             scripting = true;
@@ -58,7 +61,7 @@ fn run() -> Result<(), String> {
     if positionals.len() != 2 {
         return Err(
             concat!(
-                "usage: htmltopdf [--font <path|family>] [--paper a4|letter] [--js] [--remote-images] <input.html> <output.pdf>\n",
+                "usage: htmltopdf [--font <path|family>] [--paper <name|WIDTHxHEIGHT>] [--js] [--remote-images] <input.html> <output.pdf>\n",
                 "       htmltopdf bench <input.html> <output-dir> [runs]\n",
                 "       htmltopdf bench-concurrent <input.html> <output-dir> <workers> <runs-per-worker>"
             )
@@ -72,10 +75,8 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("failed to read {}: {error}", input_path.display()))?;
 
     let mut options = build_options(font.as_deref())?;
-    match paper.as_deref() {
-        Some("letter") => options = options.with_paper(htmltopdf::Paper::Letter),
-        Some("a4") | None => {}
-        Some(other) => return Err(format!("unknown --paper value '{other}' (use a4 or letter)")),
+    if let Some(value) = paper.as_deref() {
+        options = apply_paper(options, value)?;
     }
     // Resolve relative <img src> / @font-face url() paths against the input
     // file's directory. A bare filename has an empty parent, which means the
@@ -294,4 +295,52 @@ fn parse_positive_usize(value: &std::ffi::OsString, label: &str) -> Result<usize
 
 struct WorkerResult {
     output_bytes: usize,
+}
+
+/// Resolve a `--paper` value: a named size (`a4`, `letter`, `legal`, `a3`, …)
+/// or an explicit `WIDTHxHEIGHT` with CSS units (`8.5inx11in`, `210mmx297mm`,
+/// `612x792` — bare numbers are points).
+fn apply_paper(
+    options: htmltopdf::RenderOptions,
+    value: &str,
+) -> Result<htmltopdf::RenderOptions, String> {
+    if let Some(paper) = htmltopdf::Paper::from_name(value) {
+        return Ok(options.with_paper(paper));
+    }
+    if let Some(size) = parse_paper_dimensions(value) {
+        return Ok(options.with_page_size(size));
+    }
+    Err(format!(
+        "unknown --paper value '{value}' (use one of: {}, or WIDTHxHEIGHT with units, e.g. 8.5inx11in)",
+        htmltopdf::Paper::NAMES.join(", ")
+    ))
+}
+
+/// `WIDTHxHEIGHT` with optional CSS units on each side; bare numbers are points.
+fn parse_paper_dimensions(value: &str) -> Option<htmltopdf::PageSize> {
+    let (width, height) = value.split_once(['x', 'X', '*'])?;
+    Some(htmltopdf::PageSize {
+        width: parse_length_pt(width)?,
+        height: parse_length_pt(height)?,
+    })
+}
+
+fn parse_length_pt(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let split = value
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(value.len());
+    let number: f32 = value[..split].parse().ok()?;
+    if !(number.is_finite() && number > 0.0) {
+        return None;
+    }
+    Some(match value[split..].trim().to_ascii_lowercase().as_str() {
+        "" | "pt" => number,
+        "in" => number * 72.0,
+        "px" => number * 0.75,
+        "cm" => number * 72.0 / 2.54,
+        "mm" => number * 72.0 / 25.4,
+        "pc" => number * 12.0,
+        _ => return None,
+    })
 }

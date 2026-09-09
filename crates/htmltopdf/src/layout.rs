@@ -8,32 +8,68 @@ use crate::paint::{
     TextCommand,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageSize {
     pub width: f32,
     pub height: f32,
 }
 
 impl PageSize {
-    pub const A4: Self = Self {
-        width: 595.0,
-        height: 842.0,
-    };
+    const fn pt(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
 
-    pub const A4_LANDSCAPE: Self = Self {
-        width: 842.0,
-        height: 595.0,
-    };
+    pub const A3: Self = Self::pt(842.0, 1191.0);
+    pub const A4: Self = Self::pt(595.0, 842.0);
+    pub const A4_LANDSCAPE: Self = Self::pt(842.0, 595.0);
+    pub const A5: Self = Self::pt(420.0, 595.0);
+    pub const A6: Self = Self::pt(298.0, 420.0);
+    pub const B4: Self = Self::pt(709.0, 1001.0);
+    pub const B5: Self = Self::pt(499.0, 709.0);
+    pub const JIS_B4: Self = Self::pt(728.0, 1032.0);
+    pub const JIS_B5: Self = Self::pt(516.0, 729.0);
+    pub const LETTER: Self = Self::pt(612.0, 792.0);
+    pub const LETTER_LANDSCAPE: Self = Self::pt(792.0, 612.0);
+    pub const LEGAL: Self = Self::pt(612.0, 1008.0);
+    pub const LEDGER: Self = Self::pt(792.0, 1224.0);
+    pub const EXECUTIVE: Self = Self::pt(522.0, 756.0);
 
-    pub const LETTER: Self = Self {
-        width: 612.0,
-        height: 792.0,
-    };
+    /// The same sheet with the long edge horizontal.
+    pub fn landscape(self) -> Self {
+        Self {
+            width: self.width.max(self.height),
+            height: self.width.min(self.height),
+        }
+    }
 
-    pub const LETTER_LANDSCAPE: Self = Self {
-        width: 792.0,
-        height: 612.0,
-    };
+    /// The same sheet with the long edge vertical.
+    pub fn portrait(self) -> Self {
+        Self {
+            width: self.width.min(self.height),
+            height: self.width.max(self.height),
+        }
+    }
+
+    /// A CSS Paged Media named page size (`A4`, `letter`, `legal`, …), in
+    /// portrait orientation. Case-insensitive; `None` for anything unknown.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        Some(match name.as_str() {
+            "a3" => Self::A3,
+            "a4" => Self::A4,
+            "a5" => Self::A5,
+            "a6" => Self::A6,
+            "b4" | "iso-b4" => Self::B4,
+            "b5" | "iso-b5" => Self::B5,
+            "jis-b4" => Self::JIS_B4,
+            "jis-b5" => Self::JIS_B5,
+            "letter" | "us-letter" => Self::LETTER,
+            "legal" | "us-legal" => Self::LEGAL,
+            "ledger" | "tabloid" => Self::LEDGER,
+            "executive" => Self::EXECUTIVE,
+            _ => return None,
+        })
+    }
 }
 
 /// The base paper size to render on (before applying the document's orientation).
@@ -41,24 +77,82 @@ impl PageSize {
 pub enum Paper {
     #[default]
     A4,
+    A3,
+    A5,
+    A6,
+    B4,
+    B5,
+    JisB4,
+    JisB5,
     Letter,
+    Legal,
+    Ledger,
+    Executive,
 }
 
 impl Paper {
-    fn portrait(self) -> PageSize {
+    /// Parse a paper name (`a4`, `letter`, `legal`, `tabloid`, …).
+    /// Case-insensitive; `None` for anything unknown.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "a3" => Paper::A3,
+            "a4" => Paper::A4,
+            "a5" => Paper::A5,
+            "a6" => Paper::A6,
+            "b4" | "iso-b4" => Paper::B4,
+            "b5" | "iso-b5" => Paper::B5,
+            "jis-b4" => Paper::JisB4,
+            "jis-b5" => Paper::JisB5,
+            "letter" | "us-letter" => Paper::Letter,
+            "legal" | "us-legal" => Paper::Legal,
+            "ledger" | "tabloid" => Paper::Ledger,
+            "executive" => Paper::Executive,
+            _ => return None,
+        })
+    }
+
+    /// Every accepted `--paper` name, for error messages and docs.
+    pub const NAMES: &'static [&'static str] = &[
+        "a3",
+        "a4",
+        "a5",
+        "a6",
+        "b4",
+        "b5",
+        "jis-b4",
+        "jis-b5",
+        "letter",
+        "legal",
+        "ledger",
+        "tabloid",
+        "executive",
+    ];
+
+    pub fn portrait(self) -> PageSize {
         match self {
+            Paper::A3 => PageSize::A3,
             Paper::A4 => PageSize::A4,
+            Paper::A5 => PageSize::A5,
+            Paper::A6 => PageSize::A6,
+            Paper::B4 => PageSize::B4,
+            Paper::B5 => PageSize::B5,
+            Paper::JisB4 => PageSize::JIS_B4,
+            Paper::JisB5 => PageSize::JIS_B5,
             Paper::Letter => PageSize::LETTER,
+            Paper::Legal => PageSize::LEGAL,
+            Paper::Ledger => PageSize::LEDGER,
+            Paper::Executive => PageSize::EXECUTIVE,
         }
     }
 
-    fn landscape(self) -> PageSize {
-        match self {
-            Paper::A4 => PageSize::A4_LANDSCAPE,
-            Paper::Letter => PageSize::LETTER_LANDSCAPE,
-        }
+    pub fn landscape(self) -> PageSize {
+        self.portrait().landscape()
     }
 }
+
+/// The built-in margin, in points. A `margin_*` side still sitting on this
+/// value is treated as "not set by the caller" (see `caller_margin`).
+const DEFAULT_MARGIN: f32 = 48.0;
 
 #[derive(Debug, Clone)]
 pub struct RenderOptions {
@@ -94,11 +188,11 @@ impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             page_size: PageSize::A4,
-            margin: 48.0,
-            margin_top: 48.0,
-            margin_right: 48.0,
-            margin_bottom: 48.0,
-            margin_left: 48.0,
+            margin: DEFAULT_MARGIN,
+            margin_top: DEFAULT_MARGIN,
+            margin_right: DEFAULT_MARGIN,
+            margin_bottom: DEFAULT_MARGIN,
+            margin_left: DEFAULT_MARGIN,
             // No fixed row-height floor: rows are sized from their content
             // (line box + padding), like a browser. A CSS-declared row height
             // (e.g. Excel exports) overrides this via `with_document_hints`.
@@ -136,26 +230,83 @@ impl RenderOptions {
         self
     }
 
-    /// Choose the base paper size (A4 or Letter).
+    /// Choose the base paper size (A4, Letter, Legal, A3, …).
     pub fn with_paper(mut self, paper: Paper) -> Self {
         self.paper = paper;
         self.page_size = paper.portrait();
         self
     }
 
+    /// Render on an explicit page box, in points. This is a caller override:
+    /// it outranks both `paper` and the document's `@page { size }`.
+    pub fn with_page_size(mut self, page_size: PageSize) -> Self {
+        self.page_size = page_size;
+        self
+    }
+
+    /// Set all four margins, in points. Each side is still overridden by a
+    /// matching `@page` margin declared by the document.
+    pub fn with_margins(mut self, top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        self.margin_top = top;
+        self.margin_right = right;
+        self.margin_bottom = bottom;
+        self.margin_left = left;
+        self
+    }
+
+    /// Whether `page_size` still holds whatever `paper` implies — in which case
+    /// the document's `@page { size }` is free to replace it. A caller who set
+    /// a page box of their own gets to keep it.
+    fn page_size_is_from_paper(&self) -> bool {
+        self.page_size == self.paper.portrait() || self.page_size == self.paper.landscape()
+    }
+
+    /// The caller's value for one margin side: the side field if they moved it
+    /// off the default, else the uniform `margin` (so setting only `margin`
+    /// keeps working).
+    fn caller_margin(&self, side: f32) -> f32 {
+        if side == DEFAULT_MARGIN {
+            self.margin
+        } else {
+            side
+        }
+    }
+
     pub fn with_document_hints(&self, document: &Document) -> Self {
         let mut options = self.clone();
 
-        options.page_size = if document.page_style.orientation == PageOrientation::Landscape {
-            options.paper.landscape()
-        } else {
-            options.paper.portrait()
+        // Page-box precedence: an explicit caller `page_size` wins over the
+        // document's `@page { size }`, which wins over `paper` + orientation.
+        // Without the first rung `RenderOptions::page_size` would be a public,
+        // settable, inert field.
+        options.page_size = match document.page_style.size {
+            Some((width, height)) if self.page_size_is_from_paper() => PageSize { width, height },
+            _ if self.page_size_is_from_paper() => {
+                if document.page_style.orientation == PageOrientation::Landscape {
+                    options.paper.landscape()
+                } else {
+                    options.paper.portrait()
+                }
+            }
+            _ => self.page_size,
         };
 
-        options.margin_top = document.page_style.margin_top.unwrap_or(options.margin);
-        options.margin_right = document.page_style.margin_right.unwrap_or(options.margin);
-        options.margin_bottom = document.page_style.margin_bottom.unwrap_or(options.margin);
-        options.margin_left = document.page_style.margin_left.unwrap_or(options.margin);
+        options.margin_top = document
+            .page_style
+            .margin_top
+            .unwrap_or_else(|| self.caller_margin(self.margin_top));
+        options.margin_right = document
+            .page_style
+            .margin_right
+            .unwrap_or_else(|| self.caller_margin(self.margin_right));
+        options.margin_bottom = document
+            .page_style
+            .margin_bottom
+            .unwrap_or_else(|| self.caller_margin(self.margin_bottom));
+        options.margin_left = document
+            .page_style
+            .margin_left
+            .unwrap_or_else(|| self.caller_margin(self.margin_left));
         options.table_row_height = document
             .table_style
             .row_height
@@ -5275,6 +5426,103 @@ mod tests {
         estimate_text_width, justify_offsets, layout_document, table_geometry, PageSize,
         RenderOptions,
     };
+
+    #[test]
+    fn page_size_comes_from_the_at_page_rule() {
+        // `@page { size }` reaches layout in every accepted spelling.
+        for (css, expected) in [
+            ("@page { size: 8.5in 11in }", (612.0, 792.0)),
+            ("@page { size: letter }", (612.0, 792.0)),
+            ("@page { size: legal }", (612.0, 1008.0)),
+            ("@page { size: 612pt 792pt }", (612.0, 792.0)),
+            ("@page { size: A3 }", (842.0, 1191.0)),
+            ("@page { size: A4 landscape }", (842.0, 595.0)),
+            ("@page { size: letter portrait }", (612.0, 792.0)),
+            ("@page { size: 210mm 297mm }", (595.28, 841.89)),
+        ] {
+            let document = crate::html::parse(&format!("<style>{css}</style><p>x</p>"));
+            let options = RenderOptions::default().with_document_hints(&document);
+            assert!(
+                (options.page_size.width - expected.0).abs() < 0.5
+                    && (options.page_size.height - expected.1).abs() < 0.5,
+                "{css}: got {:?}, want {expected:?}",
+                options.page_size
+            );
+        }
+    }
+
+    #[test]
+    fn at_page_size_does_not_disturb_at_page_margins() {
+        let document =
+            crate::html::parse("<style>@page { size: legal; margin: 2in }</style><p>x</p>");
+        let options = RenderOptions::default().with_document_hints(&document);
+        assert_eq!(options.page_size.height, 1008.0);
+        assert_eq!(options.margin_top, 144.0);
+        assert_eq!(options.margin_left, 144.0);
+    }
+
+    #[test]
+    fn an_unrecognized_at_page_size_leaves_the_paper_alone() {
+        for css in ["@page { size: auto }", "@page { size: nonsense }"] {
+            let document = crate::html::parse(&format!("<style>{css}</style><p>x</p>"));
+            let options = RenderOptions::default()
+                .with_paper(super::Paper::Letter)
+                .with_document_hints(&document);
+            assert_eq!(options.page_size, PageSize::LETTER, "{css}");
+        }
+    }
+
+    #[test]
+    fn caller_page_size_survives_with_document_hints() {
+        // A page box the caller set explicitly outranks both `paper` and the
+        // document's own `@page { size }` — otherwise the public field is inert.
+        let document = crate::html::parse("<style>@page { size: A4 }</style><p>x</p>");
+        let custom = PageSize {
+            width: 400.0,
+            height: 900.0,
+        };
+        let options = RenderOptions::default()
+            .with_page_size(custom)
+            .with_document_hints(&document);
+        assert_eq!(options.page_size, custom);
+    }
+
+    #[test]
+    fn caller_margins_survive_when_the_document_declares_none() {
+        // Per-side caller margins must not collapse to the uniform `margin`.
+        let document = crate::html::parse("<p>x</p>");
+        let options = RenderOptions::default()
+            .with_margins(10.0, 20.0, 30.0, 40.0)
+            .with_document_hints(&document);
+        assert_eq!(
+            (
+                options.margin_top,
+                options.margin_right,
+                options.margin_bottom,
+                options.margin_left
+            ),
+            (10.0, 20.0, 30.0, 40.0)
+        );
+    }
+
+    #[test]
+    fn a_caller_who_sets_only_the_uniform_margin_still_gets_it() {
+        let document = crate::html::parse("<p>x</p>");
+        let mut options = RenderOptions::default();
+        options.margin = 12.0;
+        let options = options.with_document_hints(&document);
+        assert_eq!(options.margin_top, 12.0);
+        assert_eq!(options.margin_left, 12.0);
+    }
+
+    #[test]
+    fn at_page_margins_still_beat_caller_margins() {
+        let document = crate::html::parse("<style>@page { margin: 1in }</style><p>x</p>");
+        let options = RenderOptions::default()
+            .with_margins(10.0, 20.0, 30.0, 40.0)
+            .with_document_hints(&document);
+        assert_eq!(options.margin_top, 72.0);
+    }
 
     #[test]
     fn text_indent_shifts_only_the_first_line() {
