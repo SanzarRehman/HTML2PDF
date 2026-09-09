@@ -1,0 +1,19 @@
+# Fixtures whose feature Chrome does not implement.
+#
+# The visual harness gates on "did this fixture get further from Chrome", which
+# only works when Chrome's render is the thing we want. For a feature Blink has
+# never implemented, the reference encodes "the feature does nothing" — so if
+# our implementation broke and fell back to Chrome's behaviour, the diff would
+# go *down* and a one-sided gate would call that an improvement.
+#
+# These are still rendered, diffed and reported, but excluded from the mean and
+# from the regression gate. Correctness for them lives in the parity
+# expectations and the unit tests instead.
+#
+# One `layer/name` per line.
+
+# CSS GCPM running elements: `position: running()` + `content: element()`.
+# Chrome ignores both, leaving the header in body flow on page 1 only (verified
+# with --print-to-pdf: Northwind/CONFIDENTIAL/ORPHANHEADER all render as body
+# text at y=82, and pages 2-4 carry no header at all).
+features/running-elements

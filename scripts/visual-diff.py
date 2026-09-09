@@ -77,6 +77,24 @@ def montage(ours, chrome, mask, path, label):
     canvas.save(path)
 
 
+def load_unsupported(_refs_dir):
+    """Fixtures whose feature Chrome does not implement, so its render is not a
+    fidelity target. One `layer/name` per line in `scripts/chrome-unsupported.txt`
+    (committed config, unlike the generated references); `#` comments and blank
+    lines ignored."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "chrome-unsupported.txt")
+    if not os.path.exists(path):
+        return set()
+    out = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                out.add(line)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ours", required=True, help="dir of rendered fixture PDFs (<layer>/<name>.pdf)")
@@ -89,6 +107,8 @@ def main():
     ap.add_argument("--tol", type=float, default=1.5, help="allowed diff%% increase vs baseline before failing")
     ap.add_argument("--montage", type=int, default=0, help="write montages for the worst N fixtures")
     args = ap.parse_args()
+
+    unsupported = load_unsupported(args.refs)
 
     os.makedirs(args.out, exist_ok=True)
     results = {}       # "layer/name" -> diff%
@@ -130,22 +150,36 @@ def main():
             print("Missing references for:", ", ".join(missing_refs), file=sys.stderr)
         return 2
 
+    # Fixtures exercising a spec feature Chrome does not implement are reported
+    # but never gated: their reference encodes "the feature does nothing", so a
+    # regression in the feature would make the diff *smaller*, not larger, and a
+    # one-sided gate cannot see it. See scripts/chrome-unsupported.txt.
+    gated = {k: v for k, v in results.items() if k not in unsupported}
+    informational = {k: v for k, v in results.items() if k in unsupported}
+
     ranked = sorted(results.items(), key=lambda kv: kv[1], reverse=True)
-    overall = round(sum(results.values()) / len(results), 2)
+    overall = round(sum(gated.values()) / len(gated), 2) if gated else 0.0
 
     print(f"\n{'fixture':32} {'diff%':>7}")
     print("-" * 41)
     for key, pct in ranked:
         bar = "#" * min(40, int(pct))
-        print(f"{key:32} {pct:6.2f}  {bar}")
+        note = "  (not gated: Chrome lacks the feature)" if key in unsupported else ""
+        print(f"{key:32} {pct:6.2f}  {bar}{note}")
     print("-" * 41)
-    print(f"{'MEAN':32} {overall:6.2f}   over {len(results)} fixtures @ {args.dpi}dpi")
+    print(f"{'MEAN':32} {overall:6.2f}   over {len(gated)} gated fixtures @ {args.dpi}dpi")
+    if informational:
+        print(f"({len(informational)} informational, excluded from the mean and the gate: "
+              f"{', '.join(sorted(informational))})")
     if missing_refs:
         print(f"\n(no Chrome reference for {len(missing_refs)}: {', '.join(missing_refs)})")
 
     if args.json:
+        json_body = {"mean": overall, "fixtures": results}
+        if informational:
+            json_body["informational"] = sorted(informational)
         with open(args.json, "w") as fh:
-            json.dump({"mean": overall, "fixtures": results}, fh, indent=2, sort_keys=True)
+            json.dump(json_body, fh, indent=2, sort_keys=True)
         print(f"\nwrote {args.json}")
 
     if args.montage:
@@ -163,7 +197,7 @@ def main():
         with open(args.baseline) as fh:
             base = json.load(fh).get("fixtures", {})
         regressions = [
-            (k, base[k], v) for k, v in results.items()
+            (k, base[k], v) for k, v in gated.items()
             if k in base and v > base[k] + args.tol
         ]
         if regressions:
