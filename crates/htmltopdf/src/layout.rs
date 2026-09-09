@@ -2675,18 +2675,32 @@ fn layout_image_box(
     let draw_width = image.width * scale;
     let draw_height = image.height * scale;
 
-    // Move to a fresh page if the image does not fit the remaining space.
-    ensure_space(pages, y, options, draw_height);
+    // A standalone image is an inline replaced element in an anonymous line
+    // box, not a block of its own height: the line carries the parent font's
+    // strut, and the image sits on its baseline. So a small icon still takes
+    // a full line, and a tall image adds its rise above the strut's ascent
+    // while keeping the strut's descent beneath it — exactly what the inline
+    // image path does, and what puts the following paragraph where a browser
+    // puts it. (A float is placed by `layout_float_image` instead.)
+    let face = options.run_font(image.font);
+    let strut_ascent = image.font_size * face.line_ascent_fraction();
+    let strut_box = image.font_size * face.line_content_fraction();
+    let rise = (draw_height - strut_ascent).max(0.0);
+    let leading = strut_box + rise;
 
+    // Move to a fresh page if the line does not fit the remaining space.
+    ensure_space(pages, y, options, leading);
+
+    let baseline = *y - strut_ascent.max(draw_height);
     let page = pages.last_mut().expect("at least one page");
     page.commands.push(PaintCommand::Image(ImageCommand {
         image_index,
         x,
-        y: *y - draw_height,
+        y: baseline,
         width: draw_width,
         height: draw_height,
     }));
-    *y -= draw_height;
+    *y -= leading;
 }
 
 /// Resolve a length that may carry a point component, a percent component (of
@@ -6777,6 +6791,8 @@ mod tests {
                 width: w,
                 height: h,
                 float_dir: None,
+                font_size: 12.0,
+                font: 0,
             })),
             ..run("")
         };
@@ -6858,6 +6874,8 @@ mod tests {
                 width: 900.0,
                 height: 300.0,
                 float_dir: None,
+                font_size: 12.0,
+                font: 0,
             })),
             inline_block: None,
         };

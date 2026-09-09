@@ -1575,7 +1575,7 @@ fn build_node(
                 // shares its line with text flows *inline* (on the baseline);
                 // a standalone or floated one takes the block image path
                 // (page-fitting, pagination as a unit).
-                if let Some(image) = image_box_for(dom, id, &computed.style[id]) {
+                if let Some(image) = image_box_for(dom, id, &computed.style[id], &ctx) {
                     let own = &computed.style[id];
                     let pending_text = acc
                         .pending
@@ -3024,7 +3024,7 @@ fn collect_cell_runs_into(
                 if tag == "img" {
                     // Cell images always flow inline on the cell's line: a cell
                     // has no block formatting context of its own here.
-                    if let Some(image) = image_box_for(dom, child, &env.computed.style[child]) {
+                    if let Some(image) = image_box_for(dom, child, &env.computed.style[child], &ctx) {
                         acc.push_image(image, &ctx);
                     }
                     continue;
@@ -3047,6 +3047,7 @@ fn image_box_for(
     dom: &crate::dom::Dom,
     id: crate::dom::NodeId,
     own: &CellStyle,
+    ctx: &FlowCtx,
 ) -> Option<crate::box_tree::ImageBox> {
     let node = dom.node(id);
     let src = node.attr("src").filter(|src| !src.is_empty())?;
@@ -3063,6 +3064,8 @@ fn image_box_for(
         width: 0.0,
         height: 0.0,
         float_dir: own.float_dir,
+        font_size: ctx.font_size,
+        font: ctx.font,
     })
 }
 

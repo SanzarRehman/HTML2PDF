@@ -85,6 +85,12 @@ pub struct ImageBox {
     pub height: f32,
     /// CSS `float` on the image: text wraps around it.
     pub float_dir: Option<FloatDir>,
+    /// The surrounding text's font size and interned face. A standalone
+    /// image is still an inline replaced element in an anonymous line box,
+    /// so its line takes the parent's strut (ascent/descent) — this is what
+    /// keeps the paragraph below it from packing tight against it.
+    pub font_size: f32,
+    pub font: u16,
 }
 
 /// A block-level box. `kind` drives the default font size (and the default
