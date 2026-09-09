@@ -3269,15 +3269,21 @@ fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
 /// A CSS offset length that may be negative (`top: -4pt`), for position offsets.
 /// First usable family from a CSS `font-family` stack: quotes stripped,
 /// generic keywords kept (resolved at render time). `inherit`/empty → `None`.
+/// Parse a CSS `font-family` value into the declared stack, normalized to a
+/// comma-separated list of unquoted names (`"Helvetica, Arial, sans-serif"`).
+///
+/// The *whole* stack is kept, not just the first name: a document naming
+/// `Helvetica, Arial, sans-serif` on a machine that has neither Helvetica nor
+/// Arial must still reach the generic `sans-serif` (and through it a real face
+/// with real metrics) rather than dropping to the built-in base-14 face.
+/// `crate::font::font_stack` walks the list at resolve time.
 fn parse_font_family(value: &str) -> Option<String> {
-    for raw in value.split(',') {
-        let name = raw.trim().trim_matches('"').trim_matches('\'').trim();
-        if name.is_empty() || name.eq_ignore_ascii_case("inherit") {
-            continue;
-        }
-        return Some(name.to_string());
-    }
-    None
+    let names: Vec<&str> = value
+        .split(',')
+        .map(|raw| raw.trim().trim_matches('"').trim_matches('\'').trim())
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("inherit"))
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// Parse a CSS `line-height` value. `normal` (and anything invalid or negative)
@@ -8388,10 +8394,14 @@ mod tests {
         // Spec 0 is always the default (no family, regular).
         assert_eq!(specs[0].family, None);
         assert!(!specs[0].bold && !specs[0].italic);
-        // The first family in the stack wins; bold/italic runs get variant specs.
+        // The whole stack is interned (resolution walks it in author order, so
+        // `serif` is still reachable when Georgia is absent); bold/italic runs
+        // get variant specs.
         let georgia = |bold: bool, italic: bool| {
             specs.iter().any(|s| {
-                s.family.as_deref() == Some("Georgia") && s.bold == bold && s.italic == italic
+                s.family.as_deref() == Some("Georgia, serif")
+                    && s.bold == bold
+                    && s.italic == italic
             })
         };
         assert!(georgia(false, false), "{specs:?}");

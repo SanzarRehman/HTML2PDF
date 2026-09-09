@@ -722,6 +722,9 @@ fn load_family(name: &str) -> Result<(Vec<u8>, u32), String> {
 /// Interned per document during box-tree building; resolved once per render.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FontSpec {
+    /// The declared `font-family` stack, normalized to a comma-separated list
+    /// of unquoted names (`"Helvetica, Arial, sans-serif"`). Resolution walks it
+    /// in author order; see [`font_stack`].
     pub family: Option<String>,
     pub bold: bool,
     pub italic: bool,
@@ -743,38 +746,86 @@ pub struct ResolvedFont {
 /// font (bold stays synthesized: a path-loaded primary has no reliable family
 /// to find a bold sibling in). Unresolvable families fall back the same way.
 pub fn resolve_spec(primary: &Arc<Font>, spec: &FontSpec) -> ResolvedFont {
-    let Some(family) = &spec.family else {
+    let Some(families) = &spec.family else {
         return ResolvedFont {
             font: primary.clone(),
             faux_bold: spec.bold,
         };
     };
 
+    // Walk the declared stack in author order, as a browser does: the first
+    // name that resolves to a real face wins, generics included. Stopping at
+    // the first name would drop `Helvetica, Arial, sans-serif` onto the
+    // built-in base-14 face on any machine without Helvetica.
+    for family in font_stack(families) {
+        if let Some((font, real_bold)) = load_family_cached(family, spec.bold, spec.italic) {
+            return ResolvedFont {
+                faux_bold: spec.bold && !real_bold,
+                font,
+            };
+        }
+    }
+    ResolvedFont {
+        font: primary.clone(),
+        faux_bold: spec.bold,
+    }
+}
+
+/// `load_family_variant`, memoized per `(family, bold, italic)` across renders.
+/// A miss is cached too, so a document naming an absent family does not re-query
+/// the font database for every run.
+fn load_family_cached(family: &str, bold: bool, italic: bool) -> Option<(Arc<Font>, bool)> {
     type CacheKey = (String, bool, bool);
     type CacheValue = Option<(Arc<Font>, bool)>; // (face, is real bold); None = lookup failed
     static CACHE: std::sync::OnceLock<Mutex<HashMap<CacheKey, CacheValue>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    let key = (family.to_ascii_lowercase(), spec.bold, spec.italic);
-    let cached = lock_recover(cache).get(&key).cloned();
-    let loaded = match cached {
-        Some(hit) => hit,
-        None => {
-            let loaded = load_family_variant(family, spec.bold, spec.italic);
-            lock_recover(cache).insert(key, loaded.clone());
-            loaded
+    let key = (family.to_ascii_lowercase(), bold, italic);
+    if let Some(hit) = lock_recover(cache).get(&key).cloned() {
+        return hit;
+    }
+    let loaded = load_family_variant(family, bold, italic);
+    lock_recover(cache).insert(key, loaded.clone());
+    loaded
+}
+
+/// Split a normalized `font-family` stack (`"Helvetica, Arial, sans-serif"`)
+/// into its names, in author order.
+pub fn font_stack(families: &str) -> impl Iterator<Item = &str> {
+    families
+        .split(',')
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+}
+
+/// Metric-compatible substitutes for families a machine is unlikely to ship,
+/// in preference order — the same substitutions fontconfig makes, which is why
+/// a browser on Linux renders `Helvetica` in Liberation Sans and gets Liberation
+/// Sans's metrics. Without these a document asking for `Helvetica` or `Times`
+/// falls all the way through to the built-in base-14 face, whose `line-height:
+/// normal` is a flat 1.35 em — about 24% taller than a browser's line.
+fn metric_aliases(name: &str) -> &'static [&'static str] {
+    match name.to_ascii_lowercase().as_str() {
+        "helvetica" | "helvetica neue" | "arial" => {
+            &["Arial", "Liberation Sans", "Nimbus Sans", "Helvetica", "DejaVu Sans"]
         }
-    };
-    match loaded {
-        Some((font, real_bold)) => ResolvedFont {
-            faux_bold: spec.bold && !real_bold,
-            font,
-        },
-        None => ResolvedFont {
-            font: primary.clone(),
-            faux_bold: spec.bold,
-        },
+        "times" | "times new roman" => &[
+            "Times New Roman",
+            "Liberation Serif",
+            "Nimbus Roman",
+            "Times",
+            "DejaVu Serif",
+        ],
+        "courier" | "courier new" => &[
+            "Courier New",
+            "Liberation Mono",
+            "Nimbus Mono PS",
+            "Courier",
+            "DejaVu Sans Mono",
+        ],
+        "arial narrow" => &["Liberation Sans Narrow", "DejaVu Sans Condensed"],
+        _ => &[],
     }
 }
 
@@ -793,11 +844,22 @@ fn load_family_variant(name: &str, bold: bool, italic: bool) -> Option<(Arc<Font
         _ => fontdb::Family::Name(name),
     };
     let db = system_font_db();
-    let id = db.query(&fontdb::Query {
-        families: &[family],
-        weight: if bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL },
-        style: if italic { fontdb::Style::Italic } else { fontdb::Style::Normal },
-        ..Default::default()
+    let weight = if bold { fontdb::Weight::BOLD } else { fontdb::Weight::NORMAL };
+    let style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+    let query = |family: fontdb::Family<'_>| {
+        db.query(&fontdb::Query {
+            families: &[family],
+            weight,
+            style,
+            ..Default::default()
+        })
+    };
+    // The declared name, then its metric-compatible substitutes. `fontdb` has no
+    // alias table of its own, so an exact miss would otherwise end the search.
+    let id = query(family).or_else(|| {
+        metric_aliases(name)
+            .iter()
+            .find_map(|alias| query(fontdb::Family::Name(alias)))
     })?;
     let real_bold = db
         .face(id)
@@ -961,23 +1023,34 @@ pub fn resolve_spec_with(
     spec: &FontSpec,
     web_fonts: &[WebFont],
 ) -> ResolvedFont {
-    if let Some(family) = &spec.family {
-        let mut best: Option<(&WebFont, u8)> = None;
-        for candidate in web_fonts {
-            if !candidate.family_lower.eq_ignore_ascii_case(family) {
-                continue;
+    if let Some(families) = &spec.family {
+        // Author order across the whole stack: for each declared family, an
+        // `@font-face` rule for that name shadows the system face of the same
+        // name, but a later family in the stack never outranks an earlier one.
+        for family in font_stack(families) {
+            let mut best: Option<(&WebFont, u8)> = None;
+            for candidate in web_fonts {
+                if !candidate.family_lower.eq_ignore_ascii_case(family) {
+                    continue;
+                }
+                let score = u8::from(candidate.bold == spec.bold) * 2
+                    + u8::from(candidate.italic == spec.italic);
+                if best.is_none_or(|(_, s)| score > s) {
+                    best = Some((candidate, score));
+                }
             }
-            let score = u8::from(candidate.bold == spec.bold) * 2
-                + u8::from(candidate.italic == spec.italic);
-            if best.is_none_or(|(_, s)| score > s) {
-                best = Some((candidate, score));
+            if let Some((chosen, _)) = best {
+                return ResolvedFont {
+                    font: chosen.font.clone(),
+                    faux_bold: spec.bold && !chosen.bold,
+                };
             }
-        }
-        if let Some((chosen, _)) = best {
-            return ResolvedFont {
-                font: chosen.font.clone(),
-                faux_bold: spec.bold && !chosen.bold,
-            };
+            if let Some((font, real_bold)) = load_family_cached(family, spec.bold, spec.italic) {
+                return ResolvedFont {
+                    faux_bold: spec.bold && !real_bold,
+                    font,
+                };
+            }
         }
     }
     resolve_spec(primary, spec)
@@ -1617,6 +1690,67 @@ mod tests {
             })
             .sum();
         assert!((whole - sum).abs() < 0.01, "whole {whole} vs sum {sum}");
+    }
+
+    #[test]
+    fn a_font_stack_resolves_past_its_first_name() {
+        use super::{resolve_spec, FontSpec};
+        let primary = std::sync::Arc::new(Font::helvetica());
+        let spec = |family: &str| FontSpec {
+            family: Some(family.to_string()),
+            bold: false,
+            italic: false,
+        };
+
+        // Only meaningful on a machine that has any sans-serif face at all.
+        let generic = resolve_spec(&primary, &spec("sans-serif"));
+        if generic.font.embedding().is_none() {
+            return;
+        }
+
+        // A stack whose earlier names are absent must still reach the generic
+        // (and its real metrics), not drop to the built-in base-14 face whose
+        // `line-height: normal` is a flat 1.35 em.
+        for stack in [
+            "NoSuchFontXYZ, sans-serif",
+            "NoSuchFontXYZ, AlsoMissingQQ, sans-serif",
+            "Helvetica, Arial, sans-serif",
+        ] {
+            let resolved = resolve_spec(&primary, &spec(stack));
+            assert!(
+                resolved.font.embedding().is_some(),
+                "{stack} fell through to the base-14 face"
+            );
+            assert!(
+                resolved.font.line_content_fraction() < 1.35,
+                "{stack} kept the 1.35-em base-14 line box"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolved_face_gives_a_browser_like_normal_line_box() {
+        use super::{resolve_spec, FontSpec};
+        let primary = std::sync::Arc::new(Font::helvetica());
+        let resolved = resolve_spec(
+            &primary,
+            &FontSpec {
+                family: Some("Helvetica, Arial, sans-serif".to_string()),
+                bold: false,
+                italic: false,
+            },
+        );
+        if resolved.font.embedding().is_none() {
+            return; // no system face available on this machine
+        }
+        // Chrome's used `normal` for the common sans faces sits around
+        // 1.09-1.15 em (it rounds ascent/descent/gap to whole CSS pixels, so the
+        // ratio drifts with size). Anything near 1.35 is the old flat constant.
+        let fraction = resolved.font.line_content_fraction();
+        assert!(
+            (0.95..=1.25).contains(&fraction),
+            "normal line box {fraction} em is not browser-like"
+        );
     }
 
     #[test]
