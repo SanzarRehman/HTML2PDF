@@ -959,6 +959,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
         fonts: &fonts,
         links: &links,
         running: &running,
+        quirks: dom.quirks,
     };
     let flow = build_flow(&dom, &env);
 
@@ -1128,6 +1129,8 @@ struct FlowEnv<'a> {
     /// leave the flow instead of being pushed onto the current block's children.
     /// A `RefCell` for the same reason the interners are.
     running: &'a std::cell::RefCell<Vec<RunningElement>>,
+    /// The parser's quirks mode (see `Dom::quirks`).
+    quirks: bool,
 }
 
 /// Lower the DOM into the flow box tree (ADR 0002 step 8) for non-table
@@ -1603,7 +1606,10 @@ fn build_node(
                 }
             } else if is_block_tag(tag) {
                 acc.flush_line();
-                if let Some(block) = build_block(dom, id, env, ctx, tag, false) {
+                if let Some(mut block) = build_block(dom, id, env, ctx, tag, false) {
+                    if tag == "body" && env.quirks {
+                        apply_body_margin_quirk(dom, id, env, &mut block);
+                    }
                     acc.children.push(crate::box_tree::BoxChild::Block(block));
                 }
             } else {
@@ -2964,6 +2970,7 @@ fn collect_cell_runs(
         fonts,
         links,
         running: &cell_running,
+        quirks: dom.quirks,
     };
     let family = style
         .font_family
@@ -3381,6 +3388,54 @@ fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
 /// Arial must still reach the generic `sans-serif` (and through it a real face
 /// with real metrics) rather than dropping to the built-in base-14 face.
 /// `crate::font::font_stack` walks the list at resolve time.
+/// Quirks mode: a *UA-default* top margin on `<body>`'s first in-flow block,
+/// and bottom margin on its last, is ignored. This is Blink's "quirky margin"
+/// rule (margins the UA sheet sets in `__qem` units), inherited from the
+/// Netscape era; it is why a DOCTYPE-less page's leading `<h1>` sits flush
+/// against the top of the body in every browser. Authored margins are kept.
+fn apply_body_margin_quirk(
+    dom: &crate::dom::Dom,
+    body: crate::dom::NodeId,
+    env: &FlowEnv,
+    block: &mut crate::box_tree::BlockBox,
+) {
+    let computed = env.computed;
+    let in_flow_element = |id: crate::dom::NodeId| {
+        let node = dom.node(id);
+        let Some(tag) = node.tag() else { return false };
+        let style = &computed.style[id];
+        is_block_tag(tag)
+            && !computed.hidden[id]
+            && style.running.is_none()
+            && style.float_dir.is_none()
+            && !matches!(style.position, Some(PositionKind::Absolute) | Some(PositionKind::Fixed))
+    };
+    let in_flow_box = |child: &crate::box_tree::BoxChild| match child {
+        crate::box_tree::BoxChild::Block(b) => {
+            b.float_dir.is_none()
+                && !matches!(b.position, Some(PositionKind::Absolute) | Some(PositionKind::Fixed))
+        }
+        _ => false,
+    };
+    let elements: Vec<_> = dom.node(body).children.iter().copied().filter(|&id| in_flow_element(id)).collect();
+    let (Some(&first_id), Some(&last_id)) = (elements.first(), elements.last()) else { return };
+
+    if computed.style[first_id].margin_top.is_none() {
+        if let Some(crate::box_tree::BoxChild::Block(first)) =
+            block.children.iter_mut().find(|c| in_flow_box(c))
+        {
+            first.margin.top = 0.0;
+        }
+    }
+    if computed.style[last_id].margin_bottom.is_none() {
+        if let Some(crate::box_tree::BoxChild::Block(last)) =
+            block.children.iter_mut().rev().find(|c| in_flow_box(c))
+        {
+            last.margin.bottom = 0.0;
+        }
+    }
+}
+
 /// The tag `build_block` should treat a running element as. A running element
 /// is block-level by definition (CSS GCPM), so an inline tag carrying
 /// `position: running()` — a `<span>` header, say — is still built as a block

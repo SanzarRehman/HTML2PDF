@@ -141,16 +141,47 @@ pub struct TrueTypeFont {
     data: Vec<u8>,
     pub index: u32,
     pub postscript_name: String,
+    /// The face's family name (`name` ID 1), e.g. "Helvetica", "Arial".
+    pub family_name: String,
     pub units_per_em: f32,
     advances: HashMap<char, u16>,
     default_advance: u16,
     pub ascent: i32,
     pub descent: i32,
+    /// `hhea` line gap, PDF units. Not part of our `normal` line box (see
+    /// `line_content_fraction`), but its being zero is what triggers Blink's
+    /// macOS ascent quirk.
+    pub line_gap: i32,
     pub cap_height: i32,
     pub bbox: [i32; 4],
     pub italic_angle: f32,
     pub flags: u32,
     pub stem_v: i32,
+}
+
+impl TrueTypeFont {
+    /// Blink's macOS ascent quirk, as a fraction of the em.
+    ///
+    /// The three classic Mac faces — Helvetica, Times, Courier — ship with a
+    /// zero `hhea` line gap, so their natural line box is exactly 1 em. Safari
+    /// has always padded that, and Chrome kept the behaviour to match it:
+    /// for those faces the ascent is inflated by 15% of ascent+descent, which
+    /// is why `line-height: normal` for 12pt Helvetica measures 13.5pt in
+    /// Chrome rather than 12pt. Every other face — Arial, Times New Roman,
+    /// Liberation, Nimbus — has a real line gap and gets nothing here.
+    fn mac_ascent_quirk(&self) -> f32 {
+        if self.line_gap != 0 {
+            return 0.0;
+        }
+        // Keyed on the family name exactly as Blink does; "Helvetica Neue" and
+        // "Times New Roman" are different faces with real line gaps.
+        let classic = matches!(self.family_name.as_str(), "Helvetica" | "Times" | "Courier");
+        if classic {
+            0.15 * (self.ascent - self.descent) as f32 / 1000.0
+        } else {
+            0.0
+        }
+    }
 }
 
 /// One glyph of a shaped run.
@@ -248,7 +279,9 @@ impl Font {
             // metrics do (font-less documents must also stay byte-identical).
             FontKind::Helvetica => 0.8,
             // `ascent` is in PDF 1000-unit em; clamp against a degenerate face.
-            FontKind::TrueType(font) => (font.ascent as f32 / 1000.0).clamp(0.6, 1.2),
+            FontKind::TrueType(font) => {
+                (font.ascent as f32 / 1000.0 + font.mac_ascent_quirk()).clamp(0.6, 1.2)
+            }
         }
     }
 
@@ -270,7 +303,8 @@ impl Font {
             FontKind::Helvetica => 1.156,
             // descent is stored negative, so `ascent - descent` = ascent + |descent|.
             FontKind::TrueType(font) => {
-                ((font.ascent - font.descent) as f32 / 1000.0).clamp(1.0, 2.0)
+                ((font.ascent - font.descent) as f32 / 1000.0 + font.mac_ascent_quirk())
+                    .clamp(1.0, 2.0)
             }
         }
     }
@@ -661,15 +695,18 @@ impl TrueTypeFont {
             flags |= 64;
         }
 
+        let (postscript_name, family_name) = face_names(&face);
         let mut font = TrueTypeFont {
             face: None,
             shape_cache: Mutex::new(HashMap::new()),
-            postscript_name: postscript_name(&face),
+            postscript_name,
+            family_name,
             units_per_em,
             advances,
             default_advance,
             ascent: to_pdf(i32::from(face.ascender())),
             descent: to_pdf(i32::from(face.descender())),
+            line_gap: to_pdf(i32::from(face.line_gap())),
             cap_height: to_pdf(cap_height),
             bbox: [
                 to_pdf(i32::from(bbox.x_min)),
@@ -1167,29 +1204,61 @@ pub(crate) fn contains_rtl(text: &str) -> bool {
     })
 }
 
-fn postscript_name(face: &ttf_parser::Face) -> String {
+/// A `name`-table record as text. `ttf_parser` decodes only Unicode and
+/// Windows records; the classic macOS system faces (Helvetica.ttc,
+/// Times.ttc, Courier.ttc) ship *Macintosh*-platform records only, which
+/// left every one of them anonymous ("EmbeddedFont"). Mac Roman is a
+/// single-byte encoding whose first half is ASCII, which covers every real
+/// face name we care about; anything outside that range is dropped.
+fn name_record_text(name: &ttf_parser::name::Name) -> Option<String> {
+    if let Some(text) = name.to_string() {
+        return Some(text);
+    }
+    if name.platform_id != ttf_parser::PlatformId::Macintosh {
+        return None;
+    }
+    let text: String = name
+        .name
+        .iter()
+        .filter(|b| b.is_ascii() && !b.is_ascii_control())
+        .map(|&b| b as char)
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The face's PostScript name (ID 6) and family name (ID 1), cleaned for use
+/// in a PDF `/BaseFont`. Either falls back to the other, then to
+/// "EmbeddedFont".
+fn face_names(face: &ttf_parser::Face) -> (String, String) {
     let mut postscript = None;
     let mut family = None;
     for name in face.names() {
-        let Some(value) = name.to_string() else {
+        let Some(value) = name_record_text(&name) else {
             continue;
         };
         match name.name_id {
-            6 => postscript = Some(value),
+            6 if postscript.is_none() => postscript = Some(value),
             1 if family.is_none() => family = Some(value),
             _ => {}
         }
     }
-    let raw = postscript.or(family).unwrap_or_else(|| "EmbeddedFont".to_string());
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '+')
-        .collect();
-    if cleaned.is_empty() {
-        "EmbeddedFont".to_string()
-    } else {
-        cleaned
-    }
+    let clean = |raw: Option<&String>| -> Option<String> {
+        let cleaned: String = raw?
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '+' || *c == ' ')
+            .collect();
+        (!cleaned.trim().is_empty()).then(|| cleaned.trim().to_string())
+    };
+    let family_clean = clean(family.as_ref());
+    let postscript_clean = clean(postscript.as_ref()).map(|n| n.replace(' ', ""));
+    let ps = postscript_clean
+        .clone()
+        .or_else(|| family_clean.as_ref().map(|n| n.replace(' ', "")))
+        .unwrap_or_else(|| "EmbeddedFont".to_string());
+    let fam = family_clean
+        .or(postscript_clean)
+        .unwrap_or_else(|| "EmbeddedFont".to_string());
+    (ps, fam)
 }
 
 /// Map a WinAnsi byte to its Unicode scalar (used to look up glyphs/widths).
@@ -1843,3 +1912,4 @@ mod tests {
         assert_eq!(winansi_to_char(0x81), None); // undefined WinAnsi code
     }
 }
+

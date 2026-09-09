@@ -32,6 +32,10 @@ pub type NodeId = usize;
 #[derive(Debug, Clone, Default)]
 pub struct Dom {
     pub nodes: Vec<Node>,
+    /// The parser landed in quirks mode (no, or a legacy, `<!DOCTYPE>`).
+    /// Browsers render such documents with a handful of Netscape-era layout
+    /// quirks; the ones we reproduce are noted at their sites in `html.rs`.
+    pub quirks: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +466,8 @@ impl TreeSink for ArenaSink {
                 children: Vec::new(),
                 data: NodeData::Document,
             }],
+            // Limited-quirks mode carries none of the layout quirks we model.
+            quirks: matches!(self.quirks.get(), QuirksMode::Quirks),
         };
         lower(&sink, 0, 0, &mut dom);
         dom
