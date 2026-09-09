@@ -191,6 +191,11 @@ pub struct BlockBox {
     /// line, in points / percent of the containing width.
     pub text_indent: f32,
     pub text_indent_percent: Option<f32>,
+    /// Forced fragmentation breaks (`break-before`/`break-after` and their
+    /// `page-break-*` aliases): start this block on a fresh page, and/or start
+    /// whatever follows it on one.
+    pub break_before: Option<crate::html::BreakKind>,
+    pub break_after: Option<crate::html::BreakKind>,
     /// CSS `position` (static when `None`) with its box offsets in points.
     pub position: Option<PositionKind>,
     /// CSS `z-index` (`None` = `auto` = 0): paint order among positioned boxes.

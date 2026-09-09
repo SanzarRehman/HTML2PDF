@@ -754,6 +754,8 @@ fn layout_flow(flow: &crate::box_tree::FlowRoot, options: &RenderOptions) -> Vec
         options,
     );
 
+    drop_trailing_blank_page(&mut pages, &overlays);
+
     // Positioned boxes paint above the flow, in z-index order; `fixed` ones
     // repeat on every page.
     apply_overlays(&mut pages, overlays);
@@ -789,6 +791,26 @@ fn layout_box_children(
 
     let mut pending_indent = text_indent;
     for child in children {
+        // Forced fragmentation breaks. Out-of-flow boxes (absolute/fixed) and
+        // floats are not in the block progression, so a break declared on one
+        // has nothing to break.
+        let forced = match child {
+            BoxChild::Block(block)
+                if block.float_dir.is_none()
+                    && !matches!(
+                        block.position,
+                        Some(crate::html::PositionKind::Absolute)
+                            | Some(crate::html::PositionKind::Fixed)
+                    ) =>
+            {
+                (block.break_before, block.break_after)
+            }
+            _ => (None, None),
+        };
+        if forced.0.is_some() {
+            force_page_break(pages, y, carried, options);
+        }
+
         match child {
             BoxChild::Block(block)
                 if matches!(
@@ -899,6 +921,14 @@ fn layout_box_children(
             BoxChild::Table(table) => {
                 layout_table_box(table, width, pages, y, carried, options);
             }
+        }
+
+        if forced.1.is_some() {
+            // Break eagerly rather than deferring to the next sibling, so a
+            // `break-after` on the last child of a nested block still moves the
+            // outer flow onto a new page. `layout_flow` drops the resulting
+            // page if nothing ever lands on it.
+            force_page_break(pages, y, carried, options);
         }
     }
 }
@@ -4154,6 +4184,53 @@ fn push_page(pages: &mut Vec<Page>, y: &mut f32, options: &RenderOptions) {
     *y = options.page_size.height - options.margin_top;
 }
 
+/// Whether anything has actually landed on the current page. A forced break on
+/// an already-blank page would only manufacture an empty sheet.
+fn current_page_has_content(pages: &[Page]) -> bool {
+    pages.last().is_some_and(|page| {
+        !page.commands.is_empty()
+            || !page.lines.is_empty()
+            || !page.rects.is_empty()
+            || !page.link_areas.is_empty()
+    })
+}
+
+/// Honour a forced `break-before`/`break-after`: start a fresh page unless the
+/// current one is still blank (which collapses back-to-back breaks). Any
+/// collapsed margin pending at the break is dropped — margins do not survive a
+/// page boundary.
+fn force_page_break(
+    pages: &mut Vec<Page>,
+    y: &mut f32,
+    carried: &mut f32,
+    options: &RenderOptions,
+) {
+    if !current_page_has_content(pages) {
+        *carried = 0.0;
+        return;
+    }
+    push_page(pages, y, options);
+    *carried = 0.0;
+}
+
+/// Drop a trailing page that a `break-after` on the last block opened and that
+/// nothing ever landed on — including any positioned box captured for it. The
+/// only page is never dropped.
+fn drop_trailing_blank_page(pages: &mut Vec<Page>, overlays: &[Overlay]) {
+    if pages.len() < 2 {
+        return;
+    }
+    let last = pages.len() - 1;
+    let blank = pages[last].commands.is_empty()
+        && pages[last].lines.is_empty()
+        && pages[last].rects.is_empty()
+        && pages[last].link_areas.is_empty()
+        && pages[last].anchors.is_empty();
+    if blank && !overlays.iter().any(|overlay| overlay.page == Some(last)) {
+        pages.pop();
+    }
+}
+
 fn layout_table_row(
     cells: &[TableCell],
     table_geometry: &TableGeometry,
@@ -5427,6 +5504,110 @@ mod tests {
         RenderOptions,
     };
 
+    /// Render a flow document at Letter and count the pages it needs.
+    fn page_count(html: &str) -> usize {
+        let document = crate::html::parse(html);
+        let options = RenderOptions::default()
+            .with_paper(super::Paper::Letter)
+            .with_document_hints(&document);
+        layout_document(&document, &options).len()
+    }
+
+    #[test]
+    fn forced_breaks_start_a_new_page() {
+        // Chrome on the same markup: 4 pages for a `-before` break, 3 for an
+        // `-after` break, in both the legacy and the modern spelling.
+        let sections = |declaration: &str| {
+            let mut html = String::from("<p>Intro paragraph.</p>");
+            for index in 1..=3 {
+                html.push_str(&format!(
+                    "<div style=\"{declaration}\">Section {index}</div>"
+                ));
+            }
+            html
+        };
+        for (declaration, expected) in [
+            ("page-break-before: always", 4),
+            ("break-before: page", 4),
+            ("page-break-after: always", 3),
+            ("break-after: page", 3),
+        ] {
+            assert_eq!(
+                page_count(&sections(declaration)),
+                expected,
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_and_avoid_force_nothing() {
+        for declaration in ["break-before: auto", "break-before: avoid", "break-inside: avoid"] {
+            assert_eq!(
+                page_count(&format!(
+                    "<p>Intro</p><div style=\"{declaration}\">A</div><div style=\"{declaration}\">B</div>"
+                )),
+                1,
+                "{declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trailing_break_after_leaves_no_blank_page() {
+        // The break opens a page; nothing follows, so that page is dropped.
+        assert_eq!(
+            page_count("<p>Intro</p><div style=\"break-after: page\">Last</div>"),
+            1
+        );
+        // With content after it, the break is real.
+        assert_eq!(
+            page_count("<p>Intro</p><div style=\"break-after: page\">Mid</div><p>Tail</p>"),
+            2
+        );
+    }
+
+    #[test]
+    fn back_to_back_breaks_do_not_manufacture_blank_pages() {
+        // A `break-after` immediately followed by a `break-before` is one page
+        // boundary, not two.
+        assert_eq!(
+            page_count(
+                "<div style=\"break-after: page\">A</div>\
+                 <div style=\"break-before: page\">B</div>"
+            ),
+            2
+        );
+        // A break on the very first block has nothing above it to break from.
+        assert_eq!(page_count("<div style=\"break-before: page\">A</div>"), 1);
+    }
+
+    #[test]
+    fn a_forced_break_inside_a_wrapper_still_breaks_the_page() {
+        assert_eq!(
+            page_count(
+                "<p>Intro</p><section><div style=\"break-before: page\">Nested</div></section>"
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn a_break_on_an_out_of_flow_box_is_ignored() {
+        // Absolute/fixed boxes are not in the block progression, so a break
+        // declared on one has nothing to break.
+        for position in ["absolute", "fixed"] {
+            assert_eq!(
+                page_count(&format!(
+                    "<p>Intro</p><div style=\"position:{position};top:10pt;left:10pt;\
+                     break-before:page\">Out</div>"
+                )),
+                1,
+                "{position}"
+            );
+        }
+    }
+
     #[test]
     fn page_size_comes_from_the_at_page_rule() {
         // `@page { size }` reaches layout in every accepted spelling.
@@ -6559,7 +6740,9 @@ mod tests {
                     center: false,
                     line_height: None,
                     rtl: false,
-                    position: None,
+                    break_before: None,
+                break_after: None,
+                position: None,
                     z_index: None,
                     offset_top: None,
                     offset_right: None,
@@ -6658,7 +6841,9 @@ mod tests {
                     center: false,
                     line_height: None,
                     rtl: false,
-                    position: None,
+                    break_before: None,
+                break_after: None,
+                position: None,
                     z_index: None,
                     offset_top: None,
                     offset_right: None,
@@ -6755,6 +6940,8 @@ mod tests {
                 center: false,
                 line_height: None,
                 rtl: false,
+                break_before: None,
+                break_after: None,
                 position: None,
                 z_index: None,
                 offset_top: None,
@@ -6880,7 +7067,9 @@ mod tests {
                         center: false,
                         line_height,
                         rtl: false,
-                        position: None,
+                        break_before: None,
+                break_after: None,
+                position: None,
                         z_index: None,
                         offset_top: None,
                         offset_right: None,
@@ -6976,7 +7165,9 @@ mod tests {
                     center: false,
                     line_height: None,
                     rtl: false,
-                    position: None,
+                    break_before: None,
+                break_after: None,
+                position: None,
                     z_index: None,
                     offset_top: None,
                     offset_right: None,

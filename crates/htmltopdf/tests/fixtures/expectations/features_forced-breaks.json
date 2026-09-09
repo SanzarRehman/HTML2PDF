@@ -1,0 +1,18 @@
+{
+  "fixture": "forced-breaks",
+  "layer": "features",
+  "description": "Forced page breaks: page-break-before/after and break-before/after: page all start a new page; avoid/auto do not, and a trailing break-after leaves no blank page.",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "Tj"],
+    "must_contain_text": ["(Alpha)", "(Bravo)", "(Charlie)", "(Delta)", "(Echo)", "(Foxtrot)"],
+    "page_box": [612, 792],
+    "min_pages": 5,
+    "max_pages": 5,
+    "min_size_bytes": 500
+  },
+  "visual_assertions": [
+    "Five pages: Intro/Alpha, Legacy/Bravo, Modern/Charlie, After/Delta, then Last/Echo followed by Foxtrot.",
+    "Foxtrot sits directly under Echo on the final page — break-before: avoid forces nothing.",
+    "There is no blank sixth page from the trailing break-after."
+  ]
+}

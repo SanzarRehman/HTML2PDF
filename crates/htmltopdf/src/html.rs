@@ -394,6 +394,10 @@ pub struct CellStyle {
     pub float_dir: Option<FloatDir>,
     /// CSS `clear`.
     pub clear: Option<Clear>,
+    /// CSS `break-before` / `break-after` (and their `page-break-*` aliases).
+    /// `None` = `auto`; these are *not* inherited.
+    pub break_before: Option<BreakKind>,
+    pub break_after: Option<BreakKind>,
     /// CSS `position` (static when `None`) and its box offsets, points.
     pub position: Option<PositionKind>,
     /// CSS `z-index` (`None` = `auto`), meaningful on positioned boxes.
@@ -487,6 +491,8 @@ impl Default for CellStyle {
             grid_col_end: None,
             float_dir: None,
             clear: None,
+            break_before: None,
+            break_after: None,
             position: None,
             z_index: None,
             offset_top: None,
@@ -670,6 +676,31 @@ pub enum OverflowWrap {
 pub enum WordBreak {
     Normal,
     BreakAll,
+}
+
+/// A forced fragmentation break, from `break-before`/`break-after` or their
+/// legacy `page-break-*` aliases. Only the "start a new page here" half is
+/// modelled: `avoid` needs the block measured before placement, which is a
+/// separate problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakKind {
+    /// `always` / `page` / `left` / `right` / `recto` / `verso`: force a page break.
+    Page,
+}
+
+impl BreakKind {
+    /// Parse a `break-before`/`break-after`/`page-break-before`/`page-break-after`
+    /// value. `auto`, `avoid`, and the column/region keywords produce `None` —
+    /// there is nothing to force.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            // `left`/`right`/`recto`/`verso` ask for a specific page side. We
+            // have no left/right page distinction, so they degrade to a plain
+            // forced break rather than being dropped.
+            "always" | "page" | "left" | "right" | "recto" | "verso" => Some(BreakKind::Page),
+            _ => None,
+        }
+    }
 }
 
 /// CSS `position` scheme (static is `None` on the style).
@@ -1808,6 +1839,8 @@ fn build_block(
         rtl: base_rtl,
         text_indent: own.text_indent.unwrap_or(0.0),
         text_indent_percent: own.text_indent_percent,
+        break_before: own.break_before,
+        break_after: own.break_after,
         position: own.position,
         z_index: own.z_index,
         offset_top: own.offset_top,
@@ -3112,6 +3145,10 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         grid_col_end: own.grid_col_end,
         float_dir: own.float_dir,
         clear: own.clear,
+        // Fragmentation breaks are not inherited: only the element that
+        // declares one breaks there.
+        break_before: own.break_before,
+        break_after: own.break_after,
         position: own.position,
         z_index: own.z_index,
         offset_top: own.offset_top,
@@ -5801,6 +5838,14 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
                 target.cell.grid_area = Some(Box::from(v));
             }
         }
+        // `page-break-*` is the legacy alias of `break-*`; both map onto the
+        // same forced-break flag.
+        "break-before" | "page-break-before" => {
+            target.cell.break_before = BreakKind::parse(value);
+        }
+        "break-after" | "page-break-after" => {
+            target.cell.break_after = BreakKind::parse(value);
+        }
         "position" => {
             target.cell.position = match value.trim().to_ascii_lowercase().as_str() {
                 "relative" => Some(PositionKind::Relative),
@@ -6811,6 +6856,8 @@ impl CellStyle {
         self.grid_col_end = other.grid_col_end.or(self.grid_col_end);
         self.float_dir = other.float_dir.or(self.float_dir);
         self.clear = other.clear.or(self.clear);
+        self.break_before = other.break_before.or(self.break_before);
+        self.break_after = other.break_after.or(self.break_after);
         self.position = other.position.or(self.position);
         self.z_index = other.z_index.or(self.z_index);
         self.offset_top = other.offset_top.or(self.offset_top);

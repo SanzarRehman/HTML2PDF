@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      /* Four short sections that would otherwise share one page. Each forced
+         break is spelled differently; all four must move the page on, so the
+         document is exactly five pages (intro + four sections). */
+      @page {
+        size: 8.5in 11in;
+        margin: 0.5in;
+      }
+      body {
+        font-size: 12pt;
+        margin: 0;
+      }
+      h2 {
+        font-size: 15pt;
+        margin: 0 0 8pt;
+      }
+      .legacy-before {
+        page-break-before: always;
+      }
+      .modern-before {
+        break-before: page;
+      }
+      .legacy-after {
+        page-break-after: always;
+      }
+      .modern-after {
+        break-after: page;
+      }
+      .stays {
+        break-before: avoid;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Intro</h2>
+    <p>Alpha</p>
+
+    <div class="legacy-before">
+      <h2>Legacy</h2>
+      <p>Bravo</p>
+    </div>
+
+    <div class="modern-before">
+      <h2>Modern</h2>
+      <p>Charlie</p>
+    </div>
+
+    <div class="legacy-after">
+      <h2>After</h2>
+      <p>Delta</p>
+    </div>
+
+    <div class="modern-after">
+      <h2>Last</h2>
+      <p>Echo</p>
+    </div>
+
+    <!-- break-before: avoid is not a forced break: this must not open a
+         page of its own, and the trailing break-after above must not
+         manufacture a blank final page. -->
+    <p class="stays">Foxtrot</p>
+  </body>
+</html>

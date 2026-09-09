@@ -136,6 +136,7 @@ list is [../IMPLEMENTATION.md](../IMPLEMENTATION.md), and the parity fixtures in
 | PDF 1.7, streaming, FlateDecode compression | ✅ | |
 | Image XObjects, per-page backgrounds/borders | ✅ | |
 | Multi-page pagination, repeated table headers | ✅ | |
+| Forced page breaks (`break-before`/`break-after`, `page-break-before`/`page-break-after`) | 🟡 | `always`/`page` start a new page before/after the block, in flow and at any nesting depth; `left`/`right`/`recto`/`verso` degrade to a plain break (no left/right page distinction). Back-to-back breaks collapse and a trailing `break-after` leaves no blank page. Not on out-of-flow (absolute/fixed) or floated boxes, not between table rows, and `break-inside: avoid` is not implemented (it needs the block measured before placement). |
 | Configurable page size (named sizes or arbitrary dimensions, portrait/landscape), margins | ✅ | `--paper <name\|WIDTHxHEIGHT>`, `@page { size }`, or `RenderOptions::with_page_size` / `with_margins` (a caller value outranks both). |
 | Link annotations (`/Annots`) | 🟡 | URI actions + in-document `/Dest` (`#fragment` → `id` anchor); one merged rect per link per line, including inside table cells. No `PageMode /UseOutlines`, no `<a name>` anchors. |
 | Document outline (`/Outlines`) | ✅ | Built from `h1`–`h6` in document order; deeper levels nest under the closest shallower heading; non-ASCII titles as UTF-16BE. |
