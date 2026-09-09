@@ -1,7 +1,7 @@
 use crate::color::Color;
 use crate::html::{
     BlockKind, Document, LinearGradient, Overflow, OverflowWrap, PageMarginBoxArea,
-    PageOrientation, PageStyle, TableCell, TextAlign, VerticalAlign, WhiteSpace, WordBreak,
+    PageOrientation, TableCell, TextAlign, VerticalAlign, WhiteSpace, WordBreak,
 };
 use crate::paint::{
     DashPattern, ImageCommand, LineCommand, PaintCommand, RectCommand, RoundedRectCommand,
