@@ -31,6 +31,18 @@ pub struct Document {
     /// render (`font::load_font_faces`) and consulted ahead of system lookup
     /// when resolving `font_specs`.
     pub font_faces: Vec<crate::font::FontFaceRule>,
+    /// Elements taken out of flow by `position: running(<name>)`, in document
+    /// order. An `@page` margin box with `content: element(<name>)` lays out the
+    /// last one registered under that name. Empty for documents that use none.
+    pub running_elements: Vec<RunningElement>,
+}
+
+/// One `position: running(<name>)` element: the name it registered under and
+/// the block box that was removed from flow to fill it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunningElement {
+    pub name: Box<str>,
+    pub block: crate::box_tree::BlockBox,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -400,6 +412,11 @@ pub struct CellStyle {
     pub float_dir: Option<FloatDir>,
     /// CSS `clear`.
     pub clear: Option<Clear>,
+    /// `position: running(<name>)` (CSS GCPM): the element is removed from
+    /// flow and registered under this name for `content: element(<name>)` in an
+    /// `@page` margin box. Not inherited. A separate field rather than a
+    /// `PositionKind` variant, which is `Copy` and matched in several places.
+    pub running: Option<Box<str>>,
     /// CSS `break-before` / `break-after` (and their `page-break-*` aliases).
     /// `None` = `auto`; these are *not* inherited.
     pub break_before: Option<BreakKind>,
@@ -498,6 +515,7 @@ impl Default for CellStyle {
             grid_col_end: None,
             float_dir: None,
             clear: None,
+            running: None,
             break_before: None,
             break_after: None,
             position: None,
@@ -866,12 +884,22 @@ pub enum PageMarginBoxArea {
     BottomRight,
 }
 
-/// Text painted in a supported CSS Paged Media margin box. `content` is the
-/// raw CSS value so counters can be resolved against the final page count.
+/// What a supported CSS Paged Media margin box paints.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MarginContent {
+    /// The raw CSS `content` value — kept raw so `counter(page)` /
+    /// `counter(pages)` resolve against the final page count after pagination.
+    Text(String),
+    /// `content: element(<name>)` — the running element registered under this
+    /// name (`position: running(<name>)`), laid out as a block into the slot.
+    Element(Box<str>),
+}
+
+/// Content painted in a supported CSS Paged Media margin box.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageMarginBox {
     pub area: PageMarginBoxArea,
-    pub content: String,
+    pub content: MarginContent,
     pub font_size: Option<f32>,
     pub color: Option<Color>,
 }
@@ -922,6 +950,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
     // Build the flow box tree, with any `<table>` embedded as a `Table` box.
     let fonts = std::cell::RefCell::new(FontInterner::new());
     let links = std::cell::RefCell::new(LinkInterner::new());
+    let running = std::cell::RefCell::new(Vec::new());
     let env = FlowEnv {
         stylesheet: &stylesheet,
         computed: &computed,
@@ -929,6 +958,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
         row_height: table_style.row_height,
         fonts: &fonts,
         links: &links,
+        running: &running,
     };
     let flow = build_flow(&dom, &env);
 
@@ -963,6 +993,7 @@ fn finish(dom: crate::dom::Dom) -> Document {
         font_specs: fonts.into_specs(),
         links: links.into_inner().into_targets(),
         font_faces: stylesheet.font_faces,
+        running_elements: running.into_inner(),
     }
 }
 
@@ -1093,6 +1124,10 @@ struct FlowEnv<'a> {
     row_height: Option<f32>,
     fonts: &'a std::cell::RefCell<FontInterner>,
     links: &'a std::cell::RefCell<LinkInterner>,
+    /// Collects `position: running(<name>)` subtrees as they are built, so they
+    /// leave the flow instead of being pushed onto the current block's children.
+    /// A `RefCell` for the same reason the interners are.
+    running: &'a std::cell::RefCell<Vec<RunningElement>>,
 }
 
 /// Lower the DOM into the flow box tree (ADR 0002 step 8) for non-table
@@ -1146,6 +1181,15 @@ pub fn resolve_images(
     // tree; its cells carry images too.
     for block in &mut document.blocks {
         resolve_cell_images(&mut block.cells, base_dir, remote, &mut images);
+    }
+    // Running elements were lifted out of the flow tree before this pass, so
+    // their subtrees need resolving on their own — a logo or barcode in a
+    // running header is the common case for the feature.
+    for element in &mut document.running_elements {
+        let mut children = std::mem::take(&mut element.block.children);
+        resolve_images_in(&mut children, base_dir, remote, &mut images);
+        element.block.children = children;
+        resolve_background_image(&mut element.block.background, base_dir, remote, &mut images);
     }
     document.images = images;
 }
@@ -1544,6 +1588,18 @@ fn build_node(
                         acc.flush_line();
                         acc.children.push(crate::box_tree::BoxChild::Image(image));
                     }
+                }
+            } else if let Some(name) = computed.style[id].running.clone() {
+                // `position: running(<name>)`: build the subtree exactly as a
+                // block, then register it under its name instead of leaving it
+                // in flow. An `@page` margin box with `content: element(<name>)`
+                // lays it out; a name no box ever asks for simply disappears,
+                // which is what the CSS says should happen.
+                acc.flush_line();
+                if let Some(block) = build_block(dom, id, env, ctx, block_tag_for(tag), false) {
+                    env.running
+                        .borrow_mut()
+                        .push(RunningElement { name, block });
                 }
             } else if is_block_tag(tag) {
                 acc.flush_line();
@@ -2516,7 +2572,7 @@ fn parse_page_margin_box_declarations(raw: &str) -> Option<PageMarginBox> {
         };
         let (value, _) = normalize_declaration_value(value);
         match name.trim().to_ascii_lowercase().as_str() {
-            "content" => content = margin_content_is_valid(&value).then_some(value),
+            "content" => content = parse_margin_content(&value),
             "font-size" => font_size = parse_css_length(&value),
             "color" => color = parse_css_color(&value),
             _ => {}
@@ -2564,10 +2620,17 @@ fn split_page_declarations(raw: &str) -> Vec<&str> {
     declarations
 }
 
-/// Reject unsupported margin-box content at parse time instead of rendering a
-/// partial header/footer. Supported components are strings and page counters.
-fn margin_content_is_valid(raw: &str) -> bool {
-    resolve_margin_content(raw, 1, 1).is_some()
+/// Parse a margin-box `content` value, rejecting unsupported forms at parse
+/// time instead of rendering a partial header/footer. Supported: `element(name)`
+/// (a running element), and any mix of quoted strings and `counter(page)` /
+/// `counter(pages)`.
+fn parse_margin_content(raw: &str) -> Option<MarginContent> {
+    if let Some(name) = parse_functional_ident(raw, "element") {
+        return Some(MarginContent::Element(Box::from(name)));
+    }
+    // Trial-resolve against page 1 of 1: a value that cannot resolve then will
+    // never resolve.
+    resolve_margin_content(raw, 1, 1).map(|_| MarginContent::Text(raw.to_string()))
 }
 
 /// Resolve a CSS margin-box `content` value using final one-based page numbers.
@@ -2863,6 +2926,9 @@ fn collect_cell_runs(
     fonts: &std::cell::RefCell<FontInterner>,
     links: &std::cell::RefCell<LinkInterner>,
 ) -> Vec<crate::box_tree::InlineRun> {
+    // Cell content is never a running element (an `@page` slot cannot pull a
+    // subtree out of a table cell), so this registry is discarded.
+    let cell_running = std::cell::RefCell::new(Vec::new());
     let env = FlowEnv {
         stylesheet,
         computed,
@@ -2870,6 +2936,7 @@ fn collect_cell_runs(
         row_height: None,
         fonts,
         links,
+        running: &cell_running,
     };
     let family = style
         .font_family
@@ -3194,8 +3261,9 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         grid_col_end: own.grid_col_end,
         float_dir: own.float_dir,
         clear: own.clear,
-        // Fragmentation breaks are not inherited: only the element that
-        // declares one breaks there.
+        // Neither a running-element registration nor a fragmentation break is
+        // inherited: only the element that declares one is affected.
+        running: own.running.clone(),
         break_before: own.break_before,
         break_after: own.break_after,
         position: own.position,
@@ -3286,6 +3354,37 @@ fn infer_cell_alignment(style: &mut CellStyle, classes: &[&str]) {
 /// Arial must still reach the generic `sans-serif` (and through it a real face
 /// with real metrics) rather than dropping to the built-in base-14 face.
 /// `crate::font::font_stack` walks the list at resolve time.
+/// The tag `build_block` should treat a running element as. A running element
+/// is block-level by definition (CSS GCPM), so an inline tag carrying
+/// `position: running()` — a `<span>` header, say — is still built as a block
+/// rather than falling through to the inline path.
+fn block_tag_for(tag: &str) -> &str {
+    if is_block_tag(tag) {
+        tag
+    } else {
+        "div"
+    }
+}
+
+/// Parse a single-identifier CSS function (`running(header)`, `element(foo)`)
+/// and return its argument. Case-insensitive on the function name; the argument
+/// keeps its case (CSS custom identifiers are case-sensitive). `None` when the
+/// value is not that function, or its argument is empty or not an identifier.
+fn parse_functional_ident<'a>(value: &'a str, function: &str) -> Option<&'a str> {
+    let value = value.trim();
+    let open = value.find('(')?;
+    if !value[..open].trim().eq_ignore_ascii_case(function) || !value.ends_with(')') {
+        return None;
+    }
+    let name = value[open + 1..value.len() - 1].trim();
+    let valid = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+    valid.then_some(name)
+}
+
 fn parse_font_family(value: &str) -> Option<String> {
     let names: Vec<&str> = value
         .split(',')
@@ -5902,12 +6001,21 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
             target.cell.break_after = BreakKind::parse(value);
         }
         "position" => {
-            target.cell.position = match value.trim().to_ascii_lowercase().as_str() {
-                "relative" => Some(PositionKind::Relative),
-                "absolute" => Some(PositionKind::Absolute),
-                "fixed" => Some(PositionKind::Fixed),
-                _ => None, // static / sticky unsupported
-            };
+            let trimmed = value.trim();
+            // `position: running(<name>)` takes the element out of flow into a
+            // named slot; it is not a positioning scheme, so `position` itself
+            // stays static.
+            if let Some(name) = parse_functional_ident(trimmed, "running") {
+                target.cell.running = Some(Box::from(name));
+                target.cell.position = None;
+            } else {
+                target.cell.position = match trimmed.to_ascii_lowercase().as_str() {
+                    "relative" => Some(PositionKind::Relative),
+                    "absolute" => Some(PositionKind::Absolute),
+                    "fixed" => Some(PositionKind::Fixed),
+                    _ => None, // static / sticky unsupported
+                };
+            }
         }
         // `auto` (and any non-integer) stays `None`; fractional z-indexes are
         // invalid CSS and likewise ignored.
@@ -6922,6 +7030,7 @@ impl CellStyle {
         self.grid_col_end = other.grid_col_end.or(self.grid_col_end);
         self.float_dir = other.float_dir.or(self.float_dir);
         self.clear = other.clear.or(self.clear);
+        self.running = other.running.clone().or_else(|| self.running.take());
         self.break_before = other.break_before.or(self.break_before);
         self.break_after = other.break_after.or(self.break_after);
         self.position = other.position.or(self.position);
@@ -7726,14 +7835,83 @@ mod tests {
         assert_eq!(document.page_style.margin_boxes.len(), 2);
         let header = &document.page_style.margin_boxes[0];
         assert_eq!(header.area, super::PageMarginBoxArea::TopLeft);
-        assert_eq!(header.content, "\"Acme report\"");
+        assert_eq!(
+            header.content,
+            super::MarginContent::Text("\"Acme report\"".to_string())
+        );
         assert_eq!(header.font_size, Some(8.0));
         assert_eq!(header.color, Some(crate::color::Color::from_rgb_u8(51, 102, 153)));
-        assert_eq!(super::resolve_margin_content(&header.content, 2, 7), Some("Acme report".into()));
+        let text = |margin_box: &super::PageMarginBox| match &margin_box.content {
+            super::MarginContent::Text(raw) => super::resolve_margin_content(raw, 2, 7),
+            super::MarginContent::Element(_) => None,
+        };
+        assert_eq!(text(header), Some("Acme report".into()));
         assert_eq!(
-            super::resolve_margin_content(&document.page_style.margin_boxes[1].content, 2, 7),
+            text(&document.page_style.margin_boxes[1]),
             Some("Page 2 of 7".into())
         );
+    }
+
+    #[test]
+    fn parses_running_elements_and_element_content() {
+        let document = parse(
+            r#"<style>
+                @page {
+                  @top-left { content: element(hdr) }
+                  @bottom-center { content: "Page " counter(page) }
+                }
+                #hdr { position: running(hdr) }
+               </style><div id="hdr">header</div><p>body</p>"#,
+        );
+
+        // The margin box asks for the element; the counter box is unaffected.
+        assert_eq!(
+            document.page_style.margin_boxes[0].content,
+            super::MarginContent::Element("hdr".into())
+        );
+        assert!(matches!(
+            document.page_style.margin_boxes[1].content,
+            super::MarginContent::Text(_)
+        ));
+
+        // The element is registered under its name and removed from flow.
+        assert_eq!(document.running_elements.len(), 1);
+        assert_eq!(&*document.running_elements[0].name, "hdr");
+        let flow = document.flow.as_ref().expect("flow document");
+        let body: String = flow_blocks(flow).iter().map(|b| block_text(b)).collect();
+        assert!(body.contains("body"), "{body:?}");
+        assert!(!body.contains("header"), "running element stayed in flow: {body:?}");
+    }
+
+    #[test]
+    fn running_is_not_a_positioning_scheme_and_is_not_inherited() {
+        let document = parse(
+            r#"<style>#hdr { position: running(hdr) } @page { @top-left { content: element(hdr) } }</style>
+               <div id="hdr">outer<span>inner</span></div><p>body</p>"#,
+        );
+        // Exactly one registration: `running` must not inherit onto the child.
+        assert_eq!(document.running_elements.len(), 1);
+        // And it is not a positioning scheme — the box stays static.
+        assert_eq!(document.running_elements[0].block.position, None);
+    }
+
+    #[test]
+    fn an_unparseable_running_or_element_name_is_ignored() {
+        // A malformed function must not register a slot or silently drop the
+        // whole rule's other declarations.
+        for css in [
+            "#hdr { position: running() }",
+            "#hdr { position: running(2bad) }",
+            "#hdr { position: running(has space) }",
+        ] {
+            let document = parse(&format!("<style>{css}</style><div id=\"hdr\">x</div><p>b</p>"));
+            assert!(document.running_elements.is_empty(), "{css}");
+        }
+        // `content: element()` with no usable name drops the margin box.
+        let document = parse(
+            r#"<style>@page { @top-left { content: element() } }</style><p>b</p>"#,
+        );
+        assert!(document.page_style.margin_boxes.is_empty());
     }
 
     #[test]

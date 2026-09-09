@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      /* CSS GCPM running elements: `position: running(name)` lifts an element
+         out of flow, `content: element(name)` in an @page margin box lays it
+         out there on every page. The counters in the other slot must keep
+         resolving against the final page count. */
+      @page {
+        size: 8.5in 11in;
+        margin: 1in;
+        @top-left {
+          content: element(docHeader);
+        }
+        @top-right {
+          content: element(docStamp);
+        }
+        @bottom-right {
+          content: "Page " counter(page) " of " counter(pages);
+        }
+      }
+      body {
+        font-size: 11pt;
+        margin: 0;
+      }
+      p {
+        margin: 0 0 6pt;
+      }
+      #docHeader {
+        position: running(docHeader);
+        font-size: 10pt;
+      }
+      #docHeader .name {
+        font-weight: bold;
+        color: #336699;
+      }
+      #docStamp {
+        position: running(docStamp);
+        font-size: 8pt;
+        color: #993333;
+      }
+      #unusedHeader {
+        position: running(neverReferenced);
+      }
+      img.logo {
+        width: 24px;
+        height: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="docHeader">
+      <img class="logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGPQTPqPFTEMLQkAR4JigXtGLBoAAAAASUVORK5CYII=" /><span class="name">Northwind</span> Trading
+    </div>
+
+    <div id="docStamp">CONFIDENTIAL</div>
+
+    <!-- Registered but named by no margin box: it must render nowhere. -->
+    <div id="unusedHeader">ORPHANHEADER</div>
+
+    <p>Body paragraph 0. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 1. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 2. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 3. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 4. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 5. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 6. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 7. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 8. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 9. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 10. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 11. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 12. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 13. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 14. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 15. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 16. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 17. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 18. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 19. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 20. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 21. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 22. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 23. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 24. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 25. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 26. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 27. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 28. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 29. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 30. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 31. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 32. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 33. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 34. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 35. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 36. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 37. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 38. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 39. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 40. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 41. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 42. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 43. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 44. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 45. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 46. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 47. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 48. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 49. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 50. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 51. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 52. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 53. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 54. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 55. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 56. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 57. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 58. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 59. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 60. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 61. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 62. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 63. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 64. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 65. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 66. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 67. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 68. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+    <p>Body paragraph 69. Running headers are markup, not a string: this one carries a logo, a bold company name and a two-column band that static text and a counter cannot express.</p>
+  </body>
+</html>

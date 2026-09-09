@@ -1,0 +1,24 @@
+{
+  "fixture": "running-elements",
+  "layer": "features",
+  "description": "CSS GCPM running elements: position: running(name) plus content: element(name) in @page margin boxes. The header is markup (a logo image, a bold coloured name) laid out once and stamped on every page, alongside a counter footer in another slot.",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "Tj", "/Subtype /Image", "W n"],
+    "must_contain_text": [
+      "(Northwind)",
+      "(CONFIDENTIAL)",
+      "(Page 1 of ",
+      "(Page 2 of "
+    ],
+    "page_box": [612, 792],
+    "min_pages": 3,
+    "min_size_bytes": 1500
+  },
+  "visual_assertions": [
+    "Every page carries the Northwind header at the top-left, with its logo image and the bold blue company name, inside the top margin and clear of the body text.",
+    "Every page carries the red CONFIDENTIAL stamp at the top-right of the same band.",
+    "Every page carries a bottom-right 'Page N of M' footer with the final total.",
+    "The header appears once per page, not a second time as body content on page 1.",
+    "ORPHANHEADER never appears: it is running() under a name no margin box asks for."
+  ]
+}

@@ -258,7 +258,11 @@ Works today:
 - **Paged-media running headers, footers, and page numbers**: CSS `@page`
   margin boxes (`@top-left/center/right`, `@bottom-left/center/right`) paint
   static text plus final `counter(page)` / `counter(pages)` values after the
-  document has been paginated.
+  document has been paginated — and **running elements** (CSS GCPM), for a
+  header that is markup rather than a string: `position: running(name)` lifts
+  an element out of flow and `content: element(name)` lays that subtree out in
+  the margin box on every page, so a logo, a stamp or a two-column band works
+  as a header.
 - `<img>` images: JPEG (`DCTDecode` pass-through) and PNG (decoded in-house,
   alpha as a soft mask), from file paths and `data:` URIs, with
   `width`/`height` sizing and aspect-ratio preservation. An image sharing a

@@ -529,7 +529,7 @@ pub fn layout_document(document: &Document, options: &RenderOptions) -> Vec<Page
     } else {
         layout_table_document(document, options)
     };
-    paint_page_margin_boxes(&mut pages, &document.page_style, options);
+    paint_page_margin_boxes(&mut pages, document, options);
     pages
 }
 
@@ -584,14 +584,31 @@ fn layout_table_document(document: &Document, options: &RenderOptions) -> Vec<Pa
 /// page number and `counter(pages)` are known. They live in the already-reserved
 /// page margins and paint above the document body, like browser running headers
 /// and footers.
-fn paint_page_margin_boxes(pages: &mut [Page], style: &PageStyle, options: &RenderOptions) {
+fn paint_page_margin_boxes(pages: &mut [Page], document: &Document, options: &RenderOptions) {
+    let style = &document.page_style;
     if style.margin_boxes.is_empty() {
         return;
     }
     let total = pages.len();
+
+    // A running element's content is page-invariant — it carries no page
+    // counter — so lay each referenced one out exactly once and stamp the
+    // captured commands onto every page.
+    let mut running_slots: Vec<(&crate::html::PageMarginBox, RunningSlot)> = Vec::new();
+    for margin_box in &style.margin_boxes {
+        if let crate::html::MarginContent::Element(name) = &margin_box.content {
+            if let Some(slot) = capture_running_element(name, margin_box.area, document, options) {
+                running_slots.push((margin_box, slot));
+            }
+        }
+    }
+
     for (index, page) in pages.iter_mut().enumerate() {
         for margin_box in &style.margin_boxes {
-            let Some(text) = crate::html::resolve_margin_content(&margin_box.content, index + 1, total) else {
+            let crate::html::MarginContent::Text(raw) = &margin_box.content else {
+                continue;
+            };
+            let Some(text) = crate::html::resolve_margin_content(raw, index + 1, total) else {
                 continue;
             };
             let font_size = margin_box.font_size.unwrap_or(9.0);
@@ -610,7 +627,172 @@ fn paint_page_margin_boxes(pages: &mut [Page], style: &PageStyle, options: &Rend
                 letter_spacing: 0.0,
             }));
         }
+        for (_, slot) in &running_slots {
+            page.commands.extend(slot.commands.iter().cloned());
+            page.lines.extend(slot.lines.iter().cloned());
+            page.rects.extend(slot.rects.iter().cloned());
+            page.link_areas.extend(slot.links.iter().cloned());
+        }
     }
+}
+
+/// A running element laid out once and ready to stamp onto every page.
+struct RunningSlot {
+    commands: Vec<PaintCommand>,
+    lines: Vec<Line>,
+    rects: Vec<Rect>,
+    links: Vec<LinkArea>,
+}
+
+/// Lay a `position: running(<name>)` element out into the `@page` margin slot
+/// `area` and capture its paint commands.
+///
+/// The slot is the full page-margin band on that edge: the content width for
+/// the horizontal extent, and the page margin itself for the height. The
+/// element is laid out at the band's width on a scratch page, then translated
+/// into the band and clipped to it, so a running element taller than the margin
+/// cannot paint over the document body.
+///
+/// The last element registered under `name` wins, matching the CSS rule that a
+/// later `position: running()` replaces an earlier one for the same slot.
+fn capture_running_element(
+    name: &str,
+    area: PageMarginBoxArea,
+    document: &Document,
+    options: &RenderOptions,
+) -> Option<RunningSlot> {
+    let block = document
+        .running_elements
+        .iter()
+        .rev()
+        .find(|element| &*element.name == name)
+        .map(|element| &element.block)?;
+
+    let band_x = options.margin_left;
+    let band_width = (options.page_size.width - options.margin_left - options.margin_right).max(1.0);
+    let is_top = matches!(
+        area,
+        PageMarginBoxArea::TopLeft | PageMarginBoxArea::TopCenter | PageMarginBoxArea::TopRight
+    );
+    // The band is the page margin on that edge, spanning the content width.
+    let (band_bottom, band_height) = if is_top {
+        (
+            options.page_size.height - options.margin_top,
+            options.margin_top,
+        )
+    } else {
+        (0.0, options.margin_bottom)
+    };
+    if band_height <= 0.0 {
+        return None;
+    }
+
+    // Used width: a declared CSS width resolves against the band, otherwise the
+    // element is shrink-to-fit (like a float), so `@top-left` and `@top-right`
+    // can sit at their own edges instead of both spanning the page.
+    let used_width = resolve_len(block.css_width, block.css_width_percent, band_width)
+        .map(|w| {
+            if block.border_box {
+                w.max(block.padding.left + block.padding.right)
+            } else {
+                w + block.padding.left + block.padding.right
+            }
+        })
+        .unwrap_or_else(|| {
+            measure_max_content(&block.children, options)
+                + block.padding.left
+                + block.padding.right
+                + block.margin.left
+                + block.margin.right
+        })
+        .clamp(1.0, band_width);
+
+    // Lay out on a scratch page from a known origin, then translate the whole
+    // fragment into the band — the same capture-and-stamp mechanism
+    // `position: fixed` uses for its per-page overlays.
+    let mut scratch = vec![Page::new()];
+    let scratch_top = options.page_size.height - options.margin_top;
+    let mut scratch_y = scratch_top;
+    let mut carried = 0.0;
+    let mut floats: Vec<FloatBand> = Vec::new();
+    let mut overlays: Vec<Overlay> = Vec::new();
+    layout_block_box(
+        block,
+        0.0,
+        used_width,
+        &mut scratch,
+        &mut scratch_y,
+        &mut carried,
+        &mut floats,
+        &mut overlays,
+        None,
+        options,
+        None,
+    );
+    // A running element is one self-contained fragment: anything that spilled
+    // onto a further scratch page could not fit the margin band anyway.
+    let captured = scratch.swap_remove(0);
+    let used_height = scratch_top - scratch_y;
+    if used_height <= 0.0 {
+        return None;
+    }
+
+    // Horizontal placement inside the band, from the slot's own edge.
+    let dx = band_x
+        + match area {
+            PageMarginBoxArea::TopLeft | PageMarginBoxArea::BottomLeft => 0.0,
+            PageMarginBoxArea::TopCenter | PageMarginBoxArea::BottomCenter => {
+                ((band_width - used_width) / 2.0).max(0.0)
+            }
+            PageMarginBoxArea::TopRight | PageMarginBoxArea::BottomRight => {
+                (band_width - used_width).max(0.0)
+            }
+        };
+    // Vertical: centre the fragment in the band when it fits, else pin it to the
+    // band's outer edge so the clip below trims the overflow away from the body.
+    let slack = ((band_height - used_height) / 2.0).max(0.0);
+    let fragment_top = if is_top {
+        band_bottom + band_height - slack
+    } else {
+        band_bottom + used_height + slack
+    };
+    let dy = fragment_top - scratch_top;
+
+    // Clip to the band: a running element taller than the page margin must not
+    // paint over the document body.
+    let mut commands = Vec::with_capacity(captured.commands.len() + 2);
+    commands.push(PaintCommand::PushClipRect(RectCommand {
+        x: band_x,
+        y: band_bottom,
+        width: band_width,
+        height: band_height,
+    }));
+    commands.extend(
+        captured
+            .commands
+            .iter()
+            .map(|command| translate_command(command, dx, dy)),
+    );
+    commands.push(PaintCommand::PopClip);
+
+    Some(RunningSlot {
+        commands,
+        lines: captured
+            .lines
+            .iter()
+            .map(|line| Line { x: line.x + dx, y: line.y + dy, ..line.clone() })
+            .collect(),
+        rects: captured
+            .rects
+            .iter()
+            .map(|rect| Rect { x: rect.x + dx, y: rect.y + dy, ..*rect })
+            .collect(),
+        links: captured
+            .link_areas
+            .iter()
+            .map(|link| translate_link(link, dx, dy))
+            .collect(),
+    })
 }
 
 fn page_margin_box_position(
@@ -5891,6 +6073,159 @@ mod tests {
         );
     }
 
+    /// Render at Letter and return each page's text, in paint order.
+    fn page_texts(html: &str) -> Vec<String> {
+        let mut document = crate::html::parse(html);
+        crate::html::resolve_images(&mut document, None, &Default::default());
+        let options = RenderOptions::default()
+            .with_paper(super::Paper::Letter)
+            .with_document_hints(&document);
+        layout_document(&document, &options)
+            .iter()
+            .map(|page| {
+                page.commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        PaintCommand::Text(text) => Some(text.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// A document long enough to paginate, with a running element in `slot`.
+    fn running_document(slot: &str, element_css: &str) -> String {
+        let body: String = (0..90)
+            .map(|i| format!("<p>Body paragraph {i} with enough words to fill the page.</p>"))
+            .collect();
+        format!(
+            "<style>@page {{ size: 8.5in 11in; margin: 1in; \
+             @{slot} {{ content: element(hdr) }} }} \
+             #hdr {{ position: running(hdr); {element_css} }}</style>\
+             <div id=\"hdr\">RUNNINGMARK</div>{body}"
+        )
+    }
+
+    #[test]
+    fn a_running_element_repeats_on_every_page() {
+        let pages = page_texts(&running_document("top-left", ""));
+        assert!(pages.len() > 2, "document should paginate: {}", pages.len());
+        for (index, text) in pages.iter().enumerate() {
+            assert!(
+                text.contains("RUNNINGMARK"),
+                "page {} is missing the running header",
+                index + 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_element_leaves_the_body_flow() {
+        // It must appear exactly once per page — from the margin box — and not
+        // a second time on page 1 as ordinary flow content.
+        let pages = page_texts(&running_document("top-left", ""));
+        assert_eq!(pages[0].matches("RUNNINGMARK").count(), 1);
+    }
+
+    #[test]
+    fn running_elements_and_page_counters_coexist() {
+        let body: String = (0..90)
+            .map(|i| format!("<p>Body paragraph {i} with enough words to fill the page.</p>"))
+            .collect();
+        let pages = page_texts(&format!(
+            "<style>@page {{ size: 8.5in 11in; margin: 1in; \
+             @top-left {{ content: element(hdr) }} \
+             @bottom-right {{ content: \"Page \" counter(page) \" of \" counter(pages) }} }} \
+             #hdr {{ position: running(hdr) }}</style>\
+             <div id=\"hdr\">RUNNINGMARK</div>{body}"
+        ));
+        let total = pages.len();
+        for (index, text) in pages.iter().enumerate() {
+            assert!(text.contains("RUNNINGMARK"), "page {}", index + 1);
+            assert!(
+                text.contains(&format!("Page {} of {total}", index + 1)),
+                "page {} counter",
+                index + 1
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreferenced_running_element_paints_nowhere() {
+        // Registered but never pulled into a margin box: it is out of flow and
+        // no slot asks for it, so it simply does not render.
+        let pages = page_texts(
+            "<style>@page { size: 8.5in 11in; margin: 1in }\
+             #hdr { position: running(orphan) }</style>\
+             <div id=\"hdr\">RUNNINGMARK</div><p>BODYMARK</p>",
+        );
+        assert!(pages[0].contains("BODYMARK"));
+        assert!(!pages[0].contains("RUNNINGMARK"));
+    }
+
+    #[test]
+    fn a_running_element_is_placed_in_its_slot() {
+        // Letter, 1in margins: the top band is y 720..792, the bottom band
+        // y 0..72, and the three columns start at the left margin, centred, and
+        // at the right edge.
+        let slot_position = |slot: &str| {
+            let mut document = crate::html::parse(&running_document(slot, ""));
+            crate::html::resolve_images(&mut document, None, &Default::default());
+            let options = RenderOptions::default()
+                .with_paper(super::Paper::Letter)
+                .with_document_hints(&document);
+            let pages = layout_document(&document, &options);
+            pages[0]
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::Text(text) if text.text.contains("RUNNINGMARK") => {
+                        Some((text.x, text.y))
+                    }
+                    _ => None,
+                })
+                .expect("running element painted")
+        };
+
+        for slot in ["top-left", "top-center", "top-right"] {
+            let (_, y) = slot_position(slot);
+            assert!((720.0..=792.0).contains(&y), "{slot} y = {y}");
+        }
+        for slot in ["bottom-left", "bottom-center", "bottom-right"] {
+            let (_, y) = slot_position(slot);
+            assert!((0.0..=72.0).contains(&y), "{slot} y = {y}");
+        }
+        let left = slot_position("top-left").0;
+        let center = slot_position("top-center").0;
+        let right = slot_position("top-right").0;
+        assert!((left - 72.0).abs() < 0.5, "left x = {left}");
+        assert!(left < center && center < right, "{left} {center} {right}");
+    }
+
+    #[test]
+    fn an_over_tall_running_element_is_clipped_to_its_band() {
+        // A running element taller than the page margin must not paint over the
+        // document body: the slot's commands are wrapped in a clip rect.
+        let mut document =
+            crate::html::parse(&running_document("top-left", "height: 400pt; background: #eee"));
+        crate::html::resolve_images(&mut document, None, &Default::default());
+        let options = RenderOptions::default()
+            .with_paper(super::Paper::Letter)
+            .with_document_hints(&document);
+        let pages = layout_document(&document, &options);
+        let clip = pages[0]
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::PushClipRect(rect) => Some(rect.clone()),
+                _ => None,
+            })
+            .expect("running element clipped to its band");
+        assert!((clip.y - 720.0).abs() < 0.5, "clip y = {}", clip.y);
+        assert!((clip.height - 72.0).abs() < 0.5, "clip height = {}", clip.height);
+    }
+
     #[test]
     fn page_size_comes_from_the_at_page_rule() {
         // `@page { size }` reaches layout in every accepted spelling.
@@ -6454,6 +6789,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Line(vec![
@@ -6533,6 +6869,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Line(vec![image_run])],
@@ -7145,6 +7482,7 @@ mod tests {
             images: Vec::new(),
            font_specs: Vec::new(),
            font_faces: Vec::new(),
+           running_elements: Vec::new(),
            links: Vec::new(),
             flow: Some(FlowRoot { children }),
             blocks: Vec::new(),
@@ -7168,6 +7506,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
@@ -7346,6 +7685,7 @@ mod tests {
             images: Vec::new(),
            font_specs: Vec::new(),
            font_faces: Vec::new(),
+           running_elements: Vec::new(),
            links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![para("first"), para("second")],
@@ -7396,6 +7736,7 @@ mod tests {
                 images: Vec::new(),
                 font_specs: Vec::new(),
                 font_faces: Vec::new(),
+                running_elements: Vec::new(),
                 links: Vec::new(),
                 flow: Some(FlowRoot {
                     children: vec![BoxChild::Block(BlockBox {
@@ -7485,6 +7826,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             flow: Some(FlowRoot {
                 children: vec![BoxChild::Block(BlockBox {
@@ -7639,6 +7981,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -7694,6 +8037,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -7736,6 +8080,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -7801,6 +8146,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -7851,6 +8197,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             flow: None,
             blocks: vec![Block {
@@ -7895,6 +8242,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -7957,6 +8305,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -8028,6 +8377,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -8091,6 +8441,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -8138,6 +8489,7 @@ mod tests {
             images: Vec::new(),
             font_specs: Vec::new(),
             font_faces: Vec::new(),
+            running_elements: Vec::new(),
             links: Vec::new(),
             blocks: vec![Block {
                 kind: BlockKind::TableRow,
@@ -8259,6 +8611,7 @@ mod tests {
             images: Vec::new(),
            font_specs: Vec::new(),
            font_faces: Vec::new(),
+           running_elements: Vec::new(),
            links: Vec::new(),
             blocks,
         };
