@@ -2271,13 +2271,17 @@ fn parse_page_geometry(css: &str) -> (PageStyle, TableStyle, Vec<f32>) {
                     if landscape {
                         page.orientation = PageOrientation::Landscape;
                     }
-                    // `size` already has the orientation keyword folded in, so
-                    // a later bare `landscape` rule cannot re-rotate it.
-                    page.size = page.size.or(size);
-                    page.margin_top = page.margin_top.or(margins[0]);
-                    page.margin_right = page.margin_right.or(margins[1]);
-                    page.margin_bottom = page.margin_bottom.or(margins[2]);
-                    page.margin_left = page.margin_left.or(margins[3]);
+                    // Later `@page` rules override earlier ones, declaration by
+                    // declaration, exactly as any other CSS rule cascades — a
+                    // base stylesheet's `@page { margin: 36pt }` followed by the
+                    // document's own `@page { margin: 28.8pt }` must land on
+                    // 28.8pt. (This used to keep the *first* value.) `size`
+                    // already has its orientation keyword folded in.
+                    page.size = size.or(page.size);
+                    page.margin_top = margins[0].or(page.margin_top);
+                    page.margin_right = margins[1].or(page.margin_right);
+                    page.margin_bottom = margins[2].or(page.margin_bottom);
+                    page.margin_left = margins[3].or(page.margin_left);
                     page.margin_boxes.extend(margin_boxes);
                 }
             }
@@ -7948,6 +7952,19 @@ mod tests {
             text(&document.page_style.margin_boxes[1]),
             Some("Page 2 of 7".into())
         );
+    }
+
+    #[test]
+    fn later_at_page_rules_override_earlier_ones() {
+        // Base stylesheet then document stylesheet: the last declaration of
+        // each property wins, and undeclared sides keep the earlier value.
+        let document = parse(
+            r#"<style>@page { margin: 36pt; size: A4 }</style>
+               <style>@page { margin-top: 10pt; size: letter }</style><p>x</p>"#,
+        );
+        assert_eq!(document.page_style.margin_top, Some(10.0));
+        assert_eq!(document.page_style.margin_left, Some(36.0));
+        assert_eq!(document.page_style.size, Some((612.0, 792.0)));
     }
 
     #[test]
