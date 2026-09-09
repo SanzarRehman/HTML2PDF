@@ -54,6 +54,7 @@ const FIXTURES: &[(&str, &str)] = &[
     ("features", "line-height"),
     ("features", "fixed-per-page"),
     ("features", "paged-media"),
+    ("features", "break-inside"),
     ("features", "font-family"),
     ("features", "font-face"),
     ("features", "sizing"),

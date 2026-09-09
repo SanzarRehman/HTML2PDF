@@ -319,7 +319,10 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   anchors) with UA styling (blue + underline; author color and
   `text-decoration: none` respected); headings (`h1`–`h6`) build the PDF
   bookmark tree, nested by level.
-- Pagination, landscape, page margins, PDF compression, selectable text.
+- Pagination, landscape, page margins, PDF compression, selectable text — plus
+  **`break-inside: avoid`** on flow blocks: a card/figure/section that would be
+  cut by the page bottom starts on the next page whole; a box taller than a page
+  starts a fresh page and then breaks, as Chrome does.
 - **Font embedding** — `--font <path|family>` embeds a TrueType/OpenType font
   (real metrics via ttf-parser, family lookup via fontdb) as a Type0/Identity-H
   composite with a ToUnicode CMap, so any Unicode renders and text stays
@@ -362,6 +365,8 @@ tab. Each request is handled on its own worker thread, so it scales across cores
   `align-content`/`wrap-reverse` and the grid axis work — `grid-template-rows`,
   2D `grid-row` placement/spans, `grid-template-areas`, `align-items`/
   `align-self` — shipped.)
+- Forced page breaks (`break-before`/`break-after`), `break-inside: avoid` on
+  table rows and flex/grid items, and `orphans`/`widows`.
 - Images / nested block layout inside table cells; tagged PDF.
 - `@font-face` web fonts; emoji; `dir="auto"` and RTL table cells; `%` heights/
   margins/offsets; `calc()`/custom properties.

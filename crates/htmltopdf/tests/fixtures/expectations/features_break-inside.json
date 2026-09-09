@@ -1,0 +1,17 @@
+{
+  "fixture": "break-inside",
+  "layer": "features",
+  "description": "break-inside: avoid on flow blocks: a bordered box that does not fit the space left on the page starts on a fresh page instead of being cut by the page bottom. Covers a 220pt figure pushed to page 2, a 520pt chart pushed to a page of its own, and a block taller than a whole page, which still starts a fresh page and then breaks inside it (as Chrome does).",
+  "pdf_assertions": {
+    "must_contain_operators": ["BT", "ET", "Tj", "re", "f", "S"],
+    "must_contain_text": ["Figure", "Chart", "Long", "filler"],
+    "min_size_bytes": 1000,
+    "max_size_bytes": 3000000,
+    "min_pages": 5
+  },
+  "visual_assertions": [
+    "Page 1 holds the two intro paragraphs and Figures One and Two; the space left below Figure Two is blank because Figure Three would not fit there whole.",
+    "Figure Three prints whole at the top of page 2, and the 520pt Chart Four prints whole at the top of page 3 \u2014 no bordered box is ever cut by a page boundary.",
+    "The Too Long block is taller than one page: it starts at the top of page 4 and breaks inside, continuing onto page 5."
+  ]
+}

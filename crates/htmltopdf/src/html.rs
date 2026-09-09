@@ -294,6 +294,12 @@ pub struct CellStyle {
     /// padding and borders), `Some(false)` = explicit `content-box`.
     pub border_box: Option<bool>,
     pub overflow: Option<Overflow>,
+    /// `break-inside`: `Some(true)` = an `avoid` value that applies to page
+    /// breaks (`avoid` / `avoid-page`), `Some(false)` = a value that allows them
+    /// (`auto`, or the column/region-only `avoid-column` / `avoid-region`).
+    /// `None` = undeclared, so a stronger rule's `auto` can override a weaker
+    /// rule's `avoid`.
+    pub break_inside_avoid: Option<bool>,
     pub font_size: Option<f32>,
     /// First usable family from CSS `font-family` (inherited): a concrete name
     /// or a generic keyword (`serif`, `monospace`, …). `None` = document font.
@@ -436,6 +442,7 @@ impl Default for CellStyle {
             border_sides: None,
             border_box: None,
             overflow: None,
+            break_inside_avoid: None,
             font_size: None,
             font_family: None,
             italic: None,
@@ -1837,6 +1844,7 @@ fn build_block(
             .map(|s| edges_pct(s.margin_percent))
             .unwrap_or_default(),
         overflow_hidden: own.overflow == Some(Overflow::Hidden),
+        break_inside_avoid: own.break_inside_avoid.unwrap_or(false),
         center: own.margin_left_auto && own.margin_right_auto,
         line_height: own.line_height,
         rtl: base_rtl,
@@ -3138,6 +3146,7 @@ fn inherit_style(parent: &CellStyle, own: &CellStyle) -> CellStyle {
         border_sides: own.border_sides.clone(),
         border_box: own.border_box,
         overflow: own.overflow,
+        break_inside_avoid: own.break_inside_avoid,
         width: own.width,
         width_percent: own.width_percent,
         height: own.height,
@@ -6249,6 +6258,16 @@ fn apply_style_declaration(target: &mut DeclarationLayer, property: &str, value:
         {
             target.cell.overflow = Some(Overflow::Hidden);
         }
+        // CSS Fragmentation `break-inside`. Only the page-fragmentation values
+        // matter here: `avoid` and `avoid-page` keep the box whole, everything
+        // else (`auto`, and the column/region-only `avoid-column` /
+        // `avoid-region`) allows a page break.
+        "break-inside" => {
+            let keyword = value.trim();
+            target.cell.break_inside_avoid = Some(
+                keyword.eq_ignore_ascii_case("avoid") || keyword.eq_ignore_ascii_case("avoid-page"),
+            );
+        }
         "white-space" if value.eq_ignore_ascii_case("nowrap") => {
             target.cell.white_space = Some(WhiteSpace::NoWrap);
         }
@@ -6844,6 +6863,7 @@ impl CellStyle {
         };
         self.border_box = other.border_box.or(self.border_box);
         self.overflow = other.overflow.or(self.overflow);
+        self.break_inside_avoid = other.break_inside_avoid.or(self.break_inside_avoid);
         self.font_size = other.font_size.or(self.font_size);
         self.font_family = other.font_family.or(self.font_family.take());
         self.italic = other.italic.or(self.italic);
@@ -8172,6 +8192,44 @@ mod tests {
         assert_eq!(plain.padding_percent, crate::box_tree::EdgesPercent::default());
         assert_eq!(plain.min_width, None);
         assert!((plain.padding.left - 6.0).abs() < 0.01, "8px → 6pt");
+    }
+
+    #[test]
+    fn parses_break_inside_values() {
+        let document = parse(
+            r#"
+            <style>
+              .avoided { break-inside: avoid; }
+              .paged { break-inside: avoid-page; }
+              .columns { break-inside: avoid-column; }
+              .reset { break-inside: avoid; }
+              div.reset { break-inside: auto; }
+            </style>
+            <div class="avoided">avoided</div>
+            <div class="paged">paged</div>
+            <div class="columns">columns</div>
+            <div class="reset">reset</div>
+            <div>plain</div>
+            "#,
+        );
+        let flow = document.flow.expect("flow doc");
+        let blocks = flow_blocks(&flow);
+        let avoids = |text: &str| {
+            blocks
+                .iter()
+                .find(|b| block_text(b) == text)
+                .unwrap_or_else(|| panic!("{text} block"))
+                .break_inside_avoid
+        };
+
+        // Values that avoid a page break.
+        assert!(avoids("avoided"));
+        assert!(avoids("paged"));
+        // Column-only avoidance says nothing about page breaks.
+        assert!(!avoids("columns"));
+        // An explicit `auto` from a more specific rule overrides an `avoid`.
+        assert!(!avoids("reset"));
+        assert!(!avoids("plain"));
     }
 
     #[test]
