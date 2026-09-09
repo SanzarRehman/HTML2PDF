@@ -1684,23 +1684,30 @@ fn build_block(
     // instead of the old absolute paragraph spacing (h1 had zero top margin).
     // Other blocks keep the absolute per-kind spacing.
     let heading_margin = heading_margin_em(kind).map(|em| font_size * em);
+    // The UA `body { margin: 8px }` every browser applies, on all four sides.
+    // Authored CSS (including `body { margin: 0 }`) overrides it per side.
+    let body_margin = (tag == "body").then_some(BODY_UA_MARGIN);
     let margin = crate::box_tree::Edges {
         top: own.margin_top.unwrap_or_else(|| {
-            if no_default_margin {
-                0.0
-            } else {
-                heading_margin.unwrap_or_else(|| crate::layout::spacing_before(kind))
-            }
+            body_margin.unwrap_or_else(|| {
+                if no_default_margin {
+                    0.0
+                } else {
+                    heading_margin.unwrap_or_else(|| crate::layout::spacing_before(kind))
+                }
+            })
         }),
-        right: own.margin_right.unwrap_or(0.0),
+        right: own.margin_right.or(body_margin).unwrap_or(0.0),
         bottom: own.margin_bottom.unwrap_or_else(|| {
-            if no_default_margin {
-                0.0
-            } else {
-                heading_margin.unwrap_or_else(|| crate::layout::spacing_after(kind))
-            }
+            body_margin.unwrap_or_else(|| {
+                if no_default_margin {
+                    0.0
+                } else {
+                    heading_margin.unwrap_or_else(|| crate::layout::spacing_after(kind))
+                }
+            })
         }),
-        left: own.margin_left.unwrap_or(0.0) + nesting_indent,
+        left: own.margin_left.or(body_margin).unwrap_or(0.0) + nesting_indent,
     };
     // Border widths consume layout space like padding (content sits inside
     // them), so they fold into the padding edges here; the painted background
@@ -2174,6 +2181,11 @@ fn block_kind_for(tag: &str) -> BlockKind {
 
 /// Block-level tags that open their own box. Everything else is treated as
 /// inline (its text joins the enclosing line box).
+/// The UA stylesheet's `body { margin: 8px }`, in points (8 CSS px at 96dpi).
+/// Browsers apply it to every document; without it our content sat 6pt left of
+/// and above Chrome's on every fixture.
+pub(crate) const BODY_UA_MARGIN: f32 = 8.0 * 0.75;
+
 fn is_block_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -2204,6 +2216,10 @@ fn is_block_tag(tag: &str) -> bool {
             | "dd"
             | "form"
             | "fieldset"
+            // The document body is a block box like any other. Without this it
+            // was treated as inline, and every `body { margin }`, `padding` and
+            // `background` — authored or UA-default — was silently dropped.
+            | "body"
     )
 }
 
@@ -7090,8 +7106,21 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        walk(&flow.children, &mut out);
+        walk(body_content(&flow.children), &mut out);
         out
+    }
+
+    /// The document content, below the `<body>` box.
+    ///
+    /// html5ever always synthesizes a `<body>`, and it is a real block box (it
+    /// carries the UA `margin: 8px` and any authored background/padding), so a
+    /// parsed tree is a single root block wrapping everything. These tests are
+    /// about what is inside it.
+    fn body_content(children: &[BoxChild]) -> &[BoxChild] {
+        match children {
+            [BoxChild::Block(body)] => &body.children,
+            other => other,
+        }
     }
 
     /// The block's directly-contained inline text (its own line boxes only),

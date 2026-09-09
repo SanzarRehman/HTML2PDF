@@ -5882,6 +5882,17 @@ mod tests {
         RenderOptions,
     };
 
+    /// The containing block a parsed document's top-level blocks actually see:
+    /// the page content box inset by the UA `body { margin: 8px }`. Returns
+    /// `(left, width)`.
+    fn body_box(options: &RenderOptions) -> (f32, f32) {
+        let inset = crate::html::BODY_UA_MARGIN;
+        (
+            options.margin_left + inset,
+            options.page_size.width - options.margin_left - options.margin_right - 2.0 * inset,
+        )
+    }
+
     /// Render a flow document at Letter and count the pages it needs.
     fn page_count(html: &str) -> usize {
         let document = crate::html::parse(html);
@@ -6393,7 +6404,7 @@ mod tests {
                 _ => None,
             })
             .expect("background fill");
-        let content = options.page_size.width - options.margin_left - options.margin_right;
+        let (_, content) = body_box(&options);
         assert!(
             (fill.width - (content - 100.0)).abs() < 1.0,
             "calc(100% - 100pt) should be ~{}pt, got {}",
@@ -6440,9 +6451,9 @@ mod tests {
             .iter()
             .find(|l| l.text == "indented")
             .expect("text line");
-        let content_left = options.margin_left;
+        let (content_left, content_width) = body_box(&options);
         let indent = line.x - content_left;
-        let expected = 0.10 * (options.page_size.width - options.margin_left - options.margin_right);
+        let expected = 0.10 * content_width;
         assert!(
             (indent - expected).abs() < 2.0,
             "expected ~{expected}pt percent indent, got {indent}"
@@ -6637,8 +6648,13 @@ mod tests {
         let header = find("header");
         let second = find("second");
         let third = find("third");
-        assert_eq!(header.x, 48.0, "full-row item starts at track 1");
-        assert!((second.x - 148.0).abs() < 0.5, "explicit column 2: {}", second.x);
+        let (content_left, _) = body_box(&options);
+        assert_eq!(header.x, content_left, "full-row item starts at track 1");
+        assert!(
+            (second.x - (content_left + 100.0)).abs() < 0.5,
+            "explicit column 2: {}",
+            second.x
+        );
         assert!(third.x > second.x + 150.0, "auto-placed after the pinned item");
         assert!(second.y < header.y, "explicit placement moved below the full-row header");
         assert_eq!(second.y, third.y, "second and third share a row");
@@ -6666,7 +6682,8 @@ mod tests {
         let mut rights: Vec<f32> = rows.into_iter().rev().map(|(_, r)| r).collect();
         assert!(rights.len() >= 3, "need several lines: {}", rights.len());
         let last = rights.pop().unwrap();
-        let margin_right_edge = options.page_size.width - options.margin_right;
+        let (content_left, content_width) = body_box(&options);
+        let margin_right_edge = content_left + content_width;
         for right in &rights {
             assert!(
                 (right - margin_right_edge).abs() < 1.0,
@@ -7109,7 +7126,8 @@ mod tests {
         // the vertical gap between "first" and "after" matches two unshifted
         // paragraph advances regardless of the nudge.
         let nudged = find("nudged");
-        assert!((nudged.x - (options.margin_left + 30.0)).abs() < 1.0);
+        let (content_left, _) = body_box(&options);
+        assert!((nudged.x - (content_left + 30.0)).abs() < 1.0, "x {}", nudged.x);
         let first = find("first");
         let after = find("after");
         let gap_first_nudgedless = first.y - after.y;
@@ -7259,10 +7277,10 @@ mod tests {
         let lines = &pages[0].lines;
         let find = |t: &str| lines.iter().find(|l| l.text.contains(t)).unwrap();
 
-        let content = options.page_size.width - options.margin_left - options.margin_right; // 499
+        let (content_left, content) = body_box(&options);
         // width: 50% + margin auto → the box starts at the centering offset.
         let centered = find("centered");
-        let expected_x = options.margin_left + (content - content * 0.5) / 2.0;
+        let expected_x = content_left + (content - content * 0.5) / 2.0;
         assert!(
             (centered.x - expected_x).abs() < 1.0,
             "centered x {} vs expected {expected_x}",
@@ -7270,7 +7288,7 @@ mod tests {
         );
         // width: 25% without auto margins stays left-aligned.
         let quarter = find("quarter");
-        assert!((quarter.x - options.margin_left).abs() < 1.0, "x {}", quarter.x);
+        assert!((quarter.x - content_left).abs() < 1.0, "x {}", quarter.x);
 
         // max-width: 100pt wraps the long text: every capped line stays inside
         // 100pt, and there are several of them.
@@ -7310,7 +7328,8 @@ mod tests {
         let badge = find("BADGE");
         let body = find("card");
         // left:0 → the card's content edge, not the page margin.
-        assert!((badge.x - (options.margin_left + 60.0)).abs() < 1.0, "x {}", badge.x);
+        let (content_left, _) = body_box(&options);
+        assert!((badge.x - (content_left + 60.0)).abs() < 1.0, "x {}", badge.x);
         // top:0 → the card's top edge: the badge overlays the card's first line,
         // far below the page top it would sit at without the positioned ancestor.
         assert!((badge.y - body.y).abs() < 2.0, "badge y {} vs body y {}", badge.y, body.y);
@@ -7378,7 +7397,7 @@ mod tests {
         let options = RenderOptions::default();
         let pages = layout_document(&document, &options);
         let xs: Vec<f32> = pages[0].lines.iter().map(|l| l.x).collect();
-        let margin = options.margin_left;
+        let (margin, _) = body_box(&options);
         // Some lines are pushed right of the float; later ones return to the margin.
         assert!(xs.iter().any(|&x| x > margin + 90.0), "no narrowed lines: {xs:?}");
         assert!(xs.iter().any(|&x| (x - margin).abs() < 0.5), "no full-width lines: {xs:?}");
